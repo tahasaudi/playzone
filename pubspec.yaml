@@ -1,0 +1,38 @@
+name: playzone
+description: PlayStation & Billiards Café Management System
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # State management
+  flutter_riverpod: ^2.5.1
+
+  # Local database — SQLite via Drift (wired in Phase 1)
+  drift: ^2.16.0
+  sqlite3_flutter_libs: ^0.6.0+eol
+  path_provider: ^2.1.3
+  path: ^1.9.0
+
+  # PIN hashing (Employee authentication) — never store plain-text PINs
+  crypto: ^3.0.3
+
+  # Fonts (Cairo/Tajawal for Arabic UI per spec section 31)
+  google_fonts: ^8.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  drift_dev: ^2.16.0
+  build_runner: ^2.4.9
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
