@@ -663,7 +663,7 @@ class TvDisplayService {
       // the picture actually landed.
       final before = _log(tvIp).imagesServed;
 
-      // Stop, set, play — and `Play` goes out whether or not `Set` said yes.
+      // Set, play — and `Play` goes out whether or not `Set` said yes.
       //
       // These panels answer `SetAVTransportURI` with HTTP 500 and an empty
       // body while going on to fetch and play the image perfectly well.
@@ -672,9 +672,20 @@ class TvDisplayService {
       // television sat on whatever it already had. `Set` only points at the
       // picture; `Play` is what puts it on the wall, and a picture nothing
       // asked to be shown is not shown however contented the reply was.
-      Future<bool> pass(int settleMs) async {
-        await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-        await _settle(ctl, tvIp, settleMs);
+      //
+      // NO `Stop` FIRST. That was the cause of a wall going dark on payment
+      // and springing back to the game a second later: `Stop` is the command
+      // that hands the screen to the console, so opening with it and then
+      // failing left the wall showing the game at exactly the moment it was
+      // supposed to be black. Measured on a 65UP7500PVG: `Set`+`Play` alone
+      // was taken and the picture fetched, while `Stop` then `Set`+`Play` was
+      // not. A screen part-way through a change is the only case that still
+      // needs the stop, and that is what the retry is for.
+      Future<bool> pass(bool stopFirst) async {
+        if (stopFirst) {
+          await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
+          await _settle(ctl, tvIp, 1200);
+        }
         await _soap(ctl, 'SetAVTransportURI',
             '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
             '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
@@ -688,7 +699,7 @@ class TvDisplayService {
       // the only proof that survives a firmware that reports an error while
       // doing the work correctly.
       final log = _log(tvIp);
-      if (await pass(2400)) {
+      if (await pass(false)) {
         _lastPushAt = DateTime.now();
         markReached(tvIp);
         log.refusedAt = null;
@@ -700,10 +711,14 @@ class TvDisplayService {
         return true;
       }
 
-      // Nothing arrived, so this is a real failure and a second try is owed:
-      // the renderer sometimes turns the first request away purely because it
-      // still thinks it is busy with the previous one.
-      if (await pass(1200)) {
+      // Nothing arrived, so this is a real failure and a second try is owed.
+      // The retry is the only place a `Stop` is sent, because that is the one
+      // situation where the screen is genuinely holding on to something else
+      // and needs to be let go of before it can be given something else. It is
+      // also the only situation where the stop is worth its risk, because by
+      // now the first attempt has already failed — so the worst the stop can do
+      // is leave the screen as it already found it.
+      if (await pass(true)) {
         _lastPushAt = DateTime.now();
         markReached(tvIp);
         log.refusedAt = null;
