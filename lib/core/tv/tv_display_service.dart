@@ -73,6 +73,16 @@ class TvDisplayService {
       _server = await HttpServer.bind(InternetAddress.anyIPv4, port,
           shared: false);
       _server!.listen(_handleRequest, onError: (_) {});
+      // Have a frame ready before anyone asks for one. A TV that is sent a
+      // URI for an image that 404s comes back with UPnP error 716
+      // ("Resource not found"), which looks exactly like the TV refusing
+      // us — and we would then write that screen off as unusable when the
+      // real cause was simply that nothing had painted yet.
+      _black ??= await _buildBlackFrame();
+      if (_image == null) {
+        _image = _black;
+        _imageBytes = _black!.length;
+      }
       return true;
     } catch (e) {
       _lastError = 'تعذر فتح البورت $port: $e';
@@ -243,30 +253,48 @@ class TvDisplayService {
     if (_warming.contains(tvIp)) return;
     _warming.add(tvIp);
     try {
-      // Three passes, not twenty. The panel can take a while to boot after a
-      // cold start, but a long retry loop means a 2,100-port sweep every few
-      // seconds, and that background churn is what the cashier feels as
-      // sluggishness. A failed command re-arms discovery, so one screen that
-      // goes quiet does not need us hammering it.
+      // Three quick passes. A panel that is merely asleep needs a moment, and
+      // a long tight retry loop means a 2,100-port sweep every few seconds —
+      // that background churn is exactly what the cashier feels as
+      // sluggishness.
       for (var attempt = 0; attempt < 3; attempt++) {
         if (force) {
           // A manual "look again" must not be blocked by the cooldown.
           _lastDiscoveryAt.remove(tvIp);
           _controlCache.remove(tvIp);
           _dlnaRefused.remove(tvIp);
+          _suspect.remove(tvIp);
         }
         await announce();
         if (await _findControlUrl(tvIp) != null) {
+          _suspect.remove(tvIp);
           if (force) _lastError = null;
           return;
         }
-        if (_dlnaRefused.contains(tvIp)) return;
+        if (refusesDlna(tvIp)) return;
         await Future<void>.delayed(const Duration(seconds: 8));
+      }
+      // Nothing yet — the screen is probably off. Come back a few times on a
+      // slow, self-scheduled rhythm instead of hammering it, so a screen that
+      // powers on overnight is usable by the next session without anyone
+      // touching a button.
+      final rounds = (_keepTrying[tvIp] ?? 0) + 1;
+      if (rounds <= 4) {
+        _keepTrying[tvIp] = rounds;
+        Timer(const Duration(seconds: 45), () {
+          _warming.remove(tvIp);
+          unawaited(warmUp(tvIp: tvIp));
+        });
+      } else {
+        _keepTrying.remove(tvIp);
       }
     } finally {
       _warming.remove(tvIp);
     }
   }
+
+  /// How many slow follow-up passes each screen has used up.
+  final Map<String, int> _keepTrying = {};
 
   /// Whether this screen's endpoint is currently known and still trusted.
   ///
@@ -274,8 +302,9 @@ class TvDisplayService {
   /// reboots, and every re-check used to mean a 2,100-port sweep — so a
   /// one-minute freshness window had the app scanning constantly in the
   /// background, which is exactly what made the whole thing feel sluggish.
-  /// Commands that fail are what invalidate the cache now, not the clock.
+  /// A failed command is what invalidates the cache now, not the clock.
   bool hasControlUrlFor(String tvIp) {
+    if (_suspect.contains(tvIp)) return false;
     final hit = _controlCache[tvIp];
     return hit != null &&
         DateTime.now().difference(hit.$2) < const Duration(minutes: 30);
@@ -288,6 +317,8 @@ class TvDisplayService {
     _controlCache.remove(tvIp);
     _lastDiscoveryAt.remove(tvIp);
     _dlnaRefused.remove(tvIp);
+    _suspect.remove(tvIp);
+    _keepTrying.remove(tvIp);
     _warming.remove(tvIp);
     unawaited(warmUp(tvIp: tvIp, force: true));
   }
@@ -440,14 +471,33 @@ class TvDisplayService {
     }
   }
 
-  /// Screens that answered a push with an error. Once we know one refuses
-  /// DLNA we stop hammering it, so a session start stays fast.
-  final Set<String> _dlnaRefused = {};
+  /// Screens that answered a push with an error, and when they did.
+  ///
+  /// Time-limited on purpose. A push can fail because the TV said no, but it
+  /// fails just as easily because the panel was asleep, or because a firewall
+  /// on this PC stopped the TV from fetching the image (LG then answers with
+  /// UPnP error 716, which reads like a refusal). Treating one bad minute as
+  /// permanent wrote a screen off for the whole day, so the verdict expires
+  /// and the screen is tried again on its own.
+  final Map<String, DateTime> _dlnaRefused = {};
 
-  /// True when this screen has already refused our image.
-  bool refusesDlna(String tvIp) => _dlnaRefused.contains(tvIp);
+  /// How long a refusal is believed before the screen is retried.
+  static const _refusalTtl = Duration(minutes: 10);
 
-  void noteDlnaRefused(String tvIp) => _dlnaRefused.add(tvIp);
+  /// True when this screen has refused our image recently enough to be
+  /// believed, and we should stop hammering it.
+  bool refusesDlna(String tvIp) {
+    final at = _dlnaRefused[tvIp];
+    if (at == null) return false;
+    if (DateTime.now().difference(at) > _refusalTtl) {
+      _dlnaRefused.remove(tvIp);
+      return false;
+    }
+    return true;
+  }
+
+  void noteDlnaRefused(String tvIp) =>
+      _dlnaRefused[tvIp] = DateTime.now();
 
   static const _xmlEscapes = {
     '&': '&amp;',
@@ -696,6 +746,21 @@ class TvDisplayService {
     }
   }
 
+  /// The UPnP fault number inside a SOAP error, if the panel sent one.
+  ///
+  /// 701 "transition not available" and 716 "resource not found" look
+  /// identical from the outside — both are HTTP 500 — and they mean opposite
+  /// things, so the number is what the log needs to carry.
+  static String? _upnpErrorCode(String soapBody) {
+    final m = RegExp(r'<errorCode>(\d+)</errorCode>')
+        .firstMatch(soapBody);
+    if (m == null) return null;
+    final d = RegExp(r'<errorDescription>([^<]*)</errorDescription>')
+        .firstMatch(soapBody);
+    final desc = d?.group(1)?.trim();
+    return desc == null || desc.isEmpty ? m.group(1) : '${m.group(1)} $desc';
+  }
+
   Future<bool> _soap(String controlUrl, String action, String body) async {
     const service = 'urn:schemas-upnp-org:service:AVTransport:1';
     final xml = _soapEnvelope.replaceAll(
@@ -708,26 +773,34 @@ class TvDisplayService {
       req.headers.set('SOAPACTION', '"$service#$action"');
       req.add(utf8.encode(xml));
       final res = await req.close().timeout(const Duration(seconds: 5));
-      await res.drain<void>();
+      // Read the body even on failure: a bare "HTTP 500" says nothing, while
+      // the UPnP fault inside says exactly what went wrong. 716 means the
+      // panel could not fetch our image (a network problem on this PC);
+      // 701 means it is mid-transition and will accept the command in a
+      // moment. Those two call for completely different fixes, and guessing
+      // between them is what made this look like an uncooperative TV.
+      final payload = await res.transform(utf8.decoder).join();
       client.close();
       if (res.statusCode >= 400) {
-        _lastError = '$action -> HTTP ${res.statusCode}';
-        // A 404 or a connection failure almost always means the TV rebooted
-        // into a different renderer port. Drop the cache so the next command
-        // rediscovers it, instead of waiting for a timer to notice.
+        final code = _upnpErrorCode(payload);
+        _lastError = code == null
+            ? '$action -> HTTP ${res.statusCode}'
+            : '$action -> HTTP ${res.statusCode} (UPnP $code)';
+        // A 404 almost always means the TV rebooted into a different renderer
+        // port. Mark the endpoint as needing a re-check rather than deleting
+        // it: a sweep costs 2,100 ports, while re-trying the address we have
+        // costs one request and is right again the moment the panel is up.
         if (res.statusCode == 404) {
-          final host = Uri.parse(controlUrl).host;
-          if (host.isNotEmpty) {
-            _controlCache.remove(host);
-            _lastDiscoveryAt.remove(host);
-          }
+          _noteSuspect(controlUrl);
         }
-        // LG answers 500 for everything when it will not take media from us
-        // (seen on the 65UP7500PVG). Remember that so we stop retrying and
-        // the cashier is not left waiting on a command that cannot work.
+        // LG answers 500 when it will not take media from us — most often
+        // because it could not fetch the image (UPnP error 716), which is a
+        // network problem on our side as often as it is the TV saying no.
+        // Remember it so we stop hammering the screen, but only for as long
+        // as the verdict is worth anything.
         if (res.statusCode >= 500 && controlUrl.contains('://')) {
           final host = Uri.parse(controlUrl).host;
-          if (host.isNotEmpty) _dlnaRefused.add(host);
+          if (host.isNotEmpty) noteDlnaRefused(host);
         }
         return false;
       }
@@ -738,16 +811,33 @@ class TvDisplayService {
       return true;
     } catch (e) {
       _lastError = '$action: $e';
-      // Same reasoning as the 404 above: a TV that has rebooted onto a new
-      // port is unreachable, not broken. Forget the stale endpoint.
-      final host = Uri.tryParse(controlUrl)?.host;
-      if (host != null && host.isNotEmpty) {
-        _controlCache.remove(host);
-        _lastDiscoveryAt.remove(host);
-      }
+      // An unreachable endpoint is almost always a panel that is asleep, not
+      // a screen that moved. Keep the address and let a re-check decide.
+      _noteSuspect(controlUrl);
       return false;
     }
   }
+
+  /// Flags the screen behind [controlUrl] as needing a fresh look, without
+  /// throwing the address away.
+  ///
+  /// Deleting the entry outright was the bug that took device 2 down: one
+  /// command sent while the panel was still booting erased a working
+  /// endpoint, and recovery needed a full port sweep — which is the very
+  /// thing we refuse to do on a command path. A screen that is merely
+  /// unreachable comes back on the same port, so we keep it and try again.
+  void _noteSuspect(String controlUrl) {
+    final host = Uri.tryParse(controlUrl)?.host;
+    if (host == null || host.isEmpty) return;
+    if (_suspect.add(host)) {
+      // Re-discovery runs in the background, is per-screen, and is guarded by
+      // the cooldown, so a dead screen cannot start a sweep per command.
+      if (!_warming.contains(host)) unawaited(warmUp(tvIp: host));
+    }
+  }
+
+  /// Screens whose cached endpoint is known to be wrong and needs a sweep.
+  final Set<String> _suspect = {};
 
   static const _contentDirectoryScpd = '''
 <?xml version="1.0" encoding="utf-8"?>
@@ -929,7 +1019,8 @@ class TvDisplayService {
           '--- screens ---\n'
           'config=${configSummary()}\n'
           'known=$controlSummary\n'
-          'refusesDlna=${_dlnaRefused.join(",")}\n'
+          'suspect=${_suspect.join(",")}\n'
+          'refusesDlna=${_dlnaRefused.keys.where(refusesDlna).join(",")}\n'
           'controlUrl=${_controlCache.values.isEmpty ? "none" : _controlCache.values.first.$1}\n');
       await res.close();
       return;
