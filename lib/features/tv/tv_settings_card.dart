@@ -44,9 +44,51 @@ class _TvSettingsCardState extends ConsumerState<TvSettingsCard> {
     final devices = ref.watch(devicesWithTypeProvider).valueOrNull ??
         const <DeviceWithType>[];
 
+    /// True when a screen has somewhere to talk to but nothing tells it when
+    /// to act — the one broken state that looks perfectly configured.
+    bool unbound(TvConfig c, String address, int? deviceId) =>
+        address.trim().isNotEmpty && deviceId == null;
+
+    bool _hasUnboundScreen(TvConfig c) =>
+        unbound(c, c.ip, c.deviceId) ||
+        (c.hasSecond && unbound(c, c.secondIp, c.secondDeviceId));
+
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // A screen with an address but no machine attached is configured,
+        // looks fine, and does nothing: it never wakes on a session and never
+        // releases when one starts. This is silent otherwise, and it cost an
+        // evening of blaming the TV. Say it on the screen instead.
+        if (config.enabled && _hasUnboundScreen(config)) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(AppSpacing.sm),
+            margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+            decoration: BoxDecoration(
+              color: AppColors.danger.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(AppSpacing.sm),
+              border: Border.all(
+                  color: AppColors.danger.withValues(alpha: 0.5)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.warning_amber_rounded,
+                    color: AppColors.danger, size: 18),
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Text(
+                    'في شاشة عليها IP بس مش مربوطة بجهاز — '
+                    'هتفضل سودا طول الوقت. اختار الجهاز من القايمة.',
+                    style: TextStyle(
+                        color: AppColors.textPrimary, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         Row(
           children: [
             Expanded(
@@ -86,12 +128,16 @@ class _TvSettingsCardState extends ConsumerState<TvSettingsCard> {
                     const TextStyle(color: AppColors.textPrimary, fontSize: 13),
                 dropdownColor: AppColors.bgElevated,
                 decoration: const InputDecoration(isDense: true),
-                hint: const Text('كل الأجهزة',
+                hint: const Text('مفيش جهاز',
                     style: TextStyle(color: AppColors.textTertiary, fontSize: 13)),
                 items: [
+                  // Previously this read "كل الأجهزة (اللي شغال)", which is
+                  // what it does NOT do: an unbound screen is never steered,
+                  // so it stays black through every session while looking
+                  // configured. The label now says what actually happens.
                   const DropdownMenuItem<int?>(
                     value: null,
-                    child: Text('كل الأجهزة (اللي شغال)',
+                    child: Text('مفيش جهاز (الشاشة مش هتتشال)',
                         style: TextStyle(fontSize: 13)),
                   ),
                   for (final d in devices)
@@ -313,9 +359,12 @@ class _ScreenRow extends StatelessWidget {
                 labelStyle: TextStyle(fontSize: 11),
               ),
               items: [
+                // An unbound screen is never steered, so it stays black
+                // through every session. Say that here rather than letting
+                // it look like a valid choice.
                 const DropdownMenuItem<int?>(
                   value: null,
-                  child: Text('ما فيش جهاز محدد',
+                  child: Text('مفيش جهاز — مش هتتشال',
                       style: TextStyle(fontSize: 12)),
                 ),
                 for (final d in devices)

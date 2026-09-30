@@ -31,6 +31,17 @@ void main() {
   put('tv_device_id', '${ps4 ?? 'all'}');
   put('tv_ip_2', '192.168.1.31');
   put('tv_device_id_2', '${ps5 ?? 'all'}');
+  // The device lookup above matches on the exact trimmed name, so "2" finds
+  // id 9 and not the retired "02" row. If either lookup comes back empty we
+  // say so loudly instead of writing the unbound sentinel — that is what left
+  // the 55" wall screen black through every session.
+  if (ps4 == null || ps5 == null) {
+    print('');
+    print('!! Could not find the machine by name - NOT writing the binding.');
+    print('   Run tool/check_sessions.dart to see the device list before guessing.');
+    db.dispose();
+    return;
+  }
   put('tv_enabled', '1');
   put('tv_show_cards', '0');
 

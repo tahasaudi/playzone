@@ -130,9 +130,13 @@ class _AppShellState extends ConsumerState<AppShell> {
     // background — we only discover the renderers while the app is idle so
     // the first session of the day does not pay for a port scan.
     final tvConfig = ref.watch(tvConfigProvider);
+    // An unbound screen prints as UNBOUND, never "all". It used to print
+    // "all", which reads as "follows every machine" when it in fact means
+    // "follows nothing" — and that misreading is what left a wall screen
+    // sitting black through every session while looking configured.
     TvDisplayService.configSummary = () => tvConfig.enabled
-        ? 'on | ${tvConfig.ip}->${tvConfig.deviceId ?? "all"}'
-            '${tvConfig.hasSecond ? " | ${tvConfig.secondIp}->${tvConfig.secondDeviceId ?? "all"}" : ""}'
+        ? 'on | ${tvConfig.ip}->${tvConfig.deviceId ?? "UNBOUND"}'
+            '${tvConfig.hasSecond ? " | ${tvConfig.secondIp}->${tvConfig.secondDeviceId ?? "UNBOUND"}" : ""}'
         : 'off';
     if (tvConfig.enabled && tvConfig.addresses.isNotEmpty) {
       final tv = TvDisplayService.instance;
