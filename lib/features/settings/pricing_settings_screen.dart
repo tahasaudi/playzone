@@ -140,12 +140,19 @@ class _PricingSettingsScreenState extends ConsumerState<PricingSettingsScreen>
             const Icon(Icons.tv_rounded,
                 size: 16, color: AppColors.accentSecondary),
             const SizedBox(width: AppSpacing.sm),
-            const Text('شاشة التلفزيون',
+            const Text('شاشات الكافيه',
                 style: TextStyle(
                     fontSize: 13, fontWeight: FontWeight.w600,
                     color: AppColors.textPrimary)),
             const SizedBox(width: AppSpacing.md),
-            Expanded(child: TvSettingsCard()),
+            // The full setup — names, addresses, bindings, live state and the
+            // per-screen buttons — moved to its own page. All that fits here
+            // is the answer to "is anything wrong right now?".
+            Expanded(
+              child: TvHealthSummary(
+                onManage: () => widget.onNavigate?.call('screens'),
+              ),
+            ),
           ],
         ),
       ],

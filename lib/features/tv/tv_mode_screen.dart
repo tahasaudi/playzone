@@ -1,5 +1,4 @@
 ﻿import 'dart:async';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -13,6 +12,7 @@ import '../../core/database/database_provider.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/tv/tv_display_service.dart';
+import '../../core/tv/tv_screen_report.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../data/repositories/device_repository.dart';
 import '../../data/repositories/session_repository.dart';
@@ -32,6 +32,9 @@ class TvConfig {
     this.deviceId,
     this.secondIp = '',
     this.secondDeviceId,
+    this.name = 'الشاشة الأولى (55 بوصة)',
+    this.secondName = 'الشاشة التانية (65 بوصة)',
+    this.loaded = false,
   });
 
   final String ip;
@@ -55,7 +58,45 @@ class TvConfig {
   final String secondIp;
   final int? secondDeviceId;
 
+  /// What the staff call each screen.
+  ///
+  /// Stored, not hardcoded, because "the screen" is ambiguous the moment
+  /// there are two of them and every fault report has to name one. A name
+  /// the café chose is also the only thing that survives being read out over
+  /// the counter: "الشاشة التانية" beats "192.168.1.31".
+  final String name;
+  final String secondName;
+
+  /// True once the saved settings have been read.
+  ///
+  /// The notifier starts on hardcoded defaults and replaces them with whatever
+  /// is in the database, so a settings field cannot be seeded before this is
+  /// true without showing the wrong address. Seeding on the flag is what stops
+  /// a field from being typed over mid-edit.
+  final bool loaded;
+
   bool get hasSecond => secondIp.trim().isNotEmpty;
+
+  /// Every screen, in the order they are configured, each already carrying
+  /// its name and its machine.
+  ///
+  /// This is the one list the whole TV layer agrees on. A screen that is not
+  /// in here does not exist as far as the status page, the health panel and
+  /// the session buttons are concerned — which is what stops the app from
+  /// quietly steering a TV nobody can identify.
+  List<TvScreenIdentity> get identities => [
+        TvScreenIdentity(
+          ip: ip.trim(),
+          name: name,
+          deviceId: deviceId,
+        ),
+        if (hasSecond)
+          TvScreenIdentity(
+            ip: secondIp.trim(),
+            name: secondName,
+            deviceId: secondDeviceId,
+          ),
+      ];
 
   /// The address of the screen that follows [deviceId], or null when no
   /// screen is bound to that machine.
@@ -82,6 +123,9 @@ class TvConfig {
     int? deviceId,
     String? secondIp,
     int? secondDeviceId,
+    String? name,
+    String? secondName,
+    bool? loaded,
     bool clearDevice = false,
     bool clearSecondDevice = false,
   }) =>
@@ -95,6 +139,9 @@ class TvConfig {
         secondDeviceId: clearSecondDevice
             ? null
             : (secondDeviceId ?? this.secondDeviceId),
+        name: name ?? this.name,
+        secondName: secondName ?? this.secondName,
+        loaded: loaded ?? this.loaded,
       );
 }
 
@@ -109,6 +156,8 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
   static const cardsKey = 'tv_show_cards';
   static const secondIpKey = 'tv_ip_2';
   static const secondDeviceKey = 'tv_device_id_2';
+  static const nameKey = 'tv_name';
+  static const secondNameKey = 'tv_name_2';
 
   Future<void> load() async {
     final ip = await _db.settingsDao.getValue(ipKey);
@@ -117,6 +166,8 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     final cards = await _db.settingsDao.getValue(cardsKey);
     final ip2 = await _db.settingsDao.getValue(secondIpKey);
     final device2 = await _db.settingsDao.getValue(secondDeviceKey);
+    final name = await _db.settingsDao.getValue(nameKey);
+    final name2 = await _db.settingsDao.getValue(secondNameKey);
     if (ip != null && ip.isNotEmpty) {
       state = state.copyWith(
         ip: ip,
@@ -125,12 +176,19 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
         deviceId: _parseDevice(device),
         secondIp: ip2 ?? '',
         secondDeviceId: _parseDevice(device2),
+        // An empty stored name falls back to the shipped default rather than
+        // to an empty string: a screen with no name is a screen nobody can
+        // point at, which is the exact problem this is meant to solve.
+        name: (name == null || name.trim().isEmpty) ? null : name.trim(),
+        secondName:
+            (name2 == null || name2.trim().isEmpty) ? null : name2.trim(),
       );
     } else {
       // First run: remember the detected TV so the push starts on its own.
       setIp(state.ip);
       setEnabled(true);
     }
+    state = state.copyWith(loaded: true);
   }
 
   static int? _parseDevice(String? raw) =>
@@ -165,6 +223,21 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     final clean = value.trim();
     state = state.copyWith(secondIp: clean);
     _db.settingsDao.setValue(secondIpKey, clean);
+  }
+
+  /// What the staff call the first screen. An empty name is stored as the
+  /// default rather than as nothing, so the screen can never end up nameless.
+  void setName(String value) {
+    final clean = value.trim().isEmpty ? 'الشاشة الأولى' : value.trim();
+    state = state.copyWith(name: clean);
+    _db.settingsDao.setValue(nameKey, clean);
+  }
+
+  /// What the staff call the second screen.
+  void setSecondName(String value) {
+    final clean = value.trim().isEmpty ? 'الشاشة التانية' : value.trim();
+    state = state.copyWith(secondName: clean);
+    _db.settingsDao.setValue(secondNameKey, clean);
   }
 
   void setIp(String value) {
@@ -226,6 +299,63 @@ class TvStatus {
   final int imageBytes;
   final int imagesServed;
 }
+
+/// A live, named verdict for every wall screen.
+///
+/// Deliberately auto-disposed: the probes only run while somebody is actually
+/// looking at the page, so closing it puts the network completely quiet. The
+/// tick is one second because "3 minutes ago" must be true on screen, and the
+/// real transport read is far rarer — one request per screen every fifteen
+/// seconds, in the background, so a session start never waits for it.
+final tvScreenReportsProvider =
+    StreamProvider.autoDispose<List<TvScreenReport>>((ref) async* {
+  final service = TvDisplayService.instance;
+  final config = ref.watch(tvConfigProvider);
+  // Which machines are busy right now. This is what separates "the panel is
+  // asleep, which is normal" from "the panel is asleep while somebody pays".
+  final sessions = ref.watch(activeSessionsProvider).valueOrNull ??
+      const <SessionBoardEntry>[];
+  final running = {
+    for (final s in sessions) s.device.id,
+  };
+  final devices = ref.watch(devicesWithTypeProvider).valueOrNull ??
+      const <DeviceWithType>[];
+
+  List<TvScreenIdentity> buildIdentities() => [
+        for (final slot in config.identities)
+          TvScreenIdentity(
+            ip: slot.ip,
+            name: slot.name,
+            deviceId: slot.deviceId,
+            deviceName: slot.deviceId == null
+                ? null
+                : devices
+                    .where((d) => d.device.id == slot.deviceId)
+                    .map((d) => '${d.type.name} — ${d.device.name}')
+                    .firstOrNull,
+            sessionRunning: slot.deviceId != null && running.contains(slot.deviceId),
+          ),
+      ];
+
+  TvDisplayService.screenIdentities = buildIdentities();
+  TvDisplayService.featureEnabled = config.enabled;
+
+  var sinceProbe = Duration.zero;
+  while (true) {
+    // Keep the injected identities fresh so a rename or a re-bind shows up
+    // without a restart.
+    TvDisplayService.screenIdentities = buildIdentities();
+    if (sinceProbe >= const Duration(seconds: 15)) {
+      sinceProbe = Duration.zero;
+      unawaited(service.probeAll(
+        config.addresses.toList(growable: false),
+      ));
+    }
+    yield service.reports();
+    await Future<void>.delayed(const Duration(seconds: 1));
+    sinceProbe += const Duration(seconds: 1);
+  }
+});
 
 /// The customer-facing screen: a clean card per running session, big
 /// enough to read from across the room, and mirrored to the LG TV every

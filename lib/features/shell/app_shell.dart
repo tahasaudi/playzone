@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,10 +33,15 @@ import '../refunds/refunds_screen.dart';
 import '../inventory/stock_count_screen.dart';
 import '../reports/protected_screen.dart';
 import '../search/global_search_dialog.dart';
-import '../../core/tv/tv_power_service.dart';
 import '../tv/tv_broadcaster.dart';
 import '../tv/tv_mode_screen.dart';
+import '../tv/tv_screens_page.dart';
+import '../../core/database/daos/device_dao.dart';
+import '../../core/database/daos/session_dao.dart';
 import '../../core/tv/tv_display_service.dart';
+import '../../core/tv/tv_screen_report.dart';
+import '../../data/repositories/device_repository.dart';
+import '../../data/repositories/session_repository.dart';
 import 'sidebar.dart';
 import 'top_bar.dart';
 import 'app_nav_drawer.dart';
@@ -138,6 +145,37 @@ class _AppShellState extends ConsumerState<AppShell> {
         ? 'on | ${tvConfig.ip}->${tvConfig.deviceId ?? "UNBOUND"}'
             '${tvConfig.hasSecond ? " | ${tvConfig.secondIp}->${tvConfig.secondDeviceId ?? "UNBOUND"}" : ""}'
         : 'off';
+
+    // Tell the TV layer who each screen is, by name, and whether the machine
+    // behind it is busy. That is what lets a sleeping panel be reported as the
+    // normal thing it is, while a sleeping panel with a live session is
+    // reported as the fault it is. The screens page does the same through its
+    // own provider; setting it here as well keeps `/status` truthful even with
+    // that page closed.
+    final tvDevices = ref.watch(devicesWithTypeProvider).valueOrNull ??
+        const <DeviceWithType>[];
+    final tvBusy = {
+      for (final s in ref.watch(activeSessionsProvider).valueOrNull ??
+          const <SessionBoardEntry>[])
+        s.device.id,
+    };
+    TvDisplayService.featureEnabled = tvConfig.enabled;
+    TvDisplayService.screenIdentities = [
+      for (final slot in tvConfig.identities)
+        TvScreenIdentity(
+          ip: slot.ip,
+          name: slot.name,
+          deviceId: slot.deviceId,
+          deviceName: slot.deviceId == null
+              ? null
+              : tvDevices
+                  .where((d) => d.device.id == slot.deviceId)
+                  .map((d) => '${d.type.name} — ${d.device.name}')
+                  .firstOrNull,
+          sessionRunning: slot.deviceId != null && tvBusy.contains(slot.deviceId),
+        ),
+    ];
+
     if (tvConfig.enabled && tvConfig.addresses.isNotEmpty) {
       final tv = TvDisplayService.instance;
       if (!tv.isRunning) tv.startServer();
@@ -147,6 +185,22 @@ class _AppShellState extends ConsumerState<AppShell> {
         for (final ip in tvConfig.addresses) {
           if (!tv.hasControlUrlFor(ip)) tv.warmUp(tvIp: ip);
         }
+      }
+      // Ask each screen once after startup, so the screens page can answer with a
+      // fact instead of "we don't know yet". Two small requests, off the
+      // critical path — and without them every screen reads as unproven for
+      // the whole shift, which is the one answer a status panel must never
+      // make someone settle for. Asked twice because a panel that is on but
+      // still finishing its boot has no renderer to answer yet, and reporting
+      // it as unproven would be wrong in the other direction.
+      for (final wait in const [
+        Duration(seconds: 3),
+        Duration(seconds: 20),
+      ]) {
+        unawaited(Future<void>.delayed(wait, () {
+          if (!mounted) return;
+          TvDisplayService.instance.probeAll(tvConfig.addresses.toList());
+        }));
       }
     }
     if (!routeAllowed(_activeRoute, role) && _activeRoute != 'dashboard') {
@@ -228,6 +282,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         );
       case 'tv':
         return const TvModeScreen();
+      case 'screens':
+        return const TvScreensPage();
       case 'tv_full':
         return TvModeScreen(
           fullscreen: true,
@@ -337,6 +393,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         return 'الشاشة المحمية';
       case 'backup':
         return 'النسخ الاحتياطي';
+      case 'screens':
+        return 'شاشات الكافيه';
       default:
         return 'الرئيسية';
     }
@@ -392,6 +450,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         return 'الإيرادات والأرباح والإيراد المتوقع — برقم سري';
       case 'backup':
         return 'نسخ آمنة من قاعدة البيانات';
+      case 'screens':
+        return 'كل شاشة باسمها وحالتها لحظيًا';
       default:
         return 'مساء الخير 👋 — F1';
     }

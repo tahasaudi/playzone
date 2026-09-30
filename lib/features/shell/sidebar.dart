@@ -42,6 +42,7 @@ const List<NavItem> analyticsNavItems = [
 
 const List<NavItem> systemNavItems = [
   NavItem(Icons.settings_rounded, 'الإعدادات', 'settings'),
+  NavItem(Icons.tv_rounded, 'شاشات الكافيه', 'screens'),
   NavItem(Icons.edit_note_rounded, 'إدارة الأسماء', 'names_manager'),
   NavItem(Icons.admin_panel_settings_rounded, 'صلاحيات الموظفين',
       'employee_permissions'),
@@ -56,6 +57,12 @@ bool routeAllowed(String route, UserRole role) {
   switch (route) {
     case 'settings':
       return role.canEditPrices;
+    // The wall screens are shop equipment: a cashier has to be able to see
+    // which one is broken and turn it off, even if only a manager re-binds a
+    // screen to a machine. Gating the whole page would hide the one thing it
+    // exists to show.
+    case 'screens':
+      return true;
     case 'reports':
     case 'statistics':
     case 'audit':

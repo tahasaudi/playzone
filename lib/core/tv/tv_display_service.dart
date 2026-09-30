@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'tv_power_service.dart';
+import 'tv_screen_report.dart';
 
 /// Pushes a still image to an LG (webOS) TV over DLNA / UPnP AVTransport.
 ///
@@ -53,6 +54,89 @@ class TvDisplayService {
   /// Screens with a push in flight. A set, not a flag: the café has two and
   /// one must never cancel the other.
   final Set<String> _pushing = {};
+
+  /// One history per screen, so "which screen is broken" is a lookup instead
+  /// of a guess. Everything that used to be a single shared counter or flag
+  /// lives here now, keyed by address — two TVs writing to one `lastError`
+  /// meant the panel could only ever describe whichever spoke last.
+  final Map<String, TvScreenLog> _screens = {};
+
+  TvScreenLog _log(String tvIp) =>
+      _screens.putIfAbsent(tvIp.trim(), () => TvScreenLog(tvIp.trim()));
+
+  /// Who each screen is, injected by the shell because the names and the
+  /// device bindings live in the settings tables, not here.
+  static List<TvScreenIdentity> screenIdentities = const <TvScreenIdentity>[];
+
+  /// Whether the TV feature is switched on at all — a screen cannot be
+  /// blamed for being dark when the whole feature is off.
+  static bool featureEnabled = true;
+
+  /// A snapshot of every screen, judged and described in plain Arabic.
+  ///
+  /// Falls back to whatever addresses we have touched when the shell has not
+  /// injected the identities yet, so this is never empty and never throws.
+  List<TvScreenReport> reports() {
+    final identities = screenIdentities.isNotEmpty
+        ? screenIdentities
+        : _screens.keys
+            .map((ip) => TvScreenIdentity(ip: ip))
+            .toList(growable: false);
+    final out = <TvScreenReport>[];
+    for (final identity in identities) {
+      final ip = identity.ip.trim();
+      final bound = identity.deviceId;
+      out.add(judgeTvScreen(
+        identity: identity,
+        log: _screens.putIfAbsent(ip, () => TvScreenLog(ip)),
+        featureEnabled: featureEnabled,
+        endpointKnown: hasControlUrlFor(ip),
+        boundDeviceId: bound,
+      ));
+    }
+    // Worst first, so a page full of screens leads with the one that needs
+    // attention rather than burying it under two healthy panels.
+    out.sort((a, b) {
+      final bySeverity = b.severity.index.compareTo(a.severity.index);
+      return bySeverity != 0 ? bySeverity : a.ip.compareTo(b.ip);
+    });
+    return out;
+  }
+
+  /// Records what we asked a screen to do and how it went. Every command
+  /// funnels through here so no screen can be silent.
+  void noteCommand(
+    String tvIp,
+    String command,
+    String result, {
+    bool ok = true,
+    int? tookMs,
+  }) {
+    final log = _log(tvIp);
+    log.lastCommand = command;
+    log.lastCommandAt = DateTime.now();
+    log.lastResult = result;
+    log.lastOk = ok;
+    log.lastTookMs = tookMs;
+    log.note('$command → $result${tookMs == null ? '' : ' (${tookMs}ms)'}',
+        ok: ok);
+  }
+
+  /// Marks a screen as having spoken to us at least once.
+  ///
+  /// One method for every "it answered" moment, because the difference
+  /// between a screen we have never reached and one that has just gone quiet
+  /// is the difference between an open question and a fault — and that
+  /// difference is invisible unless a single place records it.
+  void markReached(String tvIp, {String? state}) {
+    final log = _log(tvIp);
+    log.reachable = true;
+    log.everReached = true;
+    if (state != null) {
+      log.transportState = state;
+      log.stateReadAt = DateTime.now();
+    }
+  }
 
   /// Called with a fresh image every tick. The service re-pushes it.
   final _controller = StreamController<Uint8List>.broadcast();
@@ -202,8 +286,28 @@ class TvDisplayService {
       if (!_warming.contains(tvIp)) unawaited(warmUp(tvIp: tvIp));
       return false;
     }
+    final watch = Stopwatch()..start();
     final ok = await _soap(hit.$1, 'Stop', '<InstanceID>0</InstanceID>');
-    if (ok) _lastPushAt = DateTime.now();
+    watch.stop();
+    if (ok) {
+      _lastPushAt = DateTime.now();
+      // A release that landed means the panel is talking to us, and it means
+      // we are no longer the source — which is the answer to "what is the
+      // screen showing" for as long as it lasts.
+      markReached(tvIp, state: 'STOPPED');
+    } else {
+      // Do NOT keep a stale "reachable" true here. A screen that has stopped
+      // answering has to stop being reported as reachable, or the panel keeps
+      // insisting everything is fine long after it stopped talking.
+      _log(tvIp).reachable = false;
+    }
+    noteCommand(
+      tvIp,
+      'فتح الجلسة',
+      ok ? 'رجعت للبلايستيشن' : 'الأمر ما وصلش',
+      ok: ok,
+      tookMs: watch.elapsedMilliseconds,
+    );
     return ok;
   }
 
@@ -220,7 +324,15 @@ class TvDisplayService {
     }
     await announce();
     await blank();
-    return _pushOnce(tvIp);
+    final watch = Stopwatch()..start();
+    final ok = await _pushOnce(tvIp);
+    watch.stop();
+    if (ok) {
+      markReached(tvIp);
+      noteCommand(tvIp, 'التحصيل', 'اتغمّضت (سودا)',
+          tookMs: watch.elapsedMilliseconds);
+    }
+    return ok;
   }
 
   /// A single SOAP push, for callers that manage their own timing.
@@ -231,6 +343,16 @@ class TvDisplayService {
   void useTv(String ip) => _currentTvIp = ip;
 
   String _currentTvIp = '';
+
+  /// The picture URL handed to one specific screen.
+  ///
+  /// The screen's own address rides in the query string, and the screen
+  /// fetches back exactly the URL it was given — so every `HEAD`/`GET` tells
+  /// us which panel took the frame. Without it `imagesServed` was a single
+  /// number shared by both TVs, which is why "is the picture reaching the
+  /// screen?" could never be answered for one panel at a time.
+  String _imageUriFor(String self, String tvIp) =>
+      'http://$self:$port/tv.jpg?ip=${Uri.encodeQueryComponent(tvIp)}&v=$_revision';
 
   /// The cached AVTransport endpoint for [tvIp], discovering it if needed.
   Future<String?> _controlUrlFor(String tvIp) async {
@@ -320,6 +442,19 @@ class TvDisplayService {
     _suspect.remove(tvIp);
     _keepTrying.remove(tvIp);
     _warming.remove(tvIp);
+    // Drop the stale address from this screen's own history as well, so the
+    // settings page does not keep pointing at an endpoint we just abandoned.
+    final log = _screens[tvIp];
+    if (log != null) {
+      log.controlUrl = null;
+      log.discoveredAt = null;
+      log.refusedAt = null;
+      log.transportState = null;
+      log.stateReadAt = null;
+      log.reachable = false;
+      log.probing = false;
+      log.note('طلبنا بحث جديد عن الشاشة');
+    }
     unawaited(warmUp(tvIp: tvIp, force: true));
   }
 
@@ -427,7 +562,7 @@ class TvDisplayService {
       // A new query string forces the TV to re-fetch instead of using its
       // cached copy of the same URL.
       _revision++;
-      final uri = 'http://$self:$port/tv.jpg?v=$_revision';
+      final uri = _imageUriFor(self, tvIp);
       // LG renderers REJECT the play request with HTTP 500 when
       // CurrentURIMetaData is empty — the DIDL-Lite descriptor is what
       // tells the TV this is a still image it can display. (Verified
@@ -464,6 +599,15 @@ class TvDisplayService {
         _lastPushAt = DateTime.now();
         // Forget a past refusal: this screen clearly accepts us now.
         _dlnaRefused.remove(tvIp);
+        final log = _log(tvIp);
+        log.refusedAt = null;
+        markReached(tvIp);
+        // The image is on its way; the fetch is what proves it arrived, and
+        // that arrives separately as a HEAD then a GET on /tv.jpg.
+        log.lastCommand = 'عرض الصورة';
+        log.lastCommandAt = _lastPushAt;
+        log.lastOk = true;
+        log.lastResult = 'الصورة اتبعتت';
       }
       return ok;
     } finally {
@@ -491,13 +635,21 @@ class TvDisplayService {
     if (at == null) return false;
     if (DateTime.now().difference(at) > _refusalTtl) {
       _dlnaRefused.remove(tvIp);
+      // Expire the mirror on the per-screen log too, or the settings page
+      // would keep showing a refusal that we have already forgiven.
+      _log(tvIp).refusedAt = null;
       return false;
     }
     return true;
   }
 
-  void noteDlnaRefused(String tvIp) =>
-      _dlnaRefused[tvIp] = DateTime.now();
+  void noteDlnaRefused(String tvIp) {
+    _dlnaRefused[tvIp] = DateTime.now();
+    final log = _log(tvIp);
+    // Only stamp the first time: a retry storm must not keep pushing the
+    // "refused since" clock forward and make a ten-minute-old fault look new.
+    log.refusedAt ??= DateTime.now();
+  }
 
   static const _xmlEscapes = {
     '&': '&amp;',
@@ -576,11 +728,26 @@ class TvDisplayService {
     for (final location in locations) {
       final control = await _controlUrlFrom(location);
       if (control != null) {
-        _controlCache[tvIp] = (control, DateTime.now());
+        _rememberEndpoint(tvIp, control);
         return control;
       }
     }
     return null;
+  }
+
+  /// Records where a screen answers, and when we found it out.
+  ///
+  /// The timestamp is what lets the settings page say "we've known this
+  /// address for twenty minutes" — the difference between a screen that has
+  /// been reachable all along and one that needs looking at.
+  void _rememberEndpoint(String tvIp, String control) {
+    _controlCache[tvIp] = (control, DateTime.now());
+    final log = _log(tvIp);
+    if (log.controlUrl != control) {
+      log.controlUrl = control;
+      log.note('اتعرفنا على الشاشة: ${Uri.tryParse(control)?.origin ?? control}');
+    }
+    log.discoveredAt ??= DateTime.now();
   }
 
   /// Tries a list of known device-description URLs in parallel and caches
@@ -590,7 +757,7 @@ class TvDisplayService {
         await Future.wait(candidates.map(_controlUrlFrom), eagerError: false);
     for (final control in controls) {
       if (control != null) {
-        _controlCache[tvIp] = (control, DateTime.now());
+        _rememberEndpoint(tvIp, control);
         _lastLocations = 'known ports';
         return true;
       }
@@ -761,13 +928,22 @@ class TvDisplayService {
     return desc == null || desc.isEmpty ? m.group(1) : '${m.group(1)} $desc';
   }
 
-  Future<bool> _soap(String controlUrl, String action, String body) async {
+  /// Fires one SOAP action and hands back the panel's HTTP status and body.
+  ///
+  /// A null status means the call never completed — the TV holds a SOAP call
+  /// open while it loads, so that is not by itself a failure, which is why
+  /// [reached] separates "we got no answer" from "we could not even connect".
+  /// The two need opposite handling: a silent panel is usually asleep, while
+  /// a refused connection means the address itself is suspect.
+  Future<(int?, String, bool)> _soapRaw(
+      String controlUrl, String action, String body) async {
     const service = 'urn:schemas-upnp-org:service:AVTransport:1';
     final xml = _soapEnvelope.replaceAll(
         '%BODY%',
         '<u:$action xmlns:u="$service"><InstanceID>0</InstanceID>$body</u:$action>');
+    HttpClient? client;
     try {
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
       final req = await client.postUrl(Uri.parse(controlUrl));
       req.headers.set(HttpHeaders.contentTypeHeader, 'text/xml; charset="utf-8"');
       req.headers.set('SOAPACTION', '"$service#$action"');
@@ -780,42 +956,127 @@ class TvDisplayService {
       // moment. Those two call for completely different fixes, and guessing
       // between them is what made this look like an uncooperative TV.
       final payload = await res.transform(utf8.decoder).join();
-      client.close();
-      if (res.statusCode >= 400) {
-        final code = _upnpErrorCode(payload);
-        _lastError = code == null
-            ? '$action -> HTTP ${res.statusCode}'
-            : '$action -> HTTP ${res.statusCode} (UPnP $code)';
-        // A 404 almost always means the TV rebooted into a different renderer
-        // port. Mark the endpoint as needing a re-check rather than deleting
-        // it: a sweep costs 2,100 ports, while re-trying the address we have
-        // costs one request and is right again the moment the panel is up.
-        if (res.statusCode == 404) {
-          _noteSuspect(controlUrl);
-        }
-        // LG answers 500 when it will not take media from us — most often
-        // because it could not fetch the image (UPnP error 716), which is a
-        // network problem on our side as often as it is the TV saying no.
-        // Remember it so we stop hammering the screen, but only for as long
-        // as the verdict is worth anything.
-        if (res.statusCode >= 500 && controlUrl.contains('://')) {
-          final host = Uri.parse(controlUrl).host;
-          if (host.isNotEmpty) noteDlnaRefused(host);
-        }
-        return false;
-      }
-      _lastError = null;
-      return true;
+      return (res.statusCode, payload, true);
     } on TimeoutException {
-      // The TV holds the call while it loads the image — treat as fine.
+      return (null, '', true);
+    } catch (_) {
+      return (null, '', false);
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  Future<bool> _soap(String controlUrl, String action, String body) async {
+    final (status, payload, reached) = await _soapRaw(controlUrl, action, body);
+    final host = Uri.tryParse(controlUrl)?.host ?? '';
+    if (reached && host.isNotEmpty) markReached(host);
+    if (status == null) {
+      // The TV holds the call while it loads the image — treat as fine. But
+      // an endpoint we could not even reach is almost always a panel that
+      // moved or went away, so flag it for a re-check instead of silently
+      // waiting for a command to time out again.
+      if (!reached) _noteSuspect(controlUrl);
       return true;
-    } catch (e) {
-      _lastError = '$action: $e';
-      // An unreachable endpoint is almost always a panel that is asleep, not
-      // a screen that moved. Keep the address and let a re-check decide.
-      _noteSuspect(controlUrl);
+    }
+    if (status >= 400) {
+      final code = _upnpErrorCode(payload);
+      _lastError = code == null
+          ? '$action -> HTTP $status'
+          : '$action -> HTTP $status (UPnP $code)';
+      if (host.isNotEmpty) {
+        final log = _log(host);
+        log.fault = _lastError;
+        log.faultAt = DateTime.now();
+        log.note(_lastError!, ok: false);
+      }
+      // A 404 almost always means the TV rebooted into a different renderer
+      // port. Mark the endpoint as needing a re-check rather than deleting
+      // it: a sweep costs 2,100 ports, while re-trying the address we have
+      // costs one request and is right again the moment the panel is up.
+      if (status == 404) {
+        _noteSuspect(controlUrl);
+      }
+      // LG answers 500 when it will not take media from us — most often
+      // because it could not fetch the image (UPnP error 716), which is a
+      // network problem on our side as often as it is the TV saying no.
+      // Remember it so we stop hammering the screen, but only for as long
+      // as the verdict is worth anything.
+      if (status >= 500 && host.isNotEmpty) {
+        noteDlnaRefused(host);
+      }
       return false;
     }
+    _lastError = null;
+    return true;
+  }
+
+  /// Asks one screen, right now, what it is actually doing — and how long the
+  /// answer took.
+  ///
+  /// This is the only trustworthy answer to "is the screen working?", because
+  /// it is the panel talking, not our cache. Never discovers unless asked to:
+  /// a status check must not put a 2,100-port sweep on the network, which is
+  /// the very thing that made the whole app feel slow.
+  Future<bool> probeTransport(String tvIp, {bool discover = false}) async {
+    final log = _log(tvIp);
+    if (log.probing) return log.reachable;
+    log.probing = true;
+    final watch = Stopwatch()..start();
+    try {
+      var ctl = _controlCache[tvIp]?.$1;
+      if (ctl == null) {
+        if (!discover) {
+          watch.stop();
+          log.pingMs = watch.elapsedMilliseconds;
+          log.reachable = false;
+          return false;
+        }
+        await warmUp(tvIp: tvIp, force: true);
+        ctl = _controlCache[tvIp]?.$1;
+      }
+      if (ctl == null) {
+        watch.stop();
+        log.pingMs = watch.elapsedMilliseconds;
+        log.reachable = false;
+        log.fault = 'مفيش عنوان للشاشة دي على الشبكة';
+        log.faultAt = DateTime.now();
+        return false;
+      }
+      final (status, payload, reached) =
+          await _soapRaw(ctl, 'GetTransportInfo', '');
+      watch.stop();
+      log.pingMs = watch.elapsedMilliseconds;
+      if (status == null || status >= 400) {
+        log.reachable = false;
+        final code = status == null ? null : _upnpErrorCode(payload);
+        log.fault = status == null
+            ? (reached ? 'الشاشة مش بتجاوب' : 'مش قادرين نوصل للشاشة')
+            : 'الحالة: HTTP $status${code == null ? '' : ' (UPnP $code)'}';
+        log.faultAt = DateTime.now();
+        return false;
+      }
+      final state = RegExp(r'<CurrentTransportState>([^<]*)</CurrentTransportState>')
+          .firstMatch(payload)
+          ?.group(1)
+          ?.trim();
+      // The panel answered, which is worth recording even when the answer is
+      // an unhelpful one — an open question about it is now answered.
+      markReached(tvIp, state: state);
+      log.lastOk = true;
+      return true;
+    } finally {
+      log.probing = false;
+    }
+  }
+
+  /// Probes every configured screen in parallel. Cheap enough to sit on a
+  /// timer while the settings page is open, and the reason nobody ever has to
+  /// open a terminal to find out what a screen is doing.
+  Future<void> probeAll(List<String> addresses, {bool discover = false}) async {
+    await Future.wait(addresses
+        .where((ip) => ip.trim().isNotEmpty)
+        .map((ip) => probeTransport(ip, discover: discover)),
+        eagerError: false);
   }
 
   /// Flags the screen behind [controlUrl] as needing a fresh look, without
@@ -829,6 +1090,13 @@ class TvDisplayService {
   void _noteSuspect(String controlUrl) {
     final host = Uri.tryParse(controlUrl)?.host;
     if (host == null || host.isEmpty) return;
+    final log = _log(host);
+    // "The last thing we tried did not land" is its own fact, kept apart from
+    // the transport state: a screen can be perfectly reachable and still have
+    // refused the last command, and those need different fixes.
+    if (log.lastOk) log.note('محتاجة بحث — العنوان القديم مش ماشي', ok: false);
+    log.lastOk = false;
+    log.reachable = false;
     if (_suspect.add(host)) {
       // Re-discovery runs in the background, is per-screen, and is guarded by
       // the cooldown, so a dead screen cannot start a sweep per command.
@@ -1021,7 +1289,11 @@ class TvDisplayService {
           'known=$controlSummary\n'
           'suspect=${_suspect.join(",")}\n'
           'refusesDlna=${_dlnaRefused.keys.where(refusesDlna).join(",")}\n'
-          'controlUrl=${_controlCache.values.isEmpty ? "none" : _controlCache.values.first.$1}\n');
+          'controlUrl=${_controlCache.values.isEmpty ? "none" : _controlCache.values.first.$1}\n'
+          // One block per screen, by name, so a terminal can answer the same
+          // questions the settings page answers — and cannot confuse the two
+          // panels, which a single shared set of counters never could.
+          '${reports().map(_reportBlock).join()}');
       await res.close();
       return;
     }
@@ -1098,7 +1370,14 @@ class TvDisplayService {
     res.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.headers.set('Accept-Ranges', 'none');
     res.headers.contentLength = _imageBytes;
+    // The screen fetches back the exact URL we handed it, and that URL names
+    // the screen — so the fetch is attributed to a real panel instead of to a
+    // shared counter. A `HEAD` first is normal (the TV sizes the image before
+    // pulling it), and counting it separately is what proves the TV got as
+    // far as asking.
+    final who = request.uri.queryParameters['ip']?.trim() ?? '';
     if (request.method == 'HEAD') {
+      if (who.isNotEmpty) _log(who).headRequests++;
       await res.close();
       return;
     }
@@ -1107,6 +1386,17 @@ class TvDisplayService {
     _imagesServed++;
     _tvFetched = true;
     _lastFetchAt = DateTime.now();
+    if (who.isNotEmpty) {
+      final log = _log(who);
+      log.imagesServed++;
+      log.lastFetchAt = _lastFetchAt;
+      // Pulling the frame is the strongest possible proof that this panel is
+      // alive and showing us, so record it as the state it demonstrates
+      // instead of leaving it to be inferred later.
+      markReached(who, state: 'PLAYING');
+      log.lastOk = true;
+      log.note('جابت الصورة (${log.imagesServed} مرة)');
+    }
   }
 
   /// Set by the broadcaster when a capture throws, so the status endpoint
@@ -1119,6 +1409,27 @@ class TvDisplayService {
   /// because the config layer lives in the feature folder. Without it the
   /// status page cannot tell "no screen matched" from "screen unreachable".
   static String Function() configSummary = () => 'unknown';
+
+  /// One screen, spelled out for `/status`.
+  String _reportBlock(TvScreenReport r) =>
+      '--- screen ${r.ip} | ${r.name} | ${r.label} '
+      '(${r.severity.name}) ---\n'
+      '  device=${r.deviceId ?? "UNBOUND"}'
+      '${r.deviceName == null ? '' : ' (${r.deviceName})'}\n'
+      '  session=${r.identity.sessionRunning ? "running" : "idle"}\n'
+      '  endpoint=${r.endpoint.isEmpty ? "none" : r.endpoint}\n'
+      '  transport=${r.transportState ?? "?"}'
+      '${r.pingMs == null ? '' : ' (${r.pingMs}ms)'}\n'
+      '  reachable=${r.reachable}\n'
+      '  everReached=${r.everReached}\n'
+      '  imagesServed=${r.imagesServed}\n'
+      '  lastFetch=${r.lastFetchAt?.toIso8601String() ?? "never"}\n'
+      '  lastCommand=${r.lastCommand ?? "none"}'
+      '${r.lastCommandAt == null ? '' : ' @ ${r.lastCommandAt!.toIso8601String()}'}\n'
+      '  lastResult=${r.lastResult ?? "none"}\n'
+      '  lastTookMs=${r.lastTookMs ?? "-"}\n'
+      '  fault=${r.fault ?? "none"}\n'
+      '  remedy=${r.remedy.isEmpty ? "none" : r.remedy}\n';
 
   /// Known control endpoints, for the status page.
   String get controlSummary => _controlCache.entries

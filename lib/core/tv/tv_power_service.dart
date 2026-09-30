@@ -92,11 +92,16 @@ class TvPowerService {
     _lastCommandAt = DateTime.now();
     _beginTiming();
     _tvHost = tvIp;
+    _activeScreen = tvIp;
     final tv = TvDisplayService.instance;
     tv.unblank();
     tv.stopPushing();
     _lastResult = 'الشاشة بتفتح';
     _endTiming();
+    // The screen's own history is written immediately, so a panel that is
+    // still waking up already says "we asked for this" instead of looking
+    // untouched. The outcome follows once the release lands.
+    tv.noteCommand(tvIp, 'فتح', 'بنفتح', tookMs: _lastTookMs);
     unawaited(_wakeThenRelease(tvIp));
     return true;
   }
@@ -110,12 +115,13 @@ class TvPowerService {
   /// customer stares at a black wall.
   Future<void> _wakeThenRelease(String tvIp) async {
     final tv = TvDisplayService.instance;
+    final watch = Stopwatch()..start();
     await _sendMagicPacket();
     const fastTries = 10;
     for (var i = 0; i < fastTries; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
       if (await tv.releaseToInput(tvIp)) {
-        _lastResult = 'الشاشة رجعت للبلايستيشن';
+        _done(tvIp, 'الشاشة رجعت للبلايستيشن', watch);
         return;
       }
       if (tv.refusesDlna(tvIp)) break;
@@ -125,12 +131,26 @@ class TvPowerService {
     for (var i = 0; i < 4; i++) {
       await Future<void>.delayed(const Duration(seconds: 2));
       if (await tv.releaseToInput(tvIp)) {
-        _lastResult = 'الشاشة رجعت للبلايستيشن';
+        _done(tvIp, 'الشاشة رجعت للبلايستيشن', watch);
         return;
       }
       if (tv.refusesDlna(tvIp)) break;
     }
-    _lastResult = 'الشاشة اتفتحت';
+    _done(tvIp, 'الشاشة اتفتحت', watch);
+  }
+
+  /// Closes the outcome of a wake: one Arabic sentence, in this screen's own
+  /// history and in the shared status line.
+  void _done(String tvIp, String message, Stopwatch watch) {
+    watch.stop();
+    _lastResult = message;
+    _lastTookMs = watch.elapsedMilliseconds;
+    TvDisplayService.instance.noteCommand(
+      tvIp,
+      'فتح',
+      message,
+      tookMs: _lastTookMs,
+    );
   }
 
   /// Forgets that NetCast is dead, so the settings screen can re-test it
@@ -150,20 +170,23 @@ class TvPowerService {
     _lastCommandAt = DateTime.now();
     _beginTiming();
     _tvHost = tvIp;
+    _activeScreen = tvIp;
     final tv = TvDisplayService.instance;
     // Stop the loop first so a background push cannot overwrite the black.
     tv.stopPushing();
     _lastResult = 'الشاشة بتتغمّض';
     _endTiming();
+    tv.noteCommand(tvIp, 'إغلاق', 'بتتغمّض', tookMs: _lastTookMs);
     unawaited(_blankOut(tvIp));
     return true;
   }
 
   Future<void> _blankOut(String tvIp) async {
     final tv = TvDisplayService.instance;
+    final watch = Stopwatch()..start();
     final netcast = await _netcastPower(2);
     if (netcast) {
-      _lastResult = 'الشاشة اتقفلت';
+      _blanked(tvIp, 'الشاشة اتقفلت', watch);
       return;
     }
     // A screen that answers 500 will not answer on the third try either.
@@ -171,13 +194,26 @@ class TvPowerService {
     // still needs the remote.
     for (var i = 0; i < 2; i++) {
       if (await tv.pushBlack(tvIp)) {
-        _lastResult = 'الشاشة اتغمّضت';
+        _blanked(tvIp, 'الشاشة اتغمّضت', watch);
         return;
       }
       if (tv.refusesDlna(tvIp)) break;
       await Future<void>.delayed(const Duration(seconds: 2));
     }
-    _lastResult = 'الشاشة رفضت الأمر — اقفلها بالريموت';
+    _blanked(tvIp, 'الشاشة رفضت الأمر — اقفلها بالريموت', watch, ok: false);
+  }
+
+  void _blanked(String tvIp, String message, Stopwatch watch, {bool ok = true}) {
+    watch.stop();
+    _lastResult = message;
+    _lastTookMs = watch.elapsedMilliseconds;
+    TvDisplayService.instance.noteCommand(
+      tvIp,
+      'إغلاق',
+      message,
+      ok: ok,
+      tookMs: _lastTookMs,
+    );
   }
 
   /// Classic magic packet: 6 × 0xFF + 16 × the MAC, to the broadcast
@@ -260,6 +296,12 @@ class TvPowerService {
   static const _identifier = '8675309';
   static const _clientName = 'PlayZone';
   static String _tvHost = '192.168.1.22';
+
+  /// Which screen the last command was aimed at. Recorded so the shared status
+  /// line can be honest about whose result it is showing — with two screens,
+  /// "الشاشة اتغمّضت" is meaningless without it.
+  static String _activeScreen = '';
+  static String get activeScreen => _activeScreen;
 
   /// Points the service at a different TV (its IP, from the settings).
   set tvIp(String value) => _tvHost = value;
