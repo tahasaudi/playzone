@@ -15,6 +15,15 @@ library;
 /// How a wall screen is doing. Ordered from "most broken" to "healthy", so
 /// the settings page can show the worst news first.
 enum TvScreenState {
+  /// The settings have not been read yet, so we cannot say anything about the
+  /// screen — including that it is broken.
+  ///
+  /// Settings load asynchronously, and during that window every screen looks
+  /// like it has an address and no machine behind it. Reporting that as
+  /// [unbound] flashes a red fault on every single launch, and a fault that
+  /// always appears is a fault nobody reads.
+  loading,
+
   /// The whole TV feature is switched off in the app's settings.
   disabled,
 
@@ -67,6 +76,15 @@ enum TvScreenState {
   /// about to answer.
   transitioning,
 
+  /// Mid-change, and staying there.
+  ///
+  /// A panel stuck part-way through a change will not take a new picture: it
+  /// ignores the request, and reports the refusal in a way identical to a
+  /// panel that simply will not cooperate. The two need opposite repairs — one
+  /// needs a nudge, the other needs a man to walk over — so they must not
+  /// share a verdict.
+  wedged,
+
   /// Healthy: the screen is dark. This TV cannot be powered off over the
   /// network, so a black frame is what "off" looks like.
   dark,
@@ -82,6 +100,7 @@ enum TvSeverity { ok, warn, bad }
 /// never be described two different ways on two different screens.
 extension TvScreenStateWords on TvScreenState {
   String get label => switch (this) {
+        TvScreenState.loading => 'بنقرأ الإعدادات',
         TvScreenState.disabled => 'مقفولة من البرنامج',
         TvScreenState.noAddress => 'من غير IP',
         TvScreenState.unbound => 'مش مربوطة بجهاز',
@@ -93,6 +112,7 @@ extension TvScreenStateWords on TvScreenState {
         TvScreenState.stalePlayback => 'بتعرض حاجة قديمة',
         TvScreenState.released => 'راجعة للبلايستيشن',
         TvScreenState.transitioning => 'بتتغيّر الآن',
+        TvScreenState.wedged => 'واقفة مش بتخلص',
         TvScreenState.dark => 'سودا (مقفولة)',
       };
 
@@ -100,10 +120,16 @@ extension TvScreenStateWords on TvScreenState {
         // A screen with no machine behind it will never do anything at all.
         TvScreenState.unbound => TvSeverity.bad,
         TvScreenState.refused => TvSeverity.bad,
+
+        // It will not take a picture, and it will not say so.
+        TvScreenState.wedged => TvSeverity.bad,
         // Quiet, but somebody has to type an address / flip a switch.
         TvScreenState.noAddress => TvSeverity.warn,
         TvScreenState.disabled => TvSeverity.warn,
         TvScreenState.suspect => TvSeverity.warn,
+        // Nothing to act on yet, and nothing wrong either. Anything louder
+        // would make a launch look like a fault.
+        TvScreenState.loading => TvSeverity.ok,
         // Something is on the wall that we did not put there this session.
         TvScreenState.stalePlayback => TvSeverity.warn,
         // Unproven is not proven-good. Saying nothing about a screen counts
@@ -138,6 +164,15 @@ class TvScreenIdentity {
     /// panel that is asleep while somebody is paying for a game — a fault the
     /// café must know about, versus the normal state of a closed shop.
     this.sessionRunning = false,
+
+    /// Have the settings actually been read yet?
+    ///
+    /// Settings arrive asynchronously, so for the first moments of the
+    /// program every screen looks like it has an address and no machine
+    /// behind it. Left unchecked, that is reported as [unbound] — a red
+    /// "not bound" fault for a screen that is perfectly bound, on every
+    /// launch, for which the only real fix is to ignore the red.
+    this.configLoaded = false,
   });
 
   final String ip;
@@ -147,9 +182,12 @@ class TvScreenIdentity {
 
   final int? deviceId;
 
-  /// 'PS4 — 2'.
+  /// 'PS4 - 2'.
   final String? deviceName;
   final bool sessionRunning;
+
+  /// False until the settings behind [deviceId] and [name] have arrived.
+  final bool configLoaded;
 }
 
 /// One line in a screen's own history: what we did, whether it worked, and
@@ -190,13 +228,31 @@ class TvScreenLog {
 
   /// How many times this specific screen pulled our frame.
   int imagesServed = 0;
+
+  /// How many times it asked how big the picture is before pulling it.
+  ///
+  /// A screen that asks and never takes is telling us something different from
+  /// one that never asks at all, and the count is what tells the two apart:
+  /// the first got as far as our server and then stalled, the second never
+  /// reached us and the problem is on the network.
   int headRequests = 0;
+
   DateTime? lastFetchAt;
 
   /// The transport state read back FROM the screen, which is the only honest
   /// source for "what is it showing right now".
   String? transportState;
   DateTime? stateReadAt;
+
+  /// When the screen first started reporting *this* state.
+  ///
+  /// Deliberately not [stateReadAt]. That is when we last heard from the
+  /// screen, and we ask every few seconds, so it is always fresh — measuring
+  /// "how long has it been like this" against it is measuring our own
+  /// curiosity instead of the screen's condition, and a screen stuck for an
+  /// hour would be reported as one that has just started. It moves only when
+  /// the reported value actually changes.
+  DateTime? stateSince;
   int? pingMs;
 
   /// Is it answering *right now*?
@@ -213,6 +269,15 @@ class TvScreenLog {
   /// True while a status read is in flight, so the panel can show a spinner
   /// instead of a stale answer pretending to be current.
   bool probing = false;
+
+  /// The address we last told this screen to show.
+  ///
+  /// Recorded because this string is the whole question when a push fails: it
+  /// is the only place the answer is written down. A television that will not
+  /// fetch a frame either cannot reach the address in here — a firewall, a
+  /// wrong interface, a stale server address — or is refusing the request
+  /// itself, and those two need opposite fixes.
+  String lastPushedUri = '';
 
   /// The last [_logLimit] things that happened to this screen.
   final List<TvScreenEvent> events = [];
@@ -252,6 +317,8 @@ class TvScreenReport {
     this.reachable = false,
     this.everReached = false,
     this.probing = false,
+    this.lastPushedUri = '',
+    this.headRequests = 0,
   });
 
   final TvScreenIdentity identity;
@@ -286,6 +353,8 @@ class TvScreenReport {
   final bool reachable;
   final bool everReached;
   final bool probing;
+  final String lastPushedUri;
+  final int headRequests;
 
   String get ip => identity.ip;
   String get name =>
@@ -307,7 +376,32 @@ TvScreenReport judgeTvScreen({
   required bool endpointKnown,
   int? boundDeviceId,
 }) {
+  /// Is the panel telling us it is in the middle of something?
+  ///
+  /// Matched on the word rather than on a fixed list, because these panels
+  /// qualify what they report — one says `LG_TRANSITIONING`, another
+  /// `TRANSITIONING` — and a list of exact names would call half of them
+  /// healthy while they are stuck.
+  bool _midChange(String? state) {
+    final s = (state ?? '').toUpperCase();
+    return s.contains('TRANSITION') ||
+        s.contains('LOADING') ||
+        s.contains('BUFFERING');
+  }
+
+  /// Has it been saying the same thing for longer than a change ever takes?
+  ///
+  /// Timed from [TvScreenLog.stateSince] — when the condition started — not
+  /// from when we last looked.
+  bool _heldTooLong(DateTime? since) {
+    if (since == null) return false;
+    return DateTime.now().difference(since) > const Duration(seconds: 45);
+  }
+
   String remedyFor(TvScreenState s) => switch (s) {
+        // Nothing to do, on purpose. Saying "check the wiring" for a screen
+        // that is mid-load would send someone to a television that is fine.
+        TvScreenState.loading => '',
         TvScreenState.disabled =>
           'شغّل «ابعت الشاشات للتلفزيون» من تحت — دلوقتي الشاشات كلها متوقفة.',
         TvScreenState.noAddress =>
@@ -332,11 +426,18 @@ TvScreenReport judgeTvScreen({
               'الشاشة اتقفلت من غير تحصيل. ابدأ جلسة على ${identity.deviceName ?? "الجهاز"} أو دوس «غمّض» عشان ترجع مظبوطة.',
         TvScreenState.transitioning =>
           'الشاشة بتتغيّر دلوقتي. ثواني وتثبت. لو فضلت كده طويل، اضغط «فحص».',
+        TvScreenState.wedged =>
+          'الشاشة واقفة في نص تغيير ومش بتخلص، فمش هتاخد أي صورة جديدة. '
+              'دوس «ابحث عن الشاشة» الأول — لو رجعت، تمام. لو مرجعتش، لازم '
+              'حد يقرب منها ويوقّعها (الفياز فيها)، وبعد دقيقة هترجع لوحدها.',
         TvScreenState.showing || TvScreenState.released || TvScreenState.dark =>
           '',
       };
 
   final state = switch (null) {
+    // Before everything, because until the settings are in we know nothing
+    // about this screen — and "nothing" must never be reported as a fault.
+    _ when !identity.configLoaded => TvScreenState.loading,
     // Order matters: a configuration fault outranks a network fault, because
     // no amount of network fixing will help a screen nobody is bound to.
     _ when !featureEnabled => TvScreenState.disabled,
@@ -366,6 +467,14 @@ TvScreenReport judgeTvScreen({
     // Anything else the panel reports — TRANSITIONING, PAUSED, and whatever
     // this firmware invents next — is named as itself rather than folded
     // into "off", so a screen mid-wake is not filed as a dark screen.
+    //
+    // Unless it has been reporting itself mid-change for long enough that
+    // "mid-change" has stopped being a temporary condition. A change that is
+    // not resolving is the reason a screen silently refuses every picture it
+    // is given, and a fault that hides behind a harmless-looking label is a
+    // fault nobody goes and fixes.
+    _ when _midChange(log.transportState) && _heldTooLong(log.stateSince) =>
+      TvScreenState.wedged,
     _ => TvScreenState.transitioning,
   };
 
@@ -395,11 +504,14 @@ TvScreenReport judgeTvScreen({
           'عن الشاشة».'
       : remedyFor(state);
 
-  // An unbound screen's fault is never the network, so do not show one.
-  final showFault = state != TvScreenState.unbound &&
+  // A raw error is only worth showing when the verdict says something is
+  // actually wrong. These panels log a scary "HTTP 500" while playing the
+  // picture correctly, so printing the error next to a healthy verdict would
+  // train whoever reads this panel to ignore the part that matters.
+  final showFault = severity != TvSeverity.ok &&
+      state != TvScreenState.unbound &&
       state != TvScreenState.noAddress &&
-      state != TvScreenState.disabled &&
-      state != TvScreenState.unknown;
+      state != TvScreenState.disabled;
 
   return TvScreenReport(
     identity: identity,
@@ -428,6 +540,8 @@ TvScreenReport judgeTvScreen({
     reachable: log.reachable,
     everReached: log.everReached,
     probing: log.probing,
+    lastPushedUri: log.lastPushedUri,
+    headRequests: log.headRequests,
   );
 }
 

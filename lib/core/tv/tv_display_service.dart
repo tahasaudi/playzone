@@ -43,7 +43,19 @@ class TvDisplayService {
   HttpServer? _server;
   Uint8List? _image;
   int _imageBytes = 0;
-  int _revision = 0;
+
+  /// Counts up on every frame we hand out, and starts from the moment this
+  /// process started rather than from zero.
+  ///
+  /// The television fetches the address we give it, and it caches what it has
+  /// already fetched. A plain counter restarts at zero on every launch, so a
+  /// restarted program keeps offering `v=1`, `v=2` — addresses the panels
+  /// already have — and they answer from their own cache without ever asking
+  /// us for the file. A picture nobody downloaded is a picture we cannot use
+  /// to prove a command worked, so a command that succeeded on the wall would
+  /// be reported as a failure. Seeding from the clock makes every run offer
+  /// addresses the panels have never seen.
+  int _revision = DateTime.now().millisecondsSinceEpoch;
   String? _lastError;
   DateTime? _lastPushAt;
   bool _tvFetched = false;
@@ -133,6 +145,11 @@ class TvDisplayService {
     log.reachable = true;
     log.everReached = true;
     if (state != null) {
+      // Only move the "since" mark when the reported state actually changes.
+      // If it moved on every read we would be timing our own polling, and a
+      // screen that has been stuck since opening would be filed as one that
+      // has only just started.
+      if (log.transportState != state) log.stateSince = DateTime.now();
       log.transportState = state;
       log.stateReadAt = DateTime.now();
     }
@@ -266,6 +283,32 @@ class TvDisplayService {
 
   /// Back to normal: the next capture from the broadcaster is shown again.
   void unblank() => _blanked = false;
+
+  /// Hands every screen we know about back to its console, in parallel.
+  ///
+  /// Called when the program is closing. Without it, each wall is left
+  /// sitting on a renderer that is fetching a picture from a server that is
+  /// about to stop existing — and these panels do not recover from that on
+  /// their own. They sit in a half-finished change, ignore every later
+  /// command, and the next thing anyone learns about it is that the screen
+  /// "refuses" whatever it is sent, which is the one conclusion that sends
+  /// someone off to rewire a television that is perfectly fine.
+  ///
+  /// Best effort and deliberately unhurried about its own failure: a screen
+  /// that cannot be reached now is a screen that was already off, which is
+  /// where it needed to be anyway.
+  Future<void> releaseAllScreens() async {
+    final known = _controlCache.keys.toList(growable: false);
+    if (known.isEmpty) return;
+    for (final ip in known) {
+      try {
+        await releaseToInput(ip);
+      } catch (_) {
+        // Nothing useful to do while shutting down, and a failure here must
+        // never be the reason the program refuses to close.
+      }
+    }
+  }
 
   /// Hands the TV at [tvIp] back to whatever it was watching — in practice
   /// HDMI 1, the console — by ending our playback.
@@ -563,6 +606,11 @@ class TvDisplayService {
       // cached copy of the same URL.
       _revision++;
       final uri = _imageUriFor(self, tvIp);
+      // Written down the moment we decide to show it, before anything is
+      // sent. If this screen then refuses, the one fact worth having is the
+      // address it was handed, and there is no way to recover it afterwards
+      // from a television that will only say "no".
+      _log(tvIp).lastPushedUri = uri;
       // LG renderers REJECT the play request with HTTP 500 when
       // CurrentURIMetaData is empty — the DIDL-Lite descriptor is what
       // tells the TV this is a still image it can display. (Verified
@@ -578,41 +626,134 @@ class TvDisplayService {
           '</item></DIDL-Lite>';
       final meta = _escapeXml(didl);
 
-      // The renderer is moody: it answers 500 when it thinks it is still
-      // playing something. Stop, breathe, set, play — and if Set is
-      // refused, stop properly and try once more before giving up.
-      await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-      var ok = await _soap(ctl, 'SetAVTransportURI',
-          '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
-          '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
-      if (!ok) {
+      // What this screen had pulled before we asked, so we can tell whether
+      // the picture actually landed.
+      final before = _log(tvIp).imagesServed;
+
+      // Stop, set, play — and `Play` goes out whether or not `Set` said yes.
+      //
+      // These panels answer `SetAVTransportURI` with HTTP 500 and an empty
+      // body while going on to fetch and play the image perfectly well.
+      // Gating `Play` on that status is what kept the wall from ever going
+      // black: the set "failed", so the play was never sent, so the
+      // television sat on whatever it already had. `Set` only points at the
+      // picture; `Play` is what puts it on the wall, and a picture nothing
+      // asked to be shown is not shown however contented the reply was.
+      Future<bool> pass(int settleMs) async {
         await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-        await Future<void>.delayed(const Duration(seconds: 1));
-        ok = await _soap(ctl, 'SetAVTransportURI',
+        await _settle(ctl, tvIp, settleMs);
+        await _soap(ctl, 'SetAVTransportURI',
             '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
             '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
-      }
-      if (ok) {
         await Future<void>.delayed(const Duration(milliseconds: 200));
         await _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
-        _lastPushAt = DateTime.now();
-        // Forget a past refusal: this screen clearly accepts us now.
-        _dlnaRefused.remove(tvIp);
-        final log = _log(tvIp);
-        log.refusedAt = null;
-        markReached(tvIp);
-        // The image is on its way; the fetch is what proves it arrived, and
-        // that arrives separately as a HEAD then a GET on /tv.jpg.
-        log.lastCommand = 'عرض الصورة';
-        log.lastCommandAt = _lastPushAt;
-        log.lastOk = true;
-        log.lastResult = 'الصورة اتبعتت';
+        return _awaitFetch(tvIp, before, 900);
       }
-      return ok;
+
+      // Whether this worked is settled by the screen pulling the frame, not
+      // by the status the SOAP call returned. The fetch is proof, and it is
+      // the only proof that survives a firmware that reports an error while
+      // doing the work correctly.
+      final log = _log(tvIp);
+      if (await pass(2400)) {
+        _lastPushAt = DateTime.now();
+        markReached(tvIp);
+        log.refusedAt = null;
+        _dlnaRefused.remove(tvIp);
+        log.lastOk = true;
+        log.lastCommandAt = DateTime.now();
+        log.lastCommand = 'عرض الصورة';
+        log.lastResult = 'الصورة اتبعتت';
+        return true;
+      }
+
+      // Nothing arrived, so this is a real failure and a second try is owed:
+      // the renderer sometimes turns the first request away purely because it
+      // still thinks it is busy with the previous one.
+      if (await pass(1200)) {
+        _lastPushAt = DateTime.now();
+        markReached(tvIp);
+        log.refusedAt = null;
+        _dlnaRefused.remove(tvIp);
+        log.lastOk = true;
+        log.lastCommandAt = DateTime.now();
+        log.lastCommand = 'عرض الصورة';
+        log.lastResult = 'الصورة اتبعتت (محاولة تانية)';
+        return true;
+      }
+
+      log.lastOk = false;
+      log.lastCommandAt = DateTime.now();
+      log.lastCommand = 'عرض الصورة';
+      log.lastResult = 'الشاشة ما جابتش الصورة';
+      log.note('الشاشة ما جابتش الصورة', ok: false);
+      return false;
     } finally {
       _pushing.remove(tvIp);
     }
+  }
+
+  /// Waits for a part-way renderer to come to rest before we hand it a new
+  /// picture.
+  ///
+  /// A panel that is mid-change will not take one. It ignores both the set
+  /// and the play, and the only symptom is a refusal that looks exactly like
+  /// a television refusing to cooperate. Stopping first is not enough on its
+  /// own, because the stop is accepted while the panel is still moving and
+  /// the picture is then offered to something that is not listening yet. So
+  /// this asks the panel where it actually is, rather than assuming a fixed
+  /// pause is long enough.
+  ///
+  /// Bounded, and a timeout is not a verdict: the caller carries on and the
+  /// fetch check still decides whether the picture landed.
+  Future<bool> _settle(String ctl, String tvIp, int budgetMs) async {
+    const rest = [
+      'STOPPED',
+      'NO_MEDIA_PRESENT',
+    ];
+    // A silent renderer is not a busy one. These panels answer
+    // `GetTransportInfo` with an empty 500 while playing perfectly happily,
+    // so an unanswered question is not evidence that anything is still
+    // moving — and sitting out the whole budget waiting for an answer that is
+    // never coming would add a dead pause to every single push.
+    var askedOnce = false;
+    for (var waited = 0; waited < budgetMs; waited += 300) {
+      final (status, payload, _) = await _soapRaw(ctl, 'GetTransportInfo', '');
+      if (status != null && status < 400) {
+        askedOnce = true;
+        final state =
+            RegExp(r'<CurrentTransportState>([^<]*)</CurrentTransportState>')
+                .firstMatch(payload)
+                ?.group(1)
+                ?.trim()
+                .toUpperCase() ??
+                '';
+        markReached(tvIp, state: state);
+        if (state.isEmpty || rest.any(state.contains)) return true;
+      } else if (!askedOnce && waited >= 600) {
+        // It will not tell us where it is, so stop asking and let the stop
+        // settle on its own. The fetch check still decides the outcome.
+        return false;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    return false;
+  }
+
+  /// Waits briefly to see whether [tvIp] pulls the frame, and says so.
+  ///
+  /// Bounded and short on purpose: the fetch usually lands in well under a
+  /// second, and this runs off the command path in the background, so the
+  /// person at the till is not waiting on it. Returning on the first sighting
+  /// keeps the common case instant instead of always paying the full wait.
+  Future<bool> _awaitFetch(String tvIp, int before, [int budgetMs = 1400]) async {
+    final log = _log(tvIp);
+    if (log.imagesServed > before) return true;
+    for (var waited = 0; waited < budgetMs; waited += 200) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      if (log.imagesServed > before) return true;
+    }
+    return false;
   }
 
   /// Screens that answered a push with an error, and when they did.
@@ -1422,6 +1563,8 @@ class TvDisplayService {
       '${r.pingMs == null ? '' : ' (${r.pingMs}ms)'}\n'
       '  reachable=${r.reachable}\n'
       '  everReached=${r.everReached}\n'
+      '  headRequests=${r.headRequests}\n'
+      '  pushedUri=${r.lastPushedUri.isEmpty ? "none" : r.lastPushedUri}\n'
       '  imagesServed=${r.imagesServed}\n'
       '  lastFetch=${r.lastFetchAt?.toIso8601String() ?? "never"}\n'
       '  lastCommand=${r.lastCommand ?? "none"}'
@@ -1429,7 +1572,13 @@ class TvDisplayService {
       '  lastResult=${r.lastResult ?? "none"}\n'
       '  lastTookMs=${r.lastTookMs ?? "-"}\n'
       '  fault=${r.fault ?? "none"}\n'
-      '  remedy=${r.remedy.isEmpty ? "none" : r.remedy}\n';
+      '  remedy=${r.remedy.isEmpty ? "none" : r.remedy}\n'
+      // The whole history of this one screen, newest first. Printed because
+      // "what did it do when I started that session" is the question nobody
+      // can answer from a current reading, and a list of readings taken after
+      // the fact is not history at all.
+      '${r.events.isEmpty ? '' : r.events.map((e) => '  * ${e.at.toIso8601String()} [${e.ok ? "ok" : "FAIL"}] ${e.text}\n').join()}'
+      '--- end ${r.ip} ---\n';
 
   /// Known control endpoints, for the status page.
   String get controlSummary => _controlCache.entries

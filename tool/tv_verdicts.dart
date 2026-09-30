@@ -18,6 +18,7 @@ class _Case {
     this.endpointKnown = true,
     this.deviceId = 9,
     this.sessionRunning = false,
+    this.configLoaded = true,
     this.expectLabel,
     this.expectSeverity,
     this.expectRemedy = false,
@@ -29,6 +30,10 @@ class _Case {
   final bool endpointKnown;
   final int? deviceId;
   final bool sessionRunning;
+
+  /// Every case below is a settled situation, so they all say "the settings
+  /// have arrived". The one case that does not is named as such.
+  final bool configLoaded;
 
   /// What the panel has to say. Null means "whatever the table decides",
   /// which is only allowed for the escalation cases where the point of the
@@ -42,15 +47,34 @@ class _Case {
 TvScreenLog _blank() => TvScreenLog('192.168.1.22');
 
 /// A log for a screen that answered, is answering, and is released to HDMI.
-TvScreenLog _healthy({String? state}) => TvScreenLog('192.168.1.22')
-  ..controlUrl = 'http://192.168.1.22:1267/AVTransport/control.xml'
-  ..everReached = true
-  ..reachable = true
-  ..transportState = state ?? 'STOPPED'
-  ..stateReadAt = DateTime.now();
+TvScreenLog _healthy({String? state}) {
+  final now = DateTime.now();
+  return TvScreenLog('192.168.1.22')
+    ..controlUrl = 'http://192.168.1.22:1267/AVTransport/control.xml'
+    ..everReached = true
+    ..reachable = true
+    ..transportState = state ?? 'STOPPED'
+    // Both marks start together: we have just read this state, and it has
+    // just started. Anything that times a condition is timed from here.
+    ..stateReadAt = now
+    ..stateSince = now;
+}
 
 void main() {
   final cases = <_Case>[
+    // ---- before the settings arrive: must not be blamed for anything ----
+    _Case(
+      'app just started, nothing has been read yet',
+      _blank(),
+      configLoaded: false,
+      // Every other field is empty, which without this guard reads as a
+      // screen with an address and no machine behind it. That false red
+      // appeared on every single launch, for a screen that was bound fine.
+      expectLabel: 'بنقرأ الإعدادات',
+      expectSeverity: TvSeverity.ok,
+      expectRemedy: false,
+    ),
+
     // ---- configuration faults: no amount of network fixing will help ----
     _Case(
       'the whole feature is switched off',
@@ -129,6 +153,17 @@ void main() {
       // rounded to "off" or shouted about as a fault.
       expectLabel: 'بتتغيّر الآن',
       expectSeverity: TvSeverity.ok,
+      expectRemedy: true,
+    ),
+    _Case(
+      'stuck between states, and saying so for minutes',
+      _healthy(state: 'LG_TRANSITIONING')
+        // The firmware qualifies what it reports, so the test uses the
+        // qualified name on purpose: a list of exact names would call this
+        // screen fine while it is refusing every picture it is given.
+        ..stateSince = DateTime.now().subtract(const Duration(minutes: 3)),
+      expectLabel: 'واقفة مش بتخلص',
+      expectSeverity: TvSeverity.bad,
       expectRemedy: true,
     ),
 
@@ -210,6 +245,7 @@ void main() {
         deviceId: c.deviceId,
         deviceName: c.deviceId == null ? null : 'PS4 — 2',
         sessionRunning: c.sessionRunning,
+        configLoaded: c.configLoaded,
       ),
       log: c.log,
       featureEnabled: c.featureEnabled,

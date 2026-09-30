@@ -173,6 +173,9 @@ class _AppShellState extends ConsumerState<AppShell> {
                   .map((d) => '${d.type.name} — ${d.device.name}')
                   .firstOrNull,
           sessionRunning: slot.deviceId != null && tvBusy.contains(slot.deviceId),
+          // The screens panel believes a screen is unbound until the settings
+          // that bind it arrive, which turns every launch into a red fault.
+          configLoaded: tvConfig.loaded,
         ),
     ];
 

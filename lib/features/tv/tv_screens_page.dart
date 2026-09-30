@@ -307,6 +307,7 @@ Color _toneFor(TvSeverity severity) => switch (severity) {
     };
 
 IconData _iconFor(TvScreenState state) => switch (state) {
+      TvScreenState.loading => Icons.hourglass_empty_rounded,
       TvScreenState.disabled => Icons.pause_circle_outline_rounded,
       TvScreenState.noAddress => Icons.help_outline_rounded,
       TvScreenState.unbound => Icons.link_off_rounded,
@@ -318,6 +319,7 @@ IconData _iconFor(TvScreenState state) => switch (state) {
       TvScreenState.stalePlayback => Icons.history_rounded,
       TvScreenState.released => Icons.sports_esports_rounded,
       TvScreenState.transitioning => Icons.autorenew_rounded,
+      TvScreenState.wedged => Icons.report_problem_rounded,
       TvScreenState.dark => Icons.brightness_2_rounded,
     };
 
