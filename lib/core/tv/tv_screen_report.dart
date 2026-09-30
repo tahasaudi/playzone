@@ -566,6 +566,26 @@ String tvAge(DateTime? at, {DateTime? now}) {
   return 'من ${delta.inDays} يوم';
 }
 
+/// The screens that are closed and must stay dark.
+///
+/// A `Stop` is the one command that undoes a blackout, and a blackout is the
+/// last thing that should happen to a customer who has already paid. So being
+/// closed is a rule this file decides rather than a flag the network layer
+/// sets: while a screen is in here, no release may reach it.
+///
+/// This is not a theoretical guard. Session start hands the wall back to the
+/// console, but a panel that is still booting does not answer straight away,
+/// so that release keeps being retried for several seconds after the button is
+/// pressed. A checkout landing inside that window used to win — and then the
+/// retry arrived afterwards and put the wall back on the console. That is a
+/// screen going dark on payment and springing back to life a second later,
+/// which is exactly what it looks like to the customer who just paid.
+///
+/// It lives here rather than beside the SOAP calls so it can be tested without
+/// a television. This rule decides whether a paid-for wall stays dark, and
+/// that is not something to verify by waiting for a customer to find out.
+Set<String> closedScreenLedger() => <String>{};
+
 /// `14:02:28` — a wall-clock stamp for the per-screen event trail.
 String tvClock(DateTime? at) => at == null
     ? '—'

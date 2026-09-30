@@ -94,6 +94,7 @@ class TvPowerService {
     _tvHost = tvIp;
     _activeScreen = tvIp;
     final tv = TvDisplayService.instance;
+    tv.markScreenOpen(tvIp);
     tv.unblank();
     tv.stopPushing();
     _lastResult = 'الشاشة بتفتح';
@@ -117,9 +118,19 @@ class TvPowerService {
     final tv = TvDisplayService.instance;
     final watch = Stopwatch()..start();
     await _sendMagicPacket();
+    // A checkout that landed while this loop was still waiting on a slow
+    // panel. The wall is dark and paid for, so this release no longer applies
+    // to anything — and it is the exact command that used to put the screen
+    // back on the console a second after a customer paid.
+    bool closedNow() => tv.isScreenClosed(tvIp);
+
     const fastTries = 10;
     for (var i = 0; i < fastTries; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
+      if (closedNow()) {
+        _done(tvIp, 'الجلسة اتقفلت — الشاشة فضلت مقفولة', watch);
+        return;
+      }
       if (await tv.releaseToInput(tvIp)) {
         _done(tvIp, 'الشاشة رجعت للبلايستيشن', watch);
         return;
@@ -130,6 +141,10 @@ class TvPowerService {
     // slow-booting panel eventually gets there on its own.
     for (var i = 0; i < 4; i++) {
       await Future<void>.delayed(const Duration(seconds: 2));
+      if (closedNow()) {
+        _done(tvIp, 'الجلسة اتقفلت — الشاشة فضلت مقفولة', watch);
+        return;
+      }
       if (await tv.releaseToInput(tvIp)) {
         _done(tvIp, 'الشاشة رجعت للبلايستيشن', watch);
         return;
@@ -172,7 +187,14 @@ class TvPowerService {
     _tvHost = tvIp;
     _activeScreen = tvIp;
     final tv = TvDisplayService.instance;
-    // Stop the loop first so a background push cannot overwrite the black.
+    // Stop the loop first so a background push cannot overwrite the black, and
+    // put the screen out of reach of any release still retrying from the
+    // session that just ended. That retry is the reason a wall used to go dark
+    // on payment and spring back to the console a second later: the checkout
+    // won, and then a `Stop` that belonged to the session before it arrived
+    // anyway. The screen now refuses it, and says so in its own history
+    // instead of quietly undoing the sale.
+    tv.markScreenClosed(tvIp);
     tv.stopPushing();
     _lastResult = 'الشاشة بتتغمّض';
     _endTiming();

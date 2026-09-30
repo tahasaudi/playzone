@@ -284,6 +284,18 @@ class TvDisplayService {
   /// Back to normal: the next capture from the broadcaster is shown again.
   void unblank() => _blanked = false;
 
+  final Set<String> _closedScreens = closedScreenLedger();
+
+  /// Is this screen closed, i.e. meant to be dark until the next session?
+  bool isScreenClosed(String tvIp) => _closedScreens.contains(tvIp);
+
+  /// Marks a screen closed straight away, without pushing anything.
+  void markScreenClosed(String tvIp) => _closedScreens.add(tvIp);
+
+  /// Marks the screen as live again — a session has started, so the console
+  /// is what the wall should be showing.
+  void markScreenOpen(String tvIp) => _closedScreens.remove(tvIp);
+
   /// Hands every screen we know about back to its console, in parallel.
   ///
   /// Called when the program is closing. Without it, each wall is left
@@ -302,7 +314,10 @@ class TvDisplayService {
     if (known.isEmpty) return;
     for (final ip in known) {
       try {
-        await releaseToInput(ip);
+        // Forced: closing the program is exactly the moment a closed screen
+        // is no longer meant to stay dark, and this is the only caller allowed
+        // to overrule that.
+        await releaseToInput(ip, force: true);
       } catch (_) {
         // Nothing useful to do while shutting down, and a failure here must
         // never be the reason the program refuses to close.
@@ -317,7 +332,21 @@ class TvDisplayService {
   /// an endpoint we already discovered and cached, so it lands in well under
   /// a second. Verified on a 55UP7760PVB: the renderer's transport goes
   /// PLAYING → STOPPED and the panel returns to the HDMI input.
-  Future<bool> releaseToInput(String tvIp) async {
+  ///
+  /// Refuses a screen that is closed, unless [force]. A closed screen has been
+  /// paid for and must stay dark, and the one command that would undo that is
+  /// this one.
+  Future<bool> releaseToInput(String tvIp, {bool force = false}) async {
+    if (!force && _closedScreens.contains(tvIp)) {
+      noteCommand(
+        tvIp,
+        'فتح',
+        'الشاشة مقفولة من تحصيل — مش هنرجّعها',
+        ok: true,
+      );
+      return false;
+    }
+    _closedScreens.remove(tvIp);
     _blanked = false;
     // Only ever use an endpoint we already know. Discovering here would put
     // a 2,100-port sweep in the middle of a session start, which is exactly
@@ -358,6 +387,10 @@ class TvDisplayService {
   /// TV refuses a real network power-off. One push, no loop, so it is
   /// immediate.
   Future<bool> pushBlack(String tvIp) async {
+    // Claimed before anything else happens, including the blank. From this
+    // moment the wall is paid for and dark, and any release already in flight
+    // is no longer allowed to take it back.
+    _closedScreens.add(tvIp);
     if (!_controlCache.containsKey(tvIp)) {
       // Nothing known yet — kick discovery off in the background and say so
       // rather than making checkout wait for a port sweep.
@@ -1395,46 +1428,64 @@ class TvDisplayService {
   String? get lastSoapAction => _lastSoapAction;
   int _browseCalls = 0;
 
+  /// Everything `/status` prints, gathered in one place.
+  ///
+  /// Its own method so the handler can wrap it. A throw while building this
+  /// does not fail the request, it abandons it — and the one page written to
+  /// explain a fault would be the thing that stops answering.
+  String _statusBody() => 'running=$isRunning\n'
+      'announced=$_announced\n'
+      'pushing=${_timer != null}\n'
+      'blanked=$_blanked\n'
+      'hasControlUrl=${_controlCache.isNotEmpty}\n'
+      'imageBytes=$_imageBytes\n'
+      'lastCaptureError=${_lastCaptureError ?? "none"}\n'
+      'lastPush=${_lastPushAt?.toIso8601String() ?? "never"}\n'
+      'tvFetched=$_tvFetched\n'
+      'lastFetch=${_lastFetchAt?.toIso8601String() ?? "never"}\n'
+      'imagesServed=$_imagesServed\n'
+      'localAddress=${localAddress ?? "unknown"}\n'
+      'lastSoapError=${_lastError ?? "none"}\n'
+      '--- power ---\n'
+      'powerLastCommand=${TvPowerService.instance.lastCommandAt?.toIso8601String() ?? "never"}\n'
+      'powerResult=${TvPowerService.instance.lastResult ?? "none"}\n'
+      'powerTookMs=${TvPowerService.instance.lastTookMs ?? "-"}\n'
+      'powerPaired=${TvPowerService.instance.isPaired}\n'
+      'ssdpDatagrams=$_ssdpDatagrams\n'
+      'ssdpLocations=$_lastLocations\n'
+      'ssdpSample=$_lastSsdpSample\n'
+      'browseCalls=$_browseCalls\n'
+      '--- screens ---\n'
+      'config=${configSummary()}\n'
+      'known=$controlSummary\n'
+      'suspect=${_suspect.join(",")}\n'
+      'refusesDlna=${_dlnaRefused.keys.where(refusesDlna).join(",")}\n'
+      'controlUrl=${_controlCache.values.isEmpty ? "none" : _controlCache.values.first.$1}\n'
+      // One block per screen, by name, so a terminal can answer the same
+      // questions the settings page answers — and cannot confuse the two
+      // panels, which a single shared set of counters never could.
+      '${reports().map(_reportBlock).join()}';
+
   /// Serves the current image; answers HEAD (headers only) and GET.
   /// Also exposes /status so a problem can be diagnosed without the UI,
   /// and /desc.xml so the SSDP announcement points at something real.
   Future<void> _handleRequest(HttpRequest request) async {
     final res = request.response;
     if (request.uri.path == '/status') {
+      // Wrapped, because a throw inside this handler does not fail the request
+      // — it abandons it. The response is never closed, so the client waits
+      // forever and the one page that exists to explain a fault is the thing
+      // that stops answering. That is how a report can be the cause of the
+      // problem it was written to describe.
+      String body;
+      try {
+        body = _statusBody();
+      } catch (e, st) {
+        body = 'status failed to build\n$e\n$st';
+      }
       res.statusCode = HttpStatus.ok;
       res.headers.contentType = ContentType('text', 'plain', charset: 'utf-8');
-      res.write('running=$isRunning\n'
-          'announced=$_announced\n'
-          'pushing=${_timer != null}\n'
-          'blanked=$_blanked\n'
-          'hasControlUrl=${_controlCache.isNotEmpty}\n'
-          'imageBytes=$_imageBytes\n'
-          'lastCaptureError=${_lastCaptureError ?? "none"}\n'
-          'lastPush=${_lastPushAt?.toIso8601String() ?? "never"}\n'
-          'tvFetched=$_tvFetched\n'
-          'lastFetch=${_lastFetchAt?.toIso8601String() ?? "never"}\n'
-          'imagesServed=$_imagesServed\n'
-          'localAddress=${localAddress ?? "unknown"}\n'
-          'lastSoapError=${_lastError ?? "none"}\n'
-          '--- power ---\n'
-          'powerLastCommand=${TvPowerService.instance.lastCommandAt?.toIso8601String() ?? "never"}\n'
-          'powerResult=${TvPowerService.instance.lastResult ?? "none"}\n'
-          'powerTookMs=${TvPowerService.instance.lastTookMs ?? "-"}\n'
-          'powerPaired=${TvPowerService.instance.isPaired}\n'
-          'ssdpDatagrams=$_ssdpDatagrams\n'
-          'ssdpLocations=$_lastLocations\n'
-          'ssdpSample=$_lastSsdpSample\n'
-          'browseCalls=$_browseCalls\n'
-          '--- screens ---\n'
-          'config=${configSummary()}\n'
-          'known=$controlSummary\n'
-          'suspect=${_suspect.join(",")}\n'
-          'refusesDlna=${_dlnaRefused.keys.where(refusesDlna).join(",")}\n'
-          'controlUrl=${_controlCache.values.isEmpty ? "none" : _controlCache.values.first.$1}\n'
-          // One block per screen, by name, so a terminal can answer the same
-          // questions the settings page answers — and cannot confuse the two
-          // panels, which a single shared set of counters never could.
-          '${reports().map(_reportBlock).join()}');
+      res.write(body);
       await res.close();
       return;
     }

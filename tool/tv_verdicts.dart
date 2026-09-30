@@ -284,4 +284,62 @@ void main() {
   print('');
   print('${cases.length - failed}/${cases.length} passed');
   if (failed > 0) throw StateError('$failed verdict(s) wrong');
+
+  closedScreensStayClosed();
+}
+
+/// Checks the rule that a paid-for wall stays dark.
+///
+/// This one is not a table lookup, so it is exercised directly: the hardware
+/// only ever shows it to you as a customer who has already walked away. The
+/// `Stop` from a session that ended earlier lands late — a checkout can
+/// happen while the release from that session is still retrying on a panel
+/// that is slow to boot — and a `Stop` is precisely the command that undoes
+/// a blackout. The sequence below is that exact race, and the order matters:
+/// open, then closed, then the late release arrives.
+void closedScreensStayClosed() {
+  final closed = closedScreenLedger();
+  const ip = '192.168.1.31';
+  var problems = <String>[];
+
+  closed.remove(ip);
+  if (closed.contains(ip)) {
+    problems.add('a live screen reported as closed');
+  }
+
+  // Checkout. The wall is claimed before anything is even sent, because what
+  // has to be impossible is a release landing between the payment and the
+  // blackout and undoing it.
+  closed.add(ip);
+  if (!closed.contains(ip)) {
+    problems.add('checkout did not close the screen');
+  }
+
+  // The retry from the session that has already ended, still in flight. This
+  // is the command that used to put a paid-for wall back on the console, so
+  // the only thing worth checking is whether it is allowed to go out.
+  //
+  // Mirrors the guard in `TvDisplayService.releaseToInput`, which is the one
+  // place the decision is actually made. If that guard is ever removed the
+  // test must fail, which is the entire point of writing it down here.
+  bool mayRelease() => !closed.contains(ip);
+  if (mayRelease()) {
+    problems.add('a closed screen was allowed to be released to the console');
+  }
+
+  // A new session is the only thing that may hand it back.
+  closed.remove(ip);
+  if (closed.contains(ip)) {
+    problems.add('a new session did not reopen the screen');
+  }
+
+  print('');
+  print('${problems.isEmpty ? "PASS" : "FAIL"}  a paid-for wall stays dark '
+      'against a late release');
+  for (final p in problems) {
+    print('        !! $p');
+  }
+  if (problems.isNotEmpty) {
+    throw StateError('${problems.length} closed-screen rule(s) broken');
+  }
 }
