@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -75,6 +76,38 @@ class TvDisplayService {
 
   TvScreenLog _log(String tvIp) =>
       _screens.putIfAbsent(tvIp.trim(), () => TvScreenLog(tvIp.trim()));
+
+  /// A short opaque name for each screen, so a picture URL can say who asked
+  /// for the picture without carrying the address.
+  final Map<String, String> _tokens = {};
+  final Map<String, String> _tokenOwner = {};
+
+  /// The name this screen is known by inside picture URLs.
+  ///
+  /// It exists because the panel refuses a picture URL carrying more than one
+  /// query parameter, so the address and the cache-busting revision cannot both
+  /// ride in the query. Rather than give up naming the screen — which is what
+  /// makes "which panel took the picture?" answerable for one wall at a time —
+  /// both pieces are packed into the single parameter the panel tolerates. The
+  /// token is only meaningful to this process, which is all it has to be: the
+  /// app re-offers the URL on every push, so a token from a previous run is
+  /// never one a screen can be holding.
+  String _tokenFor(String tvIp) => _tokens.putIfAbsent(tvIp.trim(), () {
+        final t = Random().nextInt(0x7fffffff).toRadixString(16).padLeft(7, '0');
+        _tokenOwner[t] = tvIp.trim();
+        return t;
+      });
+
+  /// The screen a picture request belongs to, from the token in its URL.
+  ///
+  /// Empty when the token is unknown, which is the honest answer: a request
+  /// carrying something this process never issued cannot be credited to a wall.
+  String _screenForTag(String tag) {
+    if (tag.isEmpty) return '';
+    final cut = tag.lastIndexOf('-');
+    final token = cut > 0 ? tag.substring(0, cut) : tag;
+    return _tokenOwner[token] ?? '';
+  }
 
   /// Who each screen is, injected by the shell because the names and the
   /// device bindings live in the settings tables, not here.
@@ -174,6 +207,7 @@ class TvDisplayService {
       _server = await HttpServer.bind(InternetAddress.anyIPv4, port,
           shared: false);
       _server!.listen(_handleRequest, onError: (_) {});
+      await _startSelfTest();
       // Have a frame ready before anyone asks for one. A TV that is sent a
       // URI for an image that 404s comes back with UPnP error 716
       // ("Resource not found"), which looks exactly like the TV refusing
@@ -191,9 +225,81 @@ class TvDisplayService {
     }
   }
 
+  /// A second, loopback-only port that can black a wall and hand it straight
+  /// back.
+  ///
+  /// It is a separate server rather than a route on the picture server because
+  /// the picture server is deliberately reachable from the whole café — the
+  /// screens have to reach it — and a request that interrupts what a customer is
+  /// watching must not be reachable from the same place. Binding to
+  /// `loopbackIPv4` is what guarantees that: no password, no token and nothing
+  /// to guess, because nothing off this machine can open the port at all.
+  ///
+  /// Failing to open it costs nothing and is not reported as an error: the
+  /// screens do not use it, and the app runs perfectly well without it.
+  Future<void> _startSelfTest() async {
+    try {
+      _testServer ??= await HttpServer.bind(InternetAddress.loopbackIPv4,
+          port + 1,
+          shared: false);
+      _testServer!.listen(_handleSelfTest, onError: (_) {});
+    } catch (_) {
+      _testServer = null;
+    }
+  }
+
+  HttpServer? _testServer;
+
+  Future<void> _handleSelfTest(HttpRequest request) async {
+    final res = request.response;
+    final want = request.uri.queryParameters['ip']?.trim() ?? '';
+    try {
+      if (request.uri.path != '/blank') {
+        res.statusCode = HttpStatus.notFound;
+        await res.close();
+        return;
+      }
+      if (want.isEmpty) {
+        res.statusCode = HttpStatus.badRequest;
+        res.write('which screen? add ?ip=<address>\n');
+        await res.close();
+        return;
+      }
+      // The frames this screen pulled before it was asked, so the answer is
+      // about what this test caused rather than about everything it has ever
+      // fetched. A renderer loops on a still image, so an absolute count would
+      // happily report a working screen - or a broken one - from traffic that
+      // belonged to an earlier push.
+      final before = _log(want).imagesServed;
+      final pushed = await _pushOnce(want);
+      // Handed straight back, on every path out and including when the push
+      // failed. A wall left dark because a test came out inconclusive is a
+      // worse outcome than the test, and the console is what the customer
+      // paid for.
+      final released = await releaseToInput(want, force: true);
+      res.statusCode = HttpStatus.ok;
+      // Judged on the picture arriving, never on the panel's answer. These
+      // screens return 500 while working correctly, so the only trustworthy
+      // proof is the screen asking for the frame.
+      final log = _log(want);
+      final fetched = log.imagesServed - before;
+      res.write('screen=$want pushed=$pushed released=$released\n'
+          'fetched=$fetched (total ${log.imagesServed})\n'
+          'black=${fetched > 0 ? "yes" : "no"}\n'
+          'lastResult=${log.lastResult ?? "none"}\n'
+          'lastPushedUri=${log.lastPushedUri ?? "none"}\n');
+    } catch (e) {
+      res.statusCode = HttpStatus.internalServerError;
+      res.write('$e\n');
+    }
+    await res.close();
+  }
+
   Future<void> stopServer() async {
     _timer?.cancel();
     _timer = null;
+    await _testServer?.close(force: true);
+    _testServer = null;
     await _server?.close(force: true);
     _server = null;
   }
@@ -422,13 +528,20 @@ class TvDisplayService {
 
   /// The picture URL handed to one specific screen.
   ///
-  /// The screen's own address rides in the query string, and the screen
-  /// fetches back exactly the URL it was given — so every `HEAD`/`GET` tells
-  /// us which panel took the frame. Without it `imagesServed` was a single
-  /// number shared by both TVs, which is why "is the picture reaching the
-  /// screen?" could never be answered for one panel at a time.
+  /// ONE query parameter, never two. An LG webOS panel answers `SetAVTransportURI`
+  /// with HTTP 500 "Invalid Args" the moment the picture URL carries a second
+  /// parameter, and it says the same thing for a bad InstanceID and a metadata
+  /// block it cannot parse — so a rejected push reads exactly like a panel that
+  /// has been told not to play anything, and no amount of retrying helps. This
+  /// was measured across both walls: `?v=`, `?s=` and no query at all are
+  /// accepted; anything with an `&` is refused. Do not add a parameter here.
+  ///
+  /// The single parameter carries the screen's token and the revision together,
+  /// so the screen is still named on every fetch — without it `imagesServed`
+  /// was one number shared by every TV, which is why "is the picture reaching
+  /// the screen?" could not be answered for one panel at a time.
   String _imageUriFor(String self, String tvIp) =>
-      'http://$self:$port/tv.jpg?ip=${Uri.encodeQueryComponent(tvIp)}&v=$_revision';
+      'http://$self:$port/tv.jpg?s=${_tokenFor(tvIp)}-$_revision';
 
   /// The cached AVTransport endpoint for [tvIp], discovering it if needed.
   Future<String?> _controlUrlFor(String tvIp) async {
@@ -1393,7 +1506,11 @@ class TvDisplayService {
     switch (action) {
       case 'Browse':
         final self = await resolveLocalAddress();
-        final uri = '$self:$port/tv.jpg?v=$_revision';
+        // A browse response carries the full absolute URL. Left without the
+        // scheme it reads as a file name, so a panel that browses and then plays
+        // what it found has nothing to dial - and the failure surfaces later as
+        // a renderer that accepts the play and never fetches.
+        final uri = 'http://$self:$port/tv.jpg?v=$_revision';
         final didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
             ' xmlns:dc="http://purl.org/dc/elements/1.1/"'
             ' xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
@@ -1473,8 +1590,15 @@ class TvDisplayService {
       '--- screens ---\n'
       'config=${configSummary()}\n'
       'known=$controlSummary\n'
-      'suspect=${_suspect.join(",")}\n'
-      'refusesDlna=${_dlnaRefused.keys.where(refusesDlna).join(",")}\n'
+      'suspect=${List<String>.of(_suspect).join(",")}\n'
+      // Read through a copy. `refusesDlna` expires entries as a side effect of
+      // being called, which deletes from the very map being iterated - and a
+      // map cannot be iterated and modified at once. Discovery writes to these
+      // maps in the background, so this is not a rare race: it fires exactly
+      // when a screen is being looked for, which is when the answer is wanted.
+      // A throw here does not fail the request, it abandons it, so the whole
+      // page went missing with no error shown anywhere.
+      'refusesDlna=${(List<String>.of(_dlnaRefused.keys)).where(refusesDlna).join(",")}\n'
       'controlUrl=${_controlCache.values.isEmpty ? "none" : _controlCache.values.first.$1}\n'
       // One block per screen, by name, so a terminal can answer the same
       // questions the settings page answers — and cannot confuse the two
@@ -1577,12 +1701,13 @@ class TvDisplayService {
     res.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.headers.set('Accept-Ranges', 'none');
     res.headers.contentLength = _imageBytes;
-    // The screen fetches back the exact URL we handed it, and that URL names
-    // the screen — so the fetch is attributed to a real panel instead of to a
-    // shared counter. A `HEAD` first is normal (the TV sizes the image before
-    // pulling it), and counting it separately is what proves the TV got as
-    // far as asking.
-    final who = request.uri.queryParameters['ip']?.trim() ?? '';
+    // The screen fetches back the exact URL we handed it, and that URL carries
+    // the screen's token — so the fetch is attributed to a real panel instead of
+    // to a shared counter. A `HEAD` first is normal (the TV sizes the image
+    // before pulling it), and counting it separately is what proves the TV got
+    // as far as asking. An unrecognised token is credited to nobody: a request
+    // this process did not ask for is not proof about any wall in particular.
+    final who = _screenForTag(request.uri.queryParameters['s']?.trim() ?? '');
     if (request.method == 'HEAD') {
       if (who.isNotEmpty) _log(who).headRequests++;
       await res.close();
@@ -1647,7 +1772,12 @@ class TvDisplayService {
       '--- end ${r.ip} ---\n';
 
   /// Known control endpoints, for the status page.
-  String get controlSummary => _controlCache.entries
+  ///
+  /// Copied before it is read. `_controlCache` is written by every discovery,
+  /// and a discovery is exactly what is running when someone asks the status
+  /// page why a screen cannot be found.
+  String get controlSummary => List<MapEntry<String, (String, DateTime)>>.of(
+          _controlCache.entries)
       .map((e) => '${e.key} -> ${e.value.$1.split('/AVTransport/').first}')
       .join(' , ');
 
