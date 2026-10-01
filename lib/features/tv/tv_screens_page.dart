@@ -129,6 +129,19 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
     return ListView(
       padding: EdgeInsets.zero,
       children: [
+        // Two copies of this program on one machine used to fail silently: the
+        // second one could not open the picture port, said nothing, and then
+        // argued with the first one over who owns each wall. The staff saw a
+        // screen that went black when it should have shown the game, and back
+        // when it should have been black, and neither half of that is
+        // explainable from the page they were looking at. Said once, plainly,
+        // at the top, because it is the one fault on this page that the person
+        // using it can fix by closing a window.
+        if (TvDisplayService.instance.anotherCopyRunning)
+          Padding(
+            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+            child: _DuplicateCopyWarning(),
+          ),
         _Header(reports: reports, enabled: config.enabled),
         const SizedBox(height: AppSpacing.md),
         ...panels,
@@ -263,6 +276,56 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
 
 /// One line for the whole shop: how many screens are fine, and — when one is
 /// not — which one, by name, before anybody has to read anything else.
+/// Shown only when this program found the picture port already taken.
+///
+/// The wording is deliberately blunt and names the fix, because the person
+/// reading it cannot see the cause from where they are standing and will
+/// otherwise go looking for a television problem that does not exist.
+class _DuplicateCopyWarning extends StatelessWidget {
+  const _DuplicateCopyWarning();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(AppSpacing.sm),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.10),
+        borderRadius: AppRadius.mediumR,
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.copy_all_rounded, size: 18, color: AppColors.warning),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Text(
+                  'البرنامج مفتوح مرتين',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.warning,
+                  ),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  'اقفل النسخة القديمة وافتح نسخة واحدة بس — النسخة اللي '
+                  'فاتحة هي اللي بتحكم الشاشات.',
+                  style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _Header extends StatelessWidget {
   const _Header({required this.reports, required this.enabled});
 
@@ -640,6 +703,18 @@ class _ScreenPanel extends StatelessWidget {
             ],
           ),
 
+          // Shown only when the panel's own answer and what it actually did disagree.
+          // Saying so is the whole point: a wall that reports "playing" while it
+          // has not fetched anything is on the console, and reading the claim
+          // instead of the evidence is how a working screen gets reported as
+          // broken and somebody walks over to a television that was fine.
+          if (r != null && r.claimVsEvidence.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              r.claimVsEvidence,
+              style: const TextStyle(fontSize: 11, color: AppColors.textTertiary),
+            ),
+          ],
           // The one action that fixes it, when there is one. This is the
           // difference between a status page and a tool: it never stops at
           // naming the problem.
@@ -702,6 +777,18 @@ class _ScreenPanel extends StatelessWidget {
               _Fact(
                 'جابت الصورة',
                 r == null ? '—' : '${r.imagesServed} مرة',
+              ),
+              // What the wall is showing, as measured rather than as claimed.
+              // The panel keeps answering "playing" for a while after it has
+              // been handed back to the console, and reporting that as the
+              // state would send someone to fix a screen that is working.
+              _Fact(
+                'بتعرض إيه',
+                r == null || r.showingOurs == null
+                    ? 'مش متأكد'
+                    : r.showingOurs!
+                        ? 'الصورة بتاعتنا'
+                        : 'رجعت للجهاز',
               ),
               _Fact('آخر مرة', tvAge(r?.lastFetchAt)),
               _Fact(

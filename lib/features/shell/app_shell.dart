@@ -74,6 +74,105 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   void _openDrawer() => _scaffoldKey.currentState?.openDrawer();
 
+  /// Set once the startup sweep of the walls has been asked for.
+  bool _wallsReconciled = false;
+
+  /// Screens already handed back this launch, so a screen is not told twice.
+  final Set<String> _wallsReleased = {};
+
+  /// Hands any wall back to the console on startup, so a crash cannot leave a
+  /// black screen behind with nobody able to clear it.
+  ///
+  /// `didChangeAppLifecycleState` already releases the screens on the way out,
+  /// but only on a clean exit. This app has crashed several times in a week
+  /// inside sqlite3.dll, and a crash never reaches that callback — so the wall
+  /// went on showing the last frame it was sent for the rest of the evening,
+  /// and the only way out was somebody walking over and switching the television
+  /// off. At the counter that reads as a dead screen, which is exactly what the
+  /// staff reported.
+  ///
+  /// The decision is made from the bookings, not from what the previous run
+  /// happened to be doing: a screen whose machine has a live session is meant to
+  /// be black and is left alone, and every other screen is told to go back. That
+  /// is what makes running this on every launch safe — it cannot blank a wall
+  /// that is in use, and it cannot leave one dark when nobody is playing.
+  ///
+  /// Retried across the opening of the shop rather than once, because a screen
+  /// cannot be sent anything until its renderer port has been found — and on
+  /// this network that routinely takes two to three minutes for all of them,
+  /// with the last panel finishing after the first is already answering. A
+  /// single early pass therefore releases the one screen that happened to be
+  /// ready and leaves the other two black, which looks exactly like the fix
+  /// did not work. So the passes are spread across the whole opening, and each
+  /// one releases only the screens it has not already released, so a later pass
+  /// can never fight a screen an earlier one has dealt with.
+  ///
+  /// The last pass is ten minutes in, not because a screen can need that long
+  /// but because a panel that was switched on late still deserves a wall that
+  /// is showing the console. This runs in the background and off the UI, so it
+  /// costs nothing to leave it patient.
+  void _reconcileWalls(TvConfig config) {
+    if (_wallsReconciled) return;
+    _wallsReconciled = true;
+    // The argument is deliberately ignored. The screens are read from the
+    // provider inside each pass instead of from the value handed in here,
+    // because this runs on the very first build — before the settings have
+    // finished loading — and at that moment the list of screens is still
+    // empty. Holding on to it meant every later pass walked an empty list and
+    // released nothing, which is exactly the failure this sweep exists to
+    // prevent: a wall left black by a crash, a sweep that reports it ran, and
+    // a wall that is still black.
+    for (final wait in const [
+      Duration(seconds: 6),
+      Duration(seconds: 25),
+      Duration(seconds: 60),
+      Duration(seconds: 150),
+      Duration(seconds: 300),
+      Duration(seconds: 600),
+    ]) {
+      unawaited(Future<void>.delayed(wait, () => _releaseIdleWalls()));
+    }
+  }
+
+  Future<void> _releaseIdleWalls() async {
+    if (!mounted) return;
+    // Read fresh, every pass: the screens are saved in the database and this
+    // sweep is the first thing that needs them, so the list it walks is the one
+    // as it is now rather than the one it happened to be at launch.
+    final config = ref.read(tvConfigProvider);
+    final live = {
+      for (final s in ref.read(activeSessionsProvider).valueOrNull ??
+          const <SessionBoardEntry>[])
+        s.device.id,
+    };
+    for (final slot in config.slots) {
+      if (slot.isEmpty) continue;
+      // A screen with a session on it is meant to be black. Leave it alone, and
+      // do not mark it released — if that session ends while the app is open,
+      // the session's own release is what hands the wall back.
+      if (slot.deviceId != null && live.contains(slot.deviceId)) continue;
+      final ip = slot.ip.trim();
+      if (_wallsReleased.contains(ip)) continue;
+      // A screen whose renderer port is not known yet cannot be sent anything.
+      // Skipped, not released, so a later pass still tries it.
+      if (!TvDisplayService.instance.hasControlUrlFor(ip)) continue;
+      // One screen refusing must not cost the others their pass: an unhandled
+      // error here would abandon the whole sweep half way through and leave the
+      // remaining walls exactly as dark as they were.
+      bool ok = false;
+      try {
+        ok = await TvDisplayService.instance.releaseToInput(ip, force: true);
+      } catch (_) {
+        ok = false;
+      }
+      // Only a release that actually landed is remembered. Marking a screen as
+      // handled when the command did not arrive is how this bug comes back: the
+      // sweep would never ask again, and the wall would stay black for the rest
+      // of the evening with nothing left to retry.
+      if (ok) _wallsReleased.add(ip);
+    }
+  }
+
   KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
@@ -191,6 +290,7 @@ class _AppShellState extends ConsumerState<AppShell> {
           if (!tv.hasControlUrlFor(ip)) tv.warmUp(tvIp: ip);
         }
       }
+      _reconcileWalls(tvConfig);
       // Ask each screen once after startup, so the screens page can answer with a
       // fact instead of "we don't know yet". Two small requests, off the
       // critical path — and without them every screen reads as unproven for
@@ -201,6 +301,14 @@ class _AppShellState extends ConsumerState<AppShell> {
       for (final wait in const [
         Duration(seconds: 3),
         Duration(seconds: 20),
+        // A third pass, because the first two both land before the renderer
+        // ports have been found: a probe that finds no endpoint records
+        // nothing, so those two are really only one sample. "Is this wall
+        // showing our picture or the console" is answered by comparing two
+        // successful reads, and without a third pass that question stays
+        // unanswerable on a program that has been sitting open all evening
+        // with nobody on the screens page to keep re-asking it.
+        Duration(seconds: 45),
       ]) {
         unawaited(Future<void>.delayed(wait, () {
           if (!mounted) return;

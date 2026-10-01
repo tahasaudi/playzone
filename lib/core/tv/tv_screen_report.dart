@@ -239,10 +239,28 @@ class TvScreenLog {
 
   DateTime? lastFetchAt;
 
-  /// The transport state read back FROM the screen, which is the only honest
-  /// source for "what is it showing right now".
+  /// The transport state read back FROM the screen.
   String? transportState;
   DateTime? stateReadAt;
+
+  /// Whether this screen actually pulled our picture since the last time we
+  /// asked it anything, sampled as a difference in [imagesServed].
+  ///
+  /// The panel's own transport state is a claim, and on these webOS boxes it is
+  /// sometimes a stale one: right after a `Stop` — which is the release that
+  /// hands a wall back to the console and is therefore the whole point of
+  /// checkout — the renderer keeps answering `PLAYING` while it has stopped
+  /// asking for anything. Believing that claim puts a red "playing" on a wall
+  /// that is in fact showing the game, which is worse than reporting nothing:
+  /// it sends someone to fix a screen that is working.
+  ///
+  /// So the two are kept apart and reported together. A screen that says
+  /// `PLAYING` and has not fetched is a disagreement worth showing, not a state
+  /// worth believing. `null` until there have been two samples to compare.
+  bool? showingOurs;
+
+  /// Pictures this screen pulled between the two most recent probes.
+  int fetchedSinceLastProbe = 0;
 
   /// When the screen first started reporting *this* state.
   ///
@@ -319,6 +337,8 @@ class TvScreenReport {
     this.probing = false,
     this.lastPushedUri = '',
     this.headRequests = 0,
+    this.showingOurs,
+    this.fetchedSinceLastProbe = 0,
   });
 
   final TvScreenIdentity identity;
@@ -355,6 +375,20 @@ class TvScreenReport {
   final bool probing;
   final String lastPushedUri;
   final int headRequests;
+
+  /// See [TvScreenLog.showingOurs]: `true`/`false` once there are two samples,
+  /// `null` before that.
+  final bool? showingOurs;
+  final int fetchedSinceLastProbe;
+
+  /// The panel's claim and the evidence disagreeing, in one sentence the staff
+  /// can act on, or '' when they agree or there is nothing to compare yet.
+  String get claimVsEvidence {
+    if (showingOurs == null) return '';
+    if (showingOurs == true) return '';
+    if (!(transportState ?? '').toUpperCase().contains('PLAYING')) return '';
+    return 'الشاشة بتقول إنها شغالة بس ماحدش جاب الصورة — على الأرجح رجعت للجهاز';
+  }
 
   String get ip => identity.ip;
   String get name =>
@@ -542,6 +576,8 @@ TvScreenReport judgeTvScreen({
     probing: log.probing,
     lastPushedUri: log.lastPushedUri,
     headRequests: log.headRequests,
+    showingOurs: log.showingOurs,
+    fetchedSinceLastProbe: log.fetchedSinceLastProbe,
   );
 }
 

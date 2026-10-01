@@ -272,7 +272,35 @@ LazyDatabase _openConnection() {
       }
     }
 
-    return NativeDatabase.createInBackground(file);
+    // SQLite runs in this isolate, not a background one.
+    //
+    // It used to run in a background isolate, and this program crashed at least
+    // four times in a week with `0xc0000374` — heap corruption reported by
+    // ntdll — plus an access violation inside sqlite3.dll itself. Both are
+    // native memory faults, not Dart errors: nothing in this app's own code was
+    // throwing, the memory under it had already been damaged. Putting SQLite on
+    // its own isolate means its native state is driven across an isolate
+    // boundary, and that boundary is where the damage showed up.
+    //
+    // The cost is nil here and the reason is worth saying out loud: this is one
+    // till on one machine talking to one local file, where every query is a
+    // local read of a few microseconds. Offloading that to another isolate buys
+    // nothing measurable and cost stability. If the database ever grows to need
+    // background work, this is the line to revisit - with the crash rate in the
+    // event log to compare against, not by feel.
+    //
+    // `setup` runs on the connection before anything else touches it. WAL lets a
+    // reader and a writer coexist, and the busy timeout stops a second program
+    // - a repair tool reading the same file - from being answered with an
+    // immediate failure while the till holds a write lock.
+    return NativeDatabase(
+      file,
+      setup: (db) {
+        db.execute('PRAGMA journal_mode = WAL;');
+        db.execute('PRAGMA busy_timeout = 5000;');
+        db.execute('PRAGMA foreign_keys = ON;');
+      },
+    );
   });
 }
 

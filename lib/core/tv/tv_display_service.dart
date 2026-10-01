@@ -220,10 +220,29 @@ class TvDisplayService {
       }
       return true;
     } catch (e) {
-      _lastError = 'تعذر فتح البورت $port: $e';
+      // Two copies of this program are the one fault that used to show up as
+      // nonsense: the second copy cannot bind the picture port, could not say
+      // so anywhere the staff could see, and then blackened a wall while the
+      // first copy handed the same wall back. The panels ended up flipping
+      // between two owners and the counter saw a screen that worked and did not
+      // work at the same time. A bind failure here is almost never a firewall
+      // or a port range problem - it is another copy of this program, already
+      // running and already serving the same screens.
+      _anotherCopy = true;
+      _lastError = 'في نسخة تانية من البرنامج شغالة دلوقتي';
       return false;
     }
   }
+
+  /// True when this program could not open the picture port because another copy
+  /// of itself already holds it.
+  ///
+  /// Worth telling the staff rather than logging quietly: the copy that is
+  /// actually running is the one in control of the walls, and this one is a
+  /// passenger that will look like it is working while doing nothing.
+  bool get anotherCopyRunning => _anotherCopy;
+
+  bool _anotherCopy = false;
 
   /// A second, loopback-only port that can black a wall and hand it straight
   /// back.
@@ -247,6 +266,10 @@ class TvDisplayService {
       _testServer = null;
     }
   }
+
+  /// Fetch counts as of the previous probe, per screen, so "is it really showing
+  /// our picture" can be answered as a change rather than as an assertion.
+  final Map<String, int> _servedAtProbe = {};
 
   HttpServer? _testServer;
 
@@ -1361,6 +1384,25 @@ class TvDisplayService {
           .firstMatch(payload)
           ?.group(1)
           ?.trim();
+      // Sample the fetch count so the panel's claim can be checked against
+      // something that happened rather than something it said. The first probe
+      // has nothing to compare against and is recorded as unknown, which is the
+      // honest answer and keeps a fresh screen from being reported as not
+      // playing our picture when nobody has looked twice yet.
+      final served = log.imagesServed;
+      final seenBefore = _servedAtProbe[tvIp];
+      if (seenBefore != null) {
+        log.fetchedSinceLastProbe = served - seenBefore;
+        log.showingOurs = log.fetchedSinceLastProbe > 0;
+      }
+      _servedAtProbe[tvIp] = served;
+      if (state != null &&
+          state.toUpperCase().contains('PLAYING') &&
+          log.showingOurs == false) {
+        log.note(
+          'الشاشة بتقول إنها شغالة بس ماحدش جاب الصورة بتاعتنا',
+        );
+      }
       // The panel answered, which is worth recording even when the answer is
       // an unhelpful one — an open question about it is now answered.
       markReached(tvIp, state: state);
@@ -1589,6 +1631,7 @@ class TvDisplayService {
       'browseCalls=$_browseCalls\n'
       '--- screens ---\n'
       'config=${configSummary()}\n'
+      'anotherCopy=${_anotherCopy ? "YES <<<" : "no"}\n'
       'known=$controlSummary\n'
       'suspect=${List<String>.of(_suspect).join(",")}\n'
       // Read through a copy. `refusesDlna` expires entries as a side effect of
@@ -1752,6 +1795,8 @@ class TvDisplayService {
       '  endpoint=${r.endpoint.isEmpty ? "none" : r.endpoint}\n'
       '  transport=${r.transportState ?? "?"}'
       '${r.pingMs == null ? '' : ' (${r.pingMs}ms)'}\n'
+      '  showingOurs=${r.showingOurs?.toString() ?? "unknown"}'
+      ' (+${r.fetchedSinceLastProbe})\n'
       '  reachable=${r.reachable}\n'
       '  everReached=${r.everReached}\n'
       '  headRequests=${r.headRequests}\n'
