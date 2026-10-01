@@ -260,7 +260,8 @@ class _AppShellState extends ConsumerState<AppShell> {
           const <SessionBoardEntry>[])
         s.device.id,
     };
-    TvDisplayService.featureEnabled = tvConfig.enabled;
+    TvDisplayService.featureEnabled =
+          tvConfig.enabled && TvDisplayService.tvAllowed;
     TvDisplayService.screenIdentities = [
       for (final slot in tvConfig.identities)
         TvScreenIdentity(
@@ -280,7 +281,9 @@ class _AppShellState extends ConsumerState<AppShell> {
         ),
     ];
 
-    if (tvConfig.enabled && tvConfig.addresses.isNotEmpty) {
+    if (TvDisplayService.tvAllowed &&
+        tvConfig.enabled &&
+        tvConfig.addresses.isNotEmpty) {
       final tv = TvDisplayService.instance;
       if (!tv.isRunning) tv.startServer();
       if (tvConfig.showCards) {

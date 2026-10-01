@@ -117,6 +117,41 @@ class TvDisplayService {
   /// blamed for being dark when the whole feature is off.
   static bool featureEnabled = true;
 
+  /// Set once at startup from the `PLAYZONE_TV` environment variable.
+  ///
+  /// The reason this exists is a room with two machines in it. The code is
+  /// edited on one and the till runs on the other, both on the same café
+  /// network, and a program that starts for a quick look will happily find the
+  /// five wall screens, push a black frame at them and hand them back — which
+  /// means a television the moment a developer opened the app is a television a
+  /// customer is watching go dark. No setting inside the program can prevent
+  /// that, because the settings say the screens are live; they are live. Only
+  /// something outside the program, that the machine's owner sets once, can say
+  /// "this machine is not allowed to touch a television".
+  ///
+  /// So: `PLAYZONE_TV=off` makes this program physically unable to reach a
+  /// screen. Not "does not by default" — unable. The picture server is never
+  /// opened, every push and every release returns false without leaving the
+  /// process, and discovery never starts. Deliberately an environment variable
+  /// rather than a button, because a button in the settings is one stray tap
+  /// away from being wrong, and a variable set on the machine is not.
+  static final bool _allowedByEnvironment = _readTvSwitch();
+
+  static bool _readTvSwitch() {
+    // A missing variable means allowed, because the till must work with nothing
+    // set at all. Only an explicit "off" closes it - a typo should not silently
+    // take the screens down in a full cafe.
+    final fromEnv = Platform.environment['PLAYZONE_TV'];
+    return !(fromEnv != null && fromEnv.trim().toLowerCase() == 'off');
+  }
+
+  /// Whether this machine is allowed to touch a screen at all.
+  ///
+  /// Every command path checks this before doing anything, so that turning it
+  /// off means the whole feature is inert rather than merely hidden from the
+  /// settings page.
+  static bool get tvAllowed => _allowedByEnvironment;
+
   /// A snapshot of every screen, judged and described in plain Arabic.
   ///
   /// Falls back to whatever addresses we have touched when the shell has not
@@ -202,6 +237,7 @@ class TvDisplayService {
 
   /// Starts the local image server. Idempotent.
   Future<bool> startServer() async {
+    if (!tvAllowed) return false;
     if (_server != null) return true;
     try {
       _server = await HttpServer.bind(InternetAddress.anyIPv4, port,
@@ -466,6 +502,7 @@ class TvDisplayService {
   /// paid for and must stay dark, and the one command that would undo that is
   /// this one.
   Future<bool> releaseToInput(String tvIp, {bool force = false}) async {
+    if (!tvAllowed) return false;
     if (!force && _closedScreens.contains(tvIp)) {
       noteCommand(
         tvIp,
@@ -516,6 +553,7 @@ class TvDisplayService {
   /// TV refuses a real network power-off. One push, no loop, so it is
   /// immediate.
   Future<bool> pushBlack(String tvIp) async {
+    if (!tvAllowed) return false;
     // Claimed before anything else happens, including the blank. From this
     // moment the wall is paid for and dark, and any release already in flight
     // is no longer allowed to take it back.
@@ -583,6 +621,7 @@ class TvDisplayService {
   /// moves on every TV restart and a screen that is off answers nothing on
   /// the first try. Stops once the endpoint is known.
   Future<void> warmUp({required String tvIp, bool force = false}) async {
+    if (!tvAllowed) return;
     _currentTvIp = tvIp;
     if (_warming.contains(tvIp)) return;
     _warming.add(tvIp);
@@ -1343,6 +1382,7 @@ class TvDisplayService {
   /// a status check must not put a 2,100-port sweep on the network, which is
   /// the very thing that made the whole app feel slow.
   Future<bool> probeTransport(String tvIp, {bool discover = false}) async {
+    if (!tvAllowed) return false;
     final log = _log(tvIp);
     if (log.probing) return log.reachable;
     log.probing = true;
