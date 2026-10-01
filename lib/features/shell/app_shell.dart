@@ -140,10 +140,12 @@ class _AppShellState extends ConsumerState<AppShell> {
     // An unbound screen prints as UNBOUND, never "all". It used to print
     // "all", which reads as "follows every machine" when it in fact means
     // "follows nothing" — and that misreading is what left a wall screen
-    // sitting black through every session while looking configured.
+    // sitting black through every session while looking configured. Written from
+    // the slot list rather than from the first two screens, so a third
+    // television is reported instead of quietly missing from the one line that
+    // exists to say what is configured.
     TvDisplayService.configSummary = () => tvConfig.enabled
-        ? 'on | ${tvConfig.ip}->${tvConfig.deviceId ?? "UNBOUND"}'
-            '${tvConfig.hasSecond ? " | ${tvConfig.secondIp}->${tvConfig.secondDeviceId ?? "UNBOUND"}" : ""}'
+        ? 'on | ${tvConfig.slots.map((s) => '${s.ip.trim()}->${s.deviceId ?? "UNBOUND"}').join(" | ")}'
         : 'off';
 
     // Tell the TV layer who each screen is, by name, and whether the machine

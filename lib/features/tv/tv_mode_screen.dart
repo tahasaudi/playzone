@@ -18,11 +18,57 @@ import '../../data/repositories/device_repository.dart';
 import '../../data/repositories/session_repository.dart';
 import 'tv_cards.dart';
 
+/// One configured wall screen: where it is, what the staff call it, and which
+/// machine it belongs to.
+///
+/// A list of these rather than a pair of named fields, because the café's
+/// screens are not fixed at two. With the shape hardcoded to two, a third
+/// television could be *found* on the network but never saved — so it stayed a
+/// TV in the room that nothing could turn off at checkout.
+class TvScreenSlot {
+  const TvScreenSlot({
+    required this.index,
+    required this.ip,
+    required this.name,
+    this.deviceId,
+  });
+
+  /// Which setting keys this slot is stored under.
+  ///
+  /// Carried on the slot rather than taken from its position in the list,
+  /// because a slot keeps its keys even when an earlier one is cleared. Index
+  /// numbering restarts at the screen after an empty gap, which is what keeps a
+  /// café set up before this existed from reading its two screens as empty.
+  final int index;
+
+  final String ip;
+  final String name;
+  final int? deviceId;
+
+  bool get isEmpty => ip.trim().isEmpty;
+
+  TvScreenIdentity get identity =>
+      TvScreenIdentity(ip: ip.trim(), name: name, deviceId: deviceId);
+
+  TvScreenSlot copyWith({
+    String? ip,
+    String? name,
+    int? deviceId,
+    bool clearDevice = false,
+  }) =>
+      TvScreenSlot(
+        index: index,
+        ip: ip ?? this.ip,
+        name: name ?? this.name,
+        deviceId: clearDevice ? null : (deviceId ?? this.deviceId),
+      );
+}
+
 /// Settings for the wall screens, persisted in the app's settings table.
 ///
-/// The café has two: a 55" by the PS4 corner and a 65" by the PS5 corner.
-/// Each is bound to one machine, so a checkout anywhere else in the shop
-/// never touches it.
+/// The café's screens: a 55" by the PS4 corner, a 65" by the PS5 corner, and
+/// whatever else is plugged in. Each is bound to one machine, so a checkout
+/// anywhere else in the shop never touches it.
 class TvConfig {
   const TvConfig({
     this.ip = '192.168.1.22',
@@ -34,6 +80,7 @@ class TvConfig {
     this.secondDeviceId,
     this.name = 'الشاشة الأولى (55 بوصة)',
     this.secondName = 'الشاشة التانية (65 بوصة)',
+    this.extras = const <TvScreenSlot>[],
     this.loaded = false,
   });
 
@@ -67,6 +114,11 @@ class TvConfig {
   final String name;
   final String secondName;
 
+  /// Screens past the second. Held apart so the first two keep their original
+  /// keys untouched — a café that was configured before had three screens
+  /// would otherwise come back to a program that had forgotten two of them.
+  final List<TvScreenSlot> extras;
+
   /// True once the saved settings have been read.
   ///
   /// The notifier starts on hardcoded defaults and replaces them with whatever
@@ -75,45 +127,61 @@ class TvConfig {
   /// a field from being typed over mid-edit.
   final bool loaded;
 
+  /// How many screens the café may have at once.
+  ///
+  /// A ceiling rather than an open list because the room has a fixed number of
+  /// walls: past this the additions are more likely to be a mistake than a
+  /// plan, and a screen that is saved but never checked is worse than one that
+  /// was never added.
+  static const maxSlots = 6;
+
   bool get hasSecond => secondIp.trim().isNotEmpty;
 
-  /// Every screen, in the order they are configured, each already carrying
-  /// its name and its machine.
+  /// Every configured screen, in a stable order, each already carrying its
+  /// name, its machine and the keys it lives under.
   ///
   /// This is the one list the whole TV layer agrees on. A screen that is not
   /// in here does not exist as far as the status page, the health panel and
   /// the session buttons are concerned — which is what stops the app from
   /// quietly steering a TV nobody can identify.
-  List<TvScreenIdentity> get identities => [
-        TvScreenIdentity(
-          ip: ip.trim(),
-          name: name,
-          deviceId: deviceId,
-        ),
+  List<TvScreenSlot> get slots => [
+        TvScreenSlot(index: 0, ip: ip, name: name, deviceId: deviceId),
         if (hasSecond)
-          TvScreenIdentity(
-            ip: secondIp.trim(),
+          TvScreenSlot(
+            index: 1,
+            ip: secondIp,
             name: secondName,
             deviceId: secondDeviceId,
           ),
+        ...extras.where((s) => !s.isEmpty),
       ];
+
+  /// Screens as the rest of the app refers to them.
+  List<TvScreenIdentity> get identities =>
+      slots.map((s) => s.identity).toList(growable: false);
+
+  /// Whether another screen may be added.
+  bool get canAddSlot => slots.length < maxSlots;
 
   /// The address of the screen that follows [deviceId], or null when no
   /// screen is bound to that machine.
+  ///
+  /// One machine, one screen. If two slots ever held the same machine the
+  /// answer would depend on list order, so a checkout would blank one wall and
+  /// leave the other showing a finished session — and the staff would see a
+  /// screen that did not respond and blame the screen.
   String? screenFor(int deviceId) {
     if (!enabled) return null;
-    if (this.deviceId != null && this.deviceId == deviceId) {
-      return ip.trim().isEmpty ? null : ip;
+    for (final slot in slots) {
+      if (slot.isEmpty) continue;
+      if (slot.deviceId == deviceId) return slot.ip.trim();
     }
-    if (hasSecond && secondDeviceId == deviceId) return secondIp;
     return null;
   }
 
   /// Every address we may need to talk to, for eager discovery.
-  Iterable<String> get addresses => [
-        if (enabled && ip.trim().isNotEmpty) ip,
-        if (enabled && hasSecond) secondIp,
-      ];
+  Iterable<String> get addresses =>
+      slots.where((s) => !s.isEmpty).map((s) => s.ip.trim());
 
   TvConfig copyWith({
     String? ip,
@@ -125,6 +193,7 @@ class TvConfig {
     int? secondDeviceId,
     String? name,
     String? secondName,
+    List<TvScreenSlot>? extras,
     bool? loaded,
     bool clearDevice = false,
     bool clearSecondDevice = false,
@@ -141,6 +210,7 @@ class TvConfig {
             : (secondDeviceId ?? this.secondDeviceId),
         name: name ?? this.name,
         secondName: secondName ?? this.secondName,
+        extras: extras ?? this.extras,
         loaded: loaded ?? this.loaded,
       );
 }
@@ -159,6 +229,36 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
   static const nameKey = 'tv_name';
   static const secondNameKey = 'tv_name_2';
 
+  /// The setting keys one screen is stored under.
+  ///
+  /// The first screen keeps its original unnumbered keys and the second keeps
+  /// its `_2` keys, because those are what a café configured before this had
+  /// more than two screens already has written. Numbering everything from one
+  /// place means the third screen is not a special case that someone has to
+  /// remember to wire up.
+  static String ipKeyFor(int slot) => slot == 0 ? ipKey : 'tv_ip_${slot + 1}';
+  static String deviceKeyFor(int slot) =>
+      slot == 0 ? deviceKey : 'tv_device_id_${slot + 1}';
+  static String nameKeyFor(int slot) => slot == 0 ? nameKey : 'tv_name_${slot + 1}';
+
+  /// The next storage index free for a new screen.
+  ///
+  /// Skips indexes already taken rather than counting the slots that exist, so
+  /// clearing one screen in the middle does not hand its keys to the next one
+  /// added — two screens would then trade places in the settings and one of
+  /// them would silently become the other.
+  int get _nextFreeIndex {
+    final used = <int>{
+      0,
+      if (state.hasSecond) 1,
+      ...state.extras.map((s) => s.index),
+    };
+    for (var i = 0; i < TvConfig.maxSlots; i++) {
+      if (!used.contains(i)) return i;
+    }
+    return used.length;
+  }
+
   Future<void> load() async {
     final ip = await _db.settingsDao.getValue(ipKey);
     final enabled = await _db.settingsDao.getValue(enabledKey);
@@ -168,6 +268,29 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     final device2 = await _db.settingsDao.getValue(secondDeviceKey);
     final name = await _db.settingsDao.getValue(nameKey);
     final name2 = await _db.settingsDao.getValue(secondNameKey);
+
+    // Read the third screen onwards. Bounded by the same ceiling the UI uses,
+    // and each screen read independently so one missing key does not cost the
+    // others their settings.
+    final extras = <TvScreenSlot>[];
+    for (var i = 2; i < TvConfig.maxSlots; i++) {
+      final eIp = await _db.settingsDao.getValue(ipKeyFor(i));
+      if (eIp == null || eIp.trim().isEmpty) continue;
+      final eDevice = await _db.settingsDao.getValue(deviceKeyFor(i));
+      final eName = await _db.settingsDao.getValue(nameKeyFor(i));
+      extras.add(TvScreenSlot(
+        index: i,
+        ip: eIp.trim(),
+        // An empty stored name falls back to a default rather than to an empty
+        // string: a screen with no name is a screen nobody can point at, which
+        // is the exact problem naming is meant to solve.
+        name: (eName == null || eName.trim().isEmpty)
+            ? 'شاشة ${i + 1}'
+            : eName.trim(),
+        deviceId: _parseDevice(eDevice),
+      ));
+    }
+
     if (ip != null && ip.isNotEmpty) {
       state = state.copyWith(
         ip: ip,
@@ -176,12 +299,10 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
         deviceId: _parseDevice(device),
         secondIp: ip2 ?? '',
         secondDeviceId: _parseDevice(device2),
-        // An empty stored name falls back to the shipped default rather than
-        // to an empty string: a screen with no name is a screen nobody can
-        // point at, which is the exact problem this is meant to solve.
         name: (name == null || name.trim().isEmpty) ? null : name.trim(),
         secondName:
             (name2 == null || name2.trim().isEmpty) ? null : name2.trim(),
+        extras: extras,
       );
     } else {
       // First run: remember the detected TV so the push starts on its own.
@@ -193,6 +314,111 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
 
   static int? _parseDevice(String? raw) =>
       (raw == null || raw.isEmpty || raw == 'all') ? null : int.tryParse(raw);
+
+  /// Writes any screen, whichever one it is.
+  ///
+  /// One entry point rather than a set-then-set-second-then-set-third, because
+  /// three copies of the same save is three places for the "one machine drives
+  /// one screen" rule to be forgotten — and the failure is invisible: the app
+  /// would happily blank two walls at one checkout.
+  ///
+  /// Returns the machine it refused, or null when the save went through.
+  Future<int?> saveSlot(
+    int index, {
+    String? ip,
+    String? name,
+    int? deviceId,
+    bool clearDevice = false,
+  }) async {
+    // Refused before anything is written, so a rejected save cannot leave the
+    // address changed and the machine still pointing at the old screen.
+    if (deviceId != null) {
+      final clash = state.slots.any((s) =>
+          s.index != index && !s.isEmpty && s.deviceId == deviceId);
+      if (clash) return deviceId;
+    }
+    final cleanIp = ip?.trim();
+    if (cleanIp != null && cleanIp.isNotEmpty) {
+      final clash = state.slots.any((s) =>
+          s.index != index && !s.isEmpty && s.ip.trim() == cleanIp);
+      if (clash) return -1;
+    }
+
+    if (index == 0) {
+      if (cleanIp != null) setIp(cleanIp);
+      if (name != null) setName(name);
+      if (clearDevice) {
+        setDevice(null);
+      } else if (deviceId != null) {
+        setDevice(deviceId);
+      }
+      return null;
+    }
+    if (index == 1) {
+      if (cleanIp != null) setSecondIp(cleanIp);
+      if (name != null) setSecondName(name);
+      if (clearDevice) {
+        setSecondDevice(null);
+      } else if (deviceId != null) {
+        setSecondDevice(deviceId);
+      }
+      return null;
+    }
+
+    // Screens past the second live in the extras list.
+    final existing = state.extras.where((s) => s.index == index).firstOrNull;
+    final cleanName = (name == null || name.trim().isEmpty)
+        ? (existing?.name ?? 'شاشة ${index + 1}')
+        : name.trim();
+    final updated = TvScreenSlot(
+      index: index,
+      ip: cleanIp ?? existing?.ip ?? '',
+      name: cleanName,
+      deviceId: clearDevice
+          ? null
+          : (deviceId ?? (clearDevice ? null : existing?.deviceId)),
+    );
+    final next = [
+      for (final s in state.extras)
+        if (s.index == index) updated else s,
+      if (existing == null) updated,
+    ];
+    state = state.copyWith(extras: next);
+    await _db.settingsDao.setValue(ipKeyFor(index), updated.ip);
+    await _db.settingsDao.setValue(nameKeyFor(index), updated.name);
+    await _db.settingsDao.setValue(
+        deviceKeyFor(index), updated.deviceId?.toString() ?? 'all');
+    return null;
+  }
+
+  /// Adds an empty screen and returns its storage index, or null when the
+  /// café is already at [TvConfig.maxSlots].
+  int? addSlot() {
+    if (!state.canAddSlot) return null;
+    final index = _nextFreeIndex;
+    state = state.copyWith(extras: [
+      ...state.extras,
+      TvScreenSlot(index: index, ip: '', name: 'شاشة ${index + 1}'),
+    ]);
+    _db.settingsDao.setValue(ipKeyFor(index), '');
+    return index;
+  }
+
+  /// Clears a screen. Slot 0 is never removable: it is the one the pusher
+  /// starts on, and a program with no screen at all cannot be recovered from
+  /// the settings page.
+  Future<void> removeSlot(int index) async {
+    if (index == 0) return;
+    if (index == 1) {
+      setSecondIp('');
+      setSecondDevice(null);
+      return;
+    }
+    state = state.copyWith(
+        extras: state.extras.where((s) => s.index != index).toList());
+    await _db.settingsDao.setValue(ipKeyFor(index), '');
+    await _db.settingsDao.setValue(deviceKeyFor(index), 'all');
+  }
 
   /// Show the session cards on the TV itself (off = it is only a power
   /// switch for the wall screen).

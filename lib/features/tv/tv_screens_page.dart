@@ -54,11 +54,14 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
   /// worse, it would fight the person typing in it.
   void _seed(TvConfig config) {
     if (_seeded || !config.loaded) return;
-    for (var i = 0; i < config.identities.length; i++) {
-      _nameFields['name$i'] =
-          TextEditingController(text: i == 0 ? config.name : config.secondName);
-      _ipFields['ip$i'] =
-          TextEditingController(text: i == 0 ? config.ip : config.secondIp);
+    // Seeded per screen from that screen's own slot, keyed by its storage
+    // index. Keying by list position instead would hand the first screen's
+    // text to whichever screen moved into its place after a screen was cleared.
+    for (final slot in config.slots) {
+      _nameFields['name${slot.index}'] ??=
+          TextEditingController(text: slot.name);
+      _ipFields['ip${slot.index}'] ??=
+          TextEditingController(text: slot.ip.trim());
     }
     _seeded = true;
   }
@@ -112,14 +115,14 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
         const <DeviceWithType>[];
 
     // Each panel is built by a method rather than inline in the loop. Every
-    // button below captures the index it belongs to, and a closure written
+    // button below captures the screen it belongs to, and a closure written
     // inside a `for` body captures the *final* value of the loop variable —
     // which would have made every screen's buttons steer the last screen.
     final panels = <Widget>[
-      for (var i = 0; i < config.identities.length; i++)
+      for (final slot in config.slots)
         Padding(
           padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-          child: _panel(i, config, reports, devices),
+          child: _panel(slot, config, reports, devices),
         ),
     ];
 
@@ -129,6 +132,42 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
         _Header(reports: reports, enabled: config.enabled),
         const SizedBox(height: AppSpacing.md),
         ...panels,
+        const SizedBox(height: AppSpacing.xs),
+        // A television that is on the wall but not in this list cannot be
+        // switched off at checkout, so adding one is a normal thing to do and
+        // not something to hide behind a repair manual. Hidden at the ceiling
+        // because past that the additions are more likely a mistake than a
+        // plan.
+        if (config.canAddSlot)
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton.icon(
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: const Text('＋ شاشة جديدة'),
+              onPressed: () {
+                final index = ref.read(tvConfigProvider.notifier).addSlot();
+                if (index == null) {
+                  _say('وصلنا للحد الأقصى');
+                  return;
+                }
+                // Re-seeded so the new panel's fields appear with the screen
+                // already named, instead of two blank boxes to fill in.
+                setState(() {
+                  _seeded = false;
+                  _seed(ref.read(tvConfigProvider));
+                });
+                _say('ضيف عنوان الشاشة واسمها');
+              },
+            ),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+            child: Text(
+              'وصلنا لحد ${TvConfig.maxSlots} شاشات — وده كل اللي في المحل.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
         const SizedBox(height: AppSpacing.sm),
         _Switches(
           enabled: config.enabled,
@@ -148,32 +187,56 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
     );
   }
 
-  /// The panel for the [index]-th configured screen, wired to that screen and
-  /// to no other.
+  /// The panel for one configured screen, wired to that screen and to no other.
+  ///
+  /// Everything below is written against the slot rather than against "the
+  /// first screen" or "the second screen", so a third television is built by
+  /// exactly the same code and cannot be wired to the wrong screen's settings.
   Widget _panel(
-    int index,
+    TvScreenSlot slot,
     TvConfig config,
     List<TvScreenReport> reports,
     List<DeviceWithType> devices,
   ) {
     final notifier = ref.read(tvConfigProvider.notifier);
-    final identity = config.identities[index];
+    final identity = slot.identity;
     final ip = identity.ip.trim();
+    // Keyed by the slot's own storage index, not by its position in the list,
+    // so the text fields keep following their screen when an earlier one is
+    // cleared.
+    final key = slot.index;
     return _ScreenPanel(
-      index: index,
+      index: key,
       report: _findReport(reports, ip),
       identity: identity,
-      nameField: _nameFields['name$index'],
-      ipField: _ipFields['ip$index'],
-      deviceId: index == 0 ? config.deviceId : config.secondDeviceId,
+      nameField: _nameFields['name$key'],
+      ipField: _ipFields['ip$key'],
+      deviceId: slot.deviceId,
       devices: devices,
       expanded: _expanded.contains(ip),
       onToggleExpanded: () => setState(() {
         if (!_expanded.remove(ip)) _expanded.add(ip);
       }),
-      onName: index == 0 ? notifier.setName : notifier.setSecondName,
-      onIp: index == 0 ? notifier.setIp : notifier.setSecondIp,
-      onDevice: index == 0 ? notifier.setDevice : notifier.setSecondDevice,
+      onName: (v) => notifier.saveSlot(key, name: v),
+      onIp: (v) async {
+        final clash = await notifier.saveSlot(key, ip: v);
+        if (clash == -1) _say('العنوان ده مستخدم في شاشة تانية');
+      },
+      onDevice: (id) async {
+        final clash = await notifier.saveSlot(
+          key,
+          deviceId: id,
+          clearDevice: id == null,
+        );
+        // Said plainly and by name, because the alternative is a machine that
+        // quietly drives two walls and a checkout that blanks the wrong one.
+        if (clash != null) {
+          final other = config.slots
+              .where((s) => s.index != key && s.deviceId == clash)
+              .firstOrNull;
+          _say('الجهاز ده مربوط بالفعل بـ${other?.name ?? 'شاشة تانية'}');
+        }
+      },
       onProbe: () => _probe(ip, identity.name),
       onSearch: () => _search(ip, identity.name),
       onOpen: () {
