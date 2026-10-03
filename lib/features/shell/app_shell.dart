@@ -38,6 +38,7 @@ import '../tv/tv_mode_screen.dart';
 import '../tv/tv_screens_page.dart';
 import '../../core/database/daos/device_dao.dart';
 import '../../core/database/daos/session_dao.dart';
+import '../../core/tv/hard_lock.dart';
 import '../../core/tv/tv_display_service.dart';
 import '../../core/tv/tv_screen_report.dart';
 import '../../data/repositories/device_repository.dart';
@@ -274,14 +275,15 @@ class _AppShellState extends ConsumerState<AppShell> {
                   .where((d) => d.device.id == slot.deviceId)
                   .map((d) => '${d.type.name} — ${d.device.name}')
                   .firstOrNull,
-          sessionRunning: slot.deviceId != null && tvBusy.contains(slot.deviceId),
+          sessionRunning:
+              slot.deviceId != null && tvBusy.contains(slot.deviceId),
           // The screens panel believes a screen is unbound until the settings
           // that bind it arrive, which turns every launch into a red fault.
           configLoaded: tvConfig.loaded,
         ),
     ];
 
-    if (TvDisplayService.tvAllowed &&
+if (TvDisplayService.tvAllowed &&
         tvConfig.enabled &&
         tvConfig.addresses.isNotEmpty) {
       final tv = TvDisplayService.instance;

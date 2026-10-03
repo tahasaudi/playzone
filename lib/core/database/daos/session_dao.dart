@@ -39,10 +39,11 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
     int? packageId,
     double? fixedPrice,
     int? plannedMinutes,
+    String mode = 'single',
   }) async {
     // Package sessions are billed at a flat price — no per-second
     // segment accrual, so segmentStartAt stays null for their whole run.
-    // A fixed-duration session (60/30/15/7 from the quick buttons) gets a
+    // A fixed-duration session (60/30/15 from the quick buttons) gets a
     // timeUpAt deadline: billing is capped there and the session ends by
     // itself when it passes.
     final now = DateTime.now();
@@ -53,13 +54,15 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
       packageId: Value(packageId),
       fixedPrice: Value(fixedPrice),
       plannedMinutes: Value(plannedMinutes),
+      mode: Value(mode),
       timeUpAt: Value(plannedMinutes == null || plannedMinutes <= 0
           ? null
           : now.add(Duration(minutes: plannedMinutes))),
       segmentStartAt: fixedPrice == null ? Value(now) : const Value(null),
     ));
     await (update(devices)..where((d) => d.id.equals(deviceId))).write(
-      DevicesCompanion(status: const Value('active'), updatedAt: Value(DateTime.now())),
+      DevicesCompanion(
+          status: const Value('active'), updatedAt: Value(DateTime.now())),
     );
     return id;
   }
@@ -68,16 +71,19 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
   /// Used by pause, mode-switch, time-up, and complete — every path that
   /// stops the "clock" for whatever reason funnels through here so the
   /// cost math only lives in one place.
-  double _freezeCurrentSegment(SessionRow session, DeviceRow device, DeviceTypeRow type) {
+  double _freezeCurrentSegment(
+      SessionRow session, DeviceRow device, DeviceTypeRow type) {
     if (session.segmentStartAt == null) return session.accumulatedCost;
     var elapsedSeconds =
-        DateTime.now().difference(session.segmentStartAt!).inMilliseconds / 1000.0;
+        DateTime.now().difference(session.segmentStartAt!).inMilliseconds /
+            1000.0;
     // A fixed-duration session stops billing at its deadline, even if the
     // auto-expiry write hasn't landed yet — the cost can never exceed the
     // minutes the cashier actually sold.
     final end = session.timeUpAt;
     if (end != null) {
-      final capped = end.difference(session.segmentStartAt!).inMilliseconds / 1000.0;
+      final capped =
+          end.difference(session.segmentStartAt!).inMilliseconds / 1000.0;
       if (capped < elapsedSeconds) elapsedSeconds = capped;
     }
     if (elapsedSeconds < 0) elapsedSeconds = 0;
@@ -100,7 +106,8 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
   }
 
   Future<void> pause(SessionBoardEntry entry) async {
-    final frozenCost = _freezeCurrentSegment(entry.session, entry.device, entry.type);
+    final frozenCost =
+        _freezeCurrentSegment(entry.session, entry.device, entry.type);
     await (update(sessions)..where((s) => s.id.equals(entry.session.id))).write(
       SessionsCompanion(
         pausedAt: Value(DateTime.now()),
@@ -111,7 +118,8 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
       ),
     );
     await (update(devices)..where((d) => d.id.equals(entry.device.id))).write(
-      DevicesCompanion(status: const Value('paused'), updatedAt: Value(DateTime.now())),
+      DevicesCompanion(
+          status: const Value('paused'), updatedAt: Value(DateTime.now())),
     );
   }
 
@@ -130,13 +138,15 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
         pausedAt: const Value(null),
         totalPausedMinutes: Value(session.totalPausedMinutes + pausedSince),
         segmentStartAt: Value(DateTime.now()), // a fresh segment begins
-        timeUpAt: Value(session.timeUpAt?.add(Duration(milliseconds: pausedMs))),
+        timeUpAt:
+            Value(session.timeUpAt?.add(Duration(milliseconds: pausedMs))),
         status: const Value('active'),
         updatedAt: Value(DateTime.now()),
       ),
     );
     await (update(devices)..where((d) => d.id.equals(session.deviceId))).write(
-      DevicesCompanion(status: const Value('active'), updatedAt: Value(DateTime.now())),
+      DevicesCompanion(
+          status: const Value('active'), updatedAt: Value(DateTime.now())),
     );
   }
 
@@ -145,8 +155,10 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
   /// old mode is billed at the old mode's rate and locked into
   /// accumulatedCost; a new segment then starts in [newMode].
   Future<void> switchMode(SessionBoardEntry entry, String newMode) async {
-    if (entry.session.status != 'active') return; // only makes sense while running
-    final frozenCost = _freezeCurrentSegment(entry.session, entry.device, entry.type);
+    if (entry.session.status != 'active')
+      return; // only makes sense while running
+    final frozenCost =
+        _freezeCurrentSegment(entry.session, entry.device, entry.type);
     await (update(sessions)..where((s) => s.id.equals(entry.session.id))).write(
       SessionsCompanion(
         mode: Value(newMode),
@@ -163,7 +175,8 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
   /// 'timeup' (not 'completed') precisely so the cashier can still press
   /// تحصيل on it and settle the bill — the money is never lost.
   Future<void> timeUp(SessionBoardEntry entry) async {
-    final frozen = _freezeCurrentSegment(entry.session, entry.device, entry.type);
+    final frozen =
+        _freezeCurrentSegment(entry.session, entry.device, entry.type);
     await (update(sessions)..where((s) => s.id.equals(entry.session.id))).write(
       SessionsCompanion(
         accumulatedCost: Value(frozen),
@@ -174,7 +187,8 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
       ),
     );
     await (update(devices)..where((d) => d.id.equals(entry.device.id))).write(
-      DevicesCompanion(status: const Value('available'), updatedAt: Value(DateTime.now())),
+      DevicesCompanion(
+          status: const Value('available'), updatedAt: Value(DateTime.now())),
     );
   }
 
@@ -245,7 +259,8 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
     });
   }
 
-  Future<void> complete(SessionBoardEntry entry, {double? overrideFinalCost}) async {
+  Future<void> complete(SessionBoardEntry entry,
+      {double? overrideFinalCost}) async {
     final finalCost = overrideFinalCost ??
         entry.session.fixedPrice ??
         _freezeCurrentSegment(entry.session, entry.device, entry.type);
@@ -260,7 +275,8 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
       ),
     );
     await (update(devices)..where((d) => d.id.equals(entry.device.id))).write(
-      DevicesCompanion(status: const Value('available'), updatedAt: Value(DateTime.now())),
+      DevicesCompanion(
+          status: const Value('available'), updatedAt: Value(DateTime.now())),
     );
   }
 
@@ -295,9 +311,7 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
     required DateTime to,
   }) {
     return select(sessions).watch().map((rows) => rows
-        .where((r) =>
-            !r.startTime.isBefore(from) &&
-            r.startTime.isBefore(to))
+        .where((r) => !r.startTime.isBefore(from) && r.startTime.isBefore(to))
         .toList());
   }
 }
@@ -317,13 +331,15 @@ class SessionBoardEntry {
   final DeviceTypeRow type;
   final CustomerRow? customer;
 
-  double get singleHourlyRate => device.customHourlyRate ?? type.defaultHourlyRate;
+  double get singleHourlyRate =>
+      device.customHourlyRate ?? type.defaultHourlyRate;
   double get multiHourlyRate {
     final multi = device.customHourlyRateMulti ?? type.defaultHourlyRateMulti;
     // DBs migrated before multi pricing existed store 0 — treat that as
     // "use the single rate" so "مالتي" never bills at zero.
     return multi > 0 ? multi : singleHourlyRate;
   }
+
   double get currentHourlyRate =>
       session.mode == 'multi' ? multiHourlyRate : singleHourlyRate;
 
@@ -333,14 +349,16 @@ class SessionBoardEntry {
   /// bill comes from accumulatedCost + the live segment below, which
   /// correctly accounts for mode switches.
   double get elapsedActiveMinutes {
-    final totalSinceStart = DateTime.now().difference(session.startTime).inSeconds / 60.0;
+    final totalSinceStart =
+        DateTime.now().difference(session.startTime).inSeconds / 60.0;
     final currentPause = session.pausedAt == null
         ? 0.0
         : DateTime.now().difference(session.pausedAt!).inSeconds / 60.0;
     var elapsed = totalSinceStart - session.totalPausedMinutes - currentPause;
     if (elapsed < 0) elapsed = 0;
     final planned = session.plannedMinutes;
-    if (planned != null && planned > 0 && elapsed > planned) elapsed = planned.toDouble();
+    if (planned != null && planned > 0 && elapsed > planned)
+      elapsed = planned.toDouble();
     return elapsed;
   }
 
@@ -370,13 +388,16 @@ class SessionBoardEntry {
     if (session.fixedPrice != null) return session.fixedPrice!;
     if (session.segmentStartAt == null) return session.accumulatedCost;
     var elapsedSeconds =
-        DateTime.now().difference(session.segmentStartAt!).inMilliseconds / 1000.0;
+        DateTime.now().difference(session.segmentStartAt!).inMilliseconds /
+            1000.0;
     final end = session.timeUpAt;
     if (end != null) {
-      final capped = end.difference(session.segmentStartAt!).inMilliseconds / 1000.0;
+      final capped =
+          end.difference(session.segmentStartAt!).inMilliseconds / 1000.0;
       if (capped < elapsedSeconds) elapsedSeconds = capped;
     }
     if (elapsedSeconds < 0) elapsedSeconds = 0;
-    return session.accumulatedCost + (currentHourlyRate / 3600) * elapsedSeconds;
+    return session.accumulatedCost +
+        (currentHourlyRate / 3600) * elapsedSeconds;
   }
 }

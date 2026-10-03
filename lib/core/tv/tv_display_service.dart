@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'hard_lock.dart';
 import 'tv_power_service.dart';
 import 'tv_screen_report.dart';
 
@@ -35,8 +36,7 @@ class TvDisplayService {
   /// exist on this machine (Windows blocks LAN traffic otherwise).
   static const int port = 41777;
 
-  static const _soapEnvelope =
-      '<?xml version="1.0" encoding="utf-8"?>'
+  static const _soapEnvelope = '<?xml version="1.0" encoding="utf-8"?>'
       '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
       's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
       '%BODY%</s:Body></s:Envelope>';
@@ -93,7 +93,8 @@ class TvDisplayService {
   /// app re-offers the URL on every push, so a token from a previous run is
   /// never one a screen can be holding.
   String _tokenFor(String tvIp) => _tokens.putIfAbsent(tvIp.trim(), () {
-        final t = Random().nextInt(0x7fffffff).toRadixString(16).padLeft(7, '0');
+        final t =
+            Random().nextInt(0x7fffffff).toRadixString(16).padLeft(7, '0');
         _tokenOwner[t] = tvIp.trim();
         return t;
       });
@@ -115,7 +116,7 @@ class TvDisplayService {
 
   /// Whether the TV feature is switched on at all — a screen cannot be
   /// blamed for being dark when the whole feature is off.
-  static bool featureEnabled = true;
+  static bool featureEnabled = false;
 
   /// Set once at startup from the `PLAYZONE_TV` environment variable.
   ///
@@ -237,11 +238,11 @@ class TvDisplayService {
 
   /// Starts the local image server. Idempotent.
   Future<bool> startServer() async {
-    if (!tvAllowed) return false;
+if (!tvAllowed) return false;
     if (_server != null) return true;
     try {
-      _server = await HttpServer.bind(InternetAddress.anyIPv4, port,
-          shared: false);
+      _server =
+          await HttpServer.bind(InternetAddress.anyIPv4, port, shared: false);
       _server!.listen(_handleRequest, onError: (_) {});
       await _startSelfTest();
       // Have a frame ready before anyone asks for one. A TV that is sent a
@@ -294,8 +295,8 @@ class TvDisplayService {
   /// screens do not use it, and the app runs perfectly well without it.
   Future<void> _startSelfTest() async {
     try {
-      _testServer ??= await HttpServer.bind(InternetAddress.loopbackIPv4,
-          port + 1,
+      _testServer ??= await HttpServer.bind(
+          InternetAddress.loopbackIPv4, port + 1,
           shared: false);
       _testServer!.listen(_handleSelfTest, onError: (_) {});
     } catch (_) {
@@ -475,6 +476,10 @@ class TvDisplayService {
   /// that cannot be reached now is a screen that was already off, which is
   /// where it needed to be anyway.
   Future<void> releaseAllScreens() async {
+    // When the wall-screen feature is off (the default), the program must
+    // never send this or any other command to a television. Closing the
+    // window is no exception.
+    if (!featureEnabled) return;
     final known = _controlCache.keys.toList(growable: false);
     if (known.isEmpty) return;
     for (final ip in known) {
@@ -553,7 +558,7 @@ class TvDisplayService {
   /// TV refuses a real network power-off. One push, no loop, so it is
   /// immediate.
   Future<bool> pushBlack(String tvIp) async {
-    if (!tvAllowed) return false;
+if (!tvAllowed) return false;
     // Claimed before anything else happens, including the blank. From this
     // moment the wall is paid for and dark, and any release already in flight
     // is no longer allowed to take it back.
@@ -579,7 +584,10 @@ class TvDisplayService {
   }
 
   /// A single SOAP push, for callers that manage their own timing.
-  Future<bool> pushOnceNow() => _pushOnce(_currentTvIp);
+  Future<bool> pushOnceNow() async {
+    if (kHardLockWallNetwork) return false;
+    return _pushOnce(_currentTvIp);
+  }
 
   /// Remembers where the TV lives so `pushOnceNow()` works without being
   /// handed the address every time.
@@ -621,7 +629,7 @@ class TvDisplayService {
   /// moves on every TV restart and a screen that is off answers nothing on
   /// the first try. Stops once the endpoint is known.
   Future<void> warmUp({required String tvIp, bool force = false}) async {
-    if (!tvAllowed) return;
+if (!tvAllowed) return;
     _currentTvIp = tvIp;
     if (_warming.contains(tvIp)) return;
     _warming.add(tvIp);
@@ -733,7 +741,9 @@ class TvDisplayService {
   /// flow (HDMI on, black off) is one-shot: `releaseToInput()` and
   /// `pushBlack()` each fire a single command, so nothing polls in the
   /// background and a session start feels instant.
-  void startPushing({required String tvIp, Duration every = const Duration(seconds: 2)}) {
+  void startPushing(
+      {required String tvIp, Duration every = const Duration(seconds: 2)}) {
+    if (kHardLockWallNetwork) return;
     stopPushing();
     if (tvIp.isEmpty) return;
     _currentTvIp = tvIp;
@@ -753,6 +763,7 @@ class TvDisplayService {
   /// SSDP alive announcement. Without it an LG renderer answers Play with
   /// HTTP 500 because it never saw this PC on the network.
   Future<void> announce() async {
+    if (kHardLockWallNetwork) return;
     final self = await resolveLocalAddress();
     if (self == null) return;
     try {
@@ -823,7 +834,8 @@ class TvDisplayService {
       // CurrentURIMetaData is empty — the DIDL-Lite descriptor is what
       // tells the TV this is a still image it can display. (Verified
       // against a 55UP7760PVB: empty metadata → 500, DIDL → works.)
-      final didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
+      final didl =
+          '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
           ' xmlns:dc="http://purl.org/dc/elements/1.1/"'
           ' xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
           '<item id="0" parentID="-1" restricted="1">'
@@ -861,9 +873,11 @@ class TvDisplayService {
           await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
           await _settle(ctl, tvIp, 1200);
         }
-        await _soap(ctl, 'SetAVTransportURI',
+        await _soap(
+            ctl,
+            'SetAVTransportURI',
             '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
-            '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
+                '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
         await Future<void>.delayed(const Duration(milliseconds: 200));
         await _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
         return _awaitFetch(tvIp, before, 900);
@@ -946,10 +960,10 @@ class TvDisplayService {
         askedOnce = true;
         final state =
             RegExp(r'<CurrentTransportState>([^<]*)</CurrentTransportState>')
-                .firstMatch(payload)
-                ?.group(1)
-                ?.trim()
-                .toUpperCase() ??
+                    .firstMatch(payload)
+                    ?.group(1)
+                    ?.trim()
+                    .toUpperCase() ??
                 '';
         markReached(tvIp, state: state);
         if (state.isEmpty || rest.any(state.contains)) return true;
@@ -969,7 +983,8 @@ class TvDisplayService {
   /// second, and this runs off the command path in the background, so the
   /// person at the till is not waiting on it. Returning on the first sighting
   /// keeps the common case instant instead of always paying the full wait.
-  Future<bool> _awaitFetch(String tvIp, int before, [int budgetMs = 1400]) async {
+  Future<bool> _awaitFetch(String tvIp, int before,
+      [int budgetMs = 1400]) async {
     final log = _log(tvIp);
     if (log.imagesServed > before) return true;
     for (var waited = 0; waited < budgetMs; waited += 200) {
@@ -1109,7 +1124,8 @@ class TvDisplayService {
     final log = _log(tvIp);
     if (log.controlUrl != control) {
       log.controlUrl = control;
-      log.note('اتعرفنا على الشاشة: ${Uri.tryParse(control)?.origin ?? control}');
+      log.note(
+          'اتعرفنا على الشاشة: ${Uri.tryParse(control)?.origin ?? control}');
     }
     log.discoveredAt ??= DateTime.now();
   }
@@ -1155,8 +1171,8 @@ class TvDisplayService {
 
     try {
       for (var i = 0; i < candidates.length; i += batch) {
-        final slice = candidates.sublist(
-            i, (i + batch).clamp(0, candidates.length));
+        final slice =
+            candidates.sublist(i, (i + batch).clamp(0, candidates.length));
         final results = await Future.wait(slice.map(_isPortOpen));
         for (var j = 0; j < slice.length; j++) {
           if (results[j] == true) found.add('http://$tvIp:${slice[j]}/');
@@ -1283,8 +1299,7 @@ class TvDisplayService {
   /// identical from the outside — both are HTTP 500 — and they mean opposite
   /// things, so the number is what the log needs to carry.
   static String? _upnpErrorCode(String soapBody) {
-    final m = RegExp(r'<errorCode>(\d+)</errorCode>')
-        .firstMatch(soapBody);
+    final m = RegExp(r'<errorCode>(\d+)</errorCode>').firstMatch(soapBody);
     if (m == null) return null;
     final d = RegExp(r'<errorDescription>([^<]*)</errorDescription>')
         .firstMatch(soapBody);
@@ -1302,14 +1317,14 @@ class TvDisplayService {
   Future<(int?, String, bool)> _soapRaw(
       String controlUrl, String action, String body) async {
     const service = 'urn:schemas-upnp-org:service:AVTransport:1';
-    final xml = _soapEnvelope.replaceAll(
-        '%BODY%',
+    final xml = _soapEnvelope.replaceAll('%BODY%',
         '<u:$action xmlns:u="$service"><InstanceID>0</InstanceID>$body</u:$action>');
     HttpClient? client;
     try {
       client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
       final req = await client.postUrl(Uri.parse(controlUrl));
-      req.headers.set(HttpHeaders.contentTypeHeader, 'text/xml; charset="utf-8"');
+      req.headers
+          .set(HttpHeaders.contentTypeHeader, 'text/xml; charset="utf-8"');
       req.headers.set('SOAPACTION', '"$service#$action"');
       req.add(utf8.encode(xml));
       final res = await req.close().timeout(const Duration(seconds: 5));
@@ -1420,10 +1435,11 @@ class TvDisplayService {
         log.faultAt = DateTime.now();
         return false;
       }
-      final state = RegExp(r'<CurrentTransportState>([^<]*)</CurrentTransportState>')
-          .firstMatch(payload)
-          ?.group(1)
-          ?.trim();
+      final state =
+          RegExp(r'<CurrentTransportState>([^<]*)</CurrentTransportState>')
+              .firstMatch(payload)
+              ?.group(1)
+              ?.trim();
       // Sample the fetch count so the panel's claim can be checked against
       // something that happened rather than something it said. The first probe
       // has nothing to compare against and is recorded as unknown, which is the
@@ -1457,9 +1473,11 @@ class TvDisplayService {
   /// timer while the settings page is open, and the reason nobody ever has to
   /// open a terminal to find out what a screen is doing.
   Future<void> probeAll(List<String> addresses, {bool discover = false}) async {
-    await Future.wait(addresses
-        .where((ip) => ip.trim().isNotEmpty)
-        .map((ip) => probeTransport(ip, discover: discover)),
+    if (kHardLockWallNetwork) return;
+    await Future.wait(
+        addresses
+            .where((ip) => ip.trim().isNotEmpty)
+            .map((ip) => probeTransport(ip, discover: discover)),
         eagerError: false);
   }
 
@@ -1578,8 +1596,9 @@ class TvDisplayService {
   /// is what makes the black frame work on that screen; the 55" never asks.
   Future<void> _handleControl(HttpRequest request, HttpResponse res) async {
     final body = await utf8.decoder.bind(request).join();
-    final action = RegExp(r'"#([A-Za-z]+)"').firstMatch(
-            request.headers.value('SOAPACTION') ?? '')?.group(1) ??
+    final action = RegExp(r'"#([A-Za-z]+)"')
+            .firstMatch(request.headers.value('SOAPACTION') ?? '')
+            ?.group(1) ??
         (RegExp(r'<u:(\w+)\s').firstMatch(body)?.group(1) ?? '');
     _lastSoapAction = action;
     if (action == 'Browse') _browseCalls++;
@@ -1593,7 +1612,8 @@ class TvDisplayService {
         // what it found has nothing to dial - and the failure surfaces later as
         // a renderer that accepts the play and never fetches.
         final uri = 'http://$self:$port/tv.jpg?v=$_revision';
-        final didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
+        final didl =
+            '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
             ' xmlns:dc="http://purl.org/dc/elements/1.1/"'
             ' xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
             '<item id="0" parentID="0" restricted="1">'
@@ -1603,22 +1623,26 @@ class TvDisplayService {
             '<res protocolInfo="http-get:*:image/png:DLNA.ORG_OP=01;'
             'DLNA.ORG_CI=0" size="${_imageBytes}">$uri</res>'
             '</item></DIDL-Lite>';
-        inner = '<u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
+        inner =
+            '<u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
             '<Result>${_escapeXml(didl)}</Result>'
             '<NumberReturned>1</NumberReturned>'
             '<TotalMatches>1</TotalMatches>'
             '<UpdateID>1</UpdateID>'
             '</u:BrowseResponse>';
       case 'GetProtocolInfo':
-        inner = '<u:GetProtocolInfoResponse xmlns:u="urn:schemas-upnp-org:service:ConnectionManager:1">'
+        inner =
+            '<u:GetProtocolInfoResponse xmlns:u="urn:schemas-upnp-org:service:ConnectionManager:1">'
             '<Source></Source>'
             '<Sink>http-get:*:image/png:*,http-get:*:image/jpeg:*</Sink>'
             '</u:GetProtocolInfoResponse>';
       case 'GetSearchCapabilities':
-        inner = '<u:GetSearchCapabilitiesResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
+        inner =
+            '<u:GetSearchCapabilitiesResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
             '<SearchCapabilities></SearchCapabilities></u:GetSearchCapabilitiesResponse>';
       case 'GetSortCapabilities':
-        inner = '<u:GetSortCapabilitiesResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
+        inner =
+            '<u:GetSortCapabilitiesResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
             '<SortCapabilities></SortCapabilities></u:GetSortCapabilitiesResponse>';
       default:
         res.statusCode = HttpStatus.badRequest;
@@ -1633,7 +1657,8 @@ class TvDisplayService {
     }
     res.statusCode = HttpStatus.ok;
     res.headers.contentType = ContentType('text', 'xml', charset: 'utf-8');
-    res.headers.set('SOAPACTION', '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"');
+    res.headers.set('SOAPACTION',
+        '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"');
     res.write(envelope.replaceAll('</s:Body>', '$inner</s:Body>'));
     await res.close();
   }
@@ -1774,8 +1799,8 @@ class TvDisplayService {
     }
     if (request.uri.path != '/tv.jpg' || _image == null) {
       res.statusCode = HttpStatus.notFound;
-      res.headers.set('X-PlayZone-Reason',
-          _image == null ? 'no-image-yet' : 'wrong-path');
+      res.headers.set(
+          'X-PlayZone-Reason', _image == null ? 'no-image-yet' : 'wrong-path');
       await res.close();
       return;
     }
@@ -1861,10 +1886,10 @@ class TvDisplayService {
   /// Copied before it is read. `_controlCache` is written by every discovery,
   /// and a discovery is exactly what is running when someone asks the status
   /// page why a screen cannot be found.
-  String get controlSummary => List<MapEntry<String, (String, DateTime)>>.of(
-          _controlCache.entries)
-      .map((e) => '${e.key} -> ${e.value.$1.split('/AVTransport/').first}')
-      .join(' , ');
+  String get controlSummary =>
+      List<MapEntry<String, (String, DateTime)>>.of(_controlCache.entries)
+          .map((e) => '${e.key} -> ${e.value.$1.split('/AVTransport/').first}')
+          .join(' , ');
 
   void dispose() {
     stopPushing();

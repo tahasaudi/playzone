@@ -1,11 +1,12 @@
 import 'dart:io';
+
+import '../tv/hard_lock.dart';
 import 'ir_command_box.dart';
 
 /// تنفيذ [IrCommandBox] للبورد "PlayZone IR Box" (ESP32).
 /// يتكلم معه عبر HTTP خام (بدون أي package خارجي) على الشبكة المحلية.
 class Esp32IrCommandBox implements IrCommandBox {
-  Esp32IrCommandBox(String baseUrl)
-      : _base = _normalize(baseUrl);
+  Esp32IrCommandBox(String baseUrl) : _base = _normalize(baseUrl);
 
   final String _base;
 
@@ -20,7 +21,8 @@ class Esp32IrCommandBox implements IrCommandBox {
 
   static const _timeout = Duration(seconds: 3);
 
-  Future<HttpClientResponse> _get(String path, [Map<String, String>? qs]) async {
+  Future<HttpClientResponse> _get(String path,
+      [Map<String, String>? qs]) async {
     final client = HttpClient()..connectionTimeout = _timeout;
     try {
       final uri = Uri.parse('$_base$path').replace(queryParameters: qs);
@@ -33,6 +35,7 @@ class Esp32IrCommandBox implements IrCommandBox {
 
   @override
   Future<bool> isReachable() async {
+    if (kHardLockWallNetwork) return false;
     try {
       final res = await _get('/api/liveness');
       return res.statusCode == 200;
@@ -43,6 +46,7 @@ class Esp32IrCommandBox implements IrCommandBox {
 
   @override
   Future<bool> send(String slot) async {
+    if (kHardLockWallNetwork) return false;
     try {
       final res = await _get('/api/send', {'slot': slot});
       return res.statusCode == 200;

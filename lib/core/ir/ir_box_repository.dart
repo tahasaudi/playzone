@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/repositories/settings_repository.dart';
+import '../tv/hard_lock.dart';
 import 'esp32_ir_command_box.dart';
 import 'ir_command_box.dart';
 
@@ -42,7 +43,10 @@ class IrBoxRepository {
   }
 
   /// يبني [IrCommandBox] لجهاز لو موجود له عنوان، وإلا null.
+  /// في النسخة المقفولة (hard lock) لا يُبنى أبداً أي صندوق — حتى لو
+  /// أضاف أحد عنواناً يدوياً، لا يوجد جسم قادر على بعث HTTP.
   IrCommandBox? boxFor(int deviceId, Map<int, String> links) {
+    if (kHardLockWallNetwork) return null;
     final url = links[deviceId];
     if (url == null || url.trim().isEmpty) return null;
     return Esp32IrCommandBox(url);

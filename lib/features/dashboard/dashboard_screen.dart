@@ -6,6 +6,7 @@ import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/widgets/status_badge.dart';
 import '../../core/widgets/glass_card.dart';
+import '../../core/widgets/app_buttons.dart';
 import '../../core/database/app_database.dart';
 import '../../core/database/database_provider.dart';
 import '../../core/database/daos/device_dao.dart';
@@ -20,7 +21,6 @@ import '../../data/repositories/package_repository.dart';
 import '../../core/utils/esc_handler_provider.dart';
 import '../../core/ir/ir_box_repository.dart';
 import '../../core/tv/tv_power_service.dart';
-import '../../core/tv/tv_display_service.dart';
 import '../tv/tv_mode_screen.dart';
 import '../devices/device_card.dart';
 import '../devices/session_details_panel.dart';
@@ -40,6 +40,77 @@ class DashboardScreen extends ConsumerStatefulWidget {
 
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   SessionBoardEntry? _selectedEntry;
+
+  /// Sessions already auto-darkened at their deadline — so the moment a
+  /// session flips to "timeup" the matching screen is put out exactly
+  /// once, and nobody has to touch anything.
+  final Set<int> _timeUpHandledSessionIds = {};
+  bool _seenInitialTimeUp = false;
+
+  /// Watches the live session board for the instant a fixed-duration
+  /// session runs out, and blanks that device's screen on its own —
+  /// fire-and-forget, silent, through the same TV/IR gates the rest of
+  /// the app uses (on this machine those gates are off: no bytes leave).
+  void _onSessionsChanged(List<SessionBoardEntry> sessions) {
+    final nowTimeUp =
+        sessions.where((s) => s.session.status == 'timeup').toList();
+    // On first load, sessions that were ALREADY time-up are left alone —
+    // their screens are already dark, re-firing could toggle one back on.
+    if (!_seenInitialTimeUp) {
+      _seenInitialTimeUp = true;
+      _timeUpHandledSessionIds.addAll(nowTimeUp.map((s) => s.session.id));
+      return;
+    }
+    for (final s in nowTimeUp) {
+      if (!_timeUpHandledSessionIds.add(s.session.id)) continue;
+      _autoDarkenScreen(s.device.id);
+    }
+  }
+
+  /// "وقت انتهى → الشاشة تطفي" — same owner-gate as checkout: only a
+  /// screen bound to this machine is steered (TvPowerService), plus a
+  /// linked IR box if any. Silent by design, no snackbar, fire & forget.
+  void _autoDarkenScreen(int deviceId) {
+    final ip = ref.read(tvConfigProvider).screenFor(deviceId);
+    if (ip != null) TvPowerService.instance.turnOff(ip);
+    final links = ref.read(irBoxLinksProvider);
+    final box = ref.read(irBoxRepositoryProvider).boxFor(deviceId, links);
+    if (box != null) box.send('power'); // ignore result on purpose
+  }
+
+  /// The café's roster reads in this order (device numbers): 1, 2, 4, 5, 6
+  /// then 3 — the machines' physical layout at the counter. Any device
+  /// outside the list keeps its natural number order after them.
+  static const _rosterPriority = [1, 2, 4, 5, 6, 3];
+
+  int _rosterRank(DeviceWithType d) {
+    final n = deviceNumberOf(d.device.name);
+    if (n == null) return 500;
+    final i = _rosterPriority.indexOf(n);
+    return i == -1 ? 400 : i;
+  }
+
+  int _rosterCompare(DeviceWithType a, DeviceWithType b) {
+    final rank = _rosterRank(a).compareTo(_rosterRank(b));
+    return rank != 0
+        ? rank
+        : compareDeviceNumbers(a.device.name, b.device.name);
+  }
+
+  double _rateFor(DeviceWithType d, String mode) =>
+      mode == 'multi' && d.effectiveHourlyRateMulti > 0
+          ? d.effectiveHourlyRateMulti
+          : d.effectiveHourlyRate;
+
+  String _modeForDevice(int deviceId) =>
+      ref.read(deviceModesProvider)[deviceId] ?? 'single';
+
+  /// Money (EGP) → the minutes it buys at [rate], or null (open-ended).
+  int? _minutesFromAmount(double? amount, double rate) {
+    if (amount == null || amount <= 0 || rate <= 0) return null;
+    final m = (amount * 60 / rate).floor();
+    return m < 1 ? null : m;
+  }
 
   /// Sum of café invoices grouped by session (sessionId → total).
   Map<int, double> _currentOrdersBySession() {
@@ -61,6 +132,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     // Background watchdog: flips timed sessions to 'timeup' by themselves
     // the moment their minutes run out, releasing the device.
     ref.watch(timeUpWatcherProvider);
+    // When a session's clock hits zero, darken its screen without anyone
+    // touching a button.
+    ref.listen<AsyncValue<List<SessionBoardEntry>>>(activeSessionsProvider,
+        (_, next) {
+      final list = next.valueOrNull;
+      if (list != null) _onSessionsChanged(list);
+    });
     // Device id → when its last session finished (FIFO for the waiting row).
     final lastFinished = ref.watch(lastFinishedByDeviceProvider).valueOrNull ??
         const <int, DateTime>{};
@@ -87,9 +165,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       child: Text('خطأ في تحميل الأجهزة: $e',
                           style: const TextStyle(color: AppColors.danger))),
                 ),
-                data: (devices) => _deviceSections(
-                    devices, sessionsAsync.value ?? [], ordersBySession,
-                    lastFinished),
+                data: (devices) => _deviceSections(devices,
+                    sessionsAsync.value ?? [], ordersBySession, lastFinished),
               ),
             ],
           ),
@@ -134,24 +211,29 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final waiting = <DeviceWithType>[];
     final maintenance = <DeviceWithType>[];
 
-    for (final d in devices) {
+    // The roster always reads in the café's own order (1→2→4→5→6→3), then
+    // the devices sort themselves into running/waiting/maintenance rows.
+    final ordered = List.of(devices)..sort(_rosterCompare);
+
+    for (final d in ordered) {
       final session = sessionByDevice[d.device.id];
       final status = session?.session.status ?? d.device.status;
       if (status == 'maintenance') {
         maintenance.add(d);
-      } else if (session != null && (status == 'active' || status == 'paused')) {
+      } else if (session != null &&
+          (status == 'active' || status == 'paused')) {
         running.add(d);
       } else {
         waiting.add(d);
       }
     }
 
-    // The roster always reads 1→2→3… (DeviceDao sorts it), and the
-    // sections keep the running machines on top, so a device that starts
-    // a session visibly moves up. `lastFinished` only feeds the "منذ …"
-    // hint, so whoever has been waiting longest is still obvious.
-    waiting.sort((a, b) =>
-        compareDeviceNumbers(a.device.name, b.device.name));
+    // The roster always reads in the café's own order (the [Dashboard]
+    // rank above), and the sections keep the running machines on top, so
+    // a device that starts a session visibly moves up. `lastFinished`
+    // only feeds the "منذ …" hint, so whoever has been waiting longest is
+    // still obvious.
+    waiting.sort(_rosterCompare);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -204,7 +286,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         children: [
           Row(
             children: [
-              Container(width: 8, height: 8,
+              Container(
+                  width: 8,
+                  height: 8,
                   decoration: BoxDecoration(
                       color: color, borderRadius: BorderRadius.circular(4))),
               const SizedBox(width: AppSpacing.sm),
@@ -216,8 +300,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               if (title == 'انتظار') ...[
                 const SizedBox(width: AppSpacing.md),
                 const Text('الأولوية: اللي خلص وقتها الأول',
-                    style: TextStyle(
-                        fontSize: 11, color: AppColors.textTertiary)),
+                    style:
+                        TextStyle(fontSize: 11, color: AppColors.textTertiary)),
               ],
             ],
           ),
@@ -236,16 +320,19 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               physics: const NeverScrollableScrollPhysics(),
               mainAxisSpacing: AppSpacing.sm,
               crossAxisSpacing: AppSpacing.sm,
-              // Taller than wide so the card breathes: header, the
-              // minutes + price row and the start button each get their
-              // own space. Six machines still fit on one screen.
-              childAspectRatio: 0.78,
+              // Taller than wide so the card breathes: header, mode
+              // toggles, the minutes + money row and the start button
+              // each get their own space.
+              childAspectRatio: 0.7,
               children: devices.map((d) {
                 final session = sessionByDevice[d.device.id];
-                final model = _toUiModel(
-                    d.device, d.type, session, ordersBySession);
+                final model =
+                    _toUiModel(d.device, d.type, session, ordersBySession);
                 final endedAt = lastFinished?[d.device.id];
                 final deviceMinutes = durationForDevice(ref, d.device.id);
+                final deviceAmount =
+                    ref.read(deviceAmountsProvider)[d.device.id];
+                final deviceMode = _modeForDevice(d.device.id);
                 return GestureDetector(
                   onTap: session != null ? () => _selectEntry(session) : null,
                   child: DeviceCard(
@@ -253,13 +340,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     device: model,
                     queuedSince: endedAt,
                     selectedMinutes: deviceMinutes,
+                    selectedAmount: deviceAmount,
+                    selectedMode: deviceMode,
                     hourlyRate: d.effectiveHourlyRate,
-                    onSelectDuration: (minutes) => _setDeviceDuration(
-                        d.device.id, minutes),
-                    onSelectOpenTime: (open) => _setDeviceDuration(
-                        d.device.id, open ? 0 : defaultSessionMinutes),
-                    onMinutesChanged: (minutes) => _setDeviceDuration(
-                        d.device.id, minutes < 0 ? 0 : minutes),
+                    multiHourlyRate: d.effectiveHourlyRateMulti,
+                    onSelectMode: (mode) => _setDeviceMode(d, mode),
+                    onSelectDuration: (minutes) =>
+                        _setDeviceDuration(d, minutes),
+                    onSelectOpenTime: (open) =>
+                        _setDeviceDuration(d, open ? 0 : defaultSessionMinutes),
+                    onAmountChanged: (amount) => _setDeviceAmount(d, amount),
                     onStart: () => _startSession(d.device.id),
                     onStartPackage:
                         session == null && d.device.status == 'available'
@@ -271,13 +361,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         session == null ? null : () => _openOrderModal(session),
                     onCheckout:
                         session == null ? null : () => _checkout(session),
-                    onSwitchMode: session == null ||
-                            session.session.status != 'active'
-                        ? null
-                        : () => _switchMode(session),
+                    onSwitchMode:
+                        session == null || session.session.status != 'active'
+                            ? null
+                            : () => _switchMode(session),
                     onExtend: session == null || !session.isTimeUp
                         ? null
-                        : () => _extend(session),
+                        : () => _openExtendDialog(session),
+                    onExtendCustom:
+                        session == null || session.session.status != 'active'
+                            ? null
+                            : () => _openExtendDialog(session),
                   ),
                 );
               }).toList(),
@@ -311,6 +405,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           deviceId: deviceId,
           employeeId: employee?.id,
           plannedMinutes: durationForDevice(ref, deviceId),
+          mode: _modeForDevice(deviceId),
         );
     _irCommand(deviceId, 'power');
     _wakeWallScreen(deviceId);
@@ -328,23 +423,88 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     TvPowerService.instance.turnOn(ip);
   }
 
-  /// Remembers a duration for one machine only. 0 = وقت مفتوح.
-  void _setDeviceDuration(int deviceId, int minutes) {
+  /// Remembers a duration for one machine only. 0 = وقت مفتوح. The money
+  /// field mirrors what that time costs, so the two never disagree.
+  void _setDeviceDuration(DeviceWithType d, int minutes) {
+    final mode = _modeForDevice(d.device.id);
+    final rate = _rateFor(d, mode);
     ref.read(deviceDurationsProvider.notifier).state = {
       ...ref.read(deviceDurationsProvider),
-      deviceId: minutes,
+      d.device.id: minutes,
     };
+    final amounts = {...ref.read(deviceAmountsProvider)};
+    if (minutes <= 0) {
+      amounts.remove(d.device.id);
+    } else {
+      amounts[d.device.id] = (rate / 60) * minutes;
+    }
+    ref.read(deviceAmountsProvider.notifier).state = amounts;
   }
 
-  /// Time is up but the players want to keep going: push the deadline out
-  /// by that machine's own duration and put the device back to work.
-  /// An open-ended device falls back to the café default (60 min).
-  Future<void> _extend(SessionBoardEntry entry) async {
-    final minutes = durationForDevice(ref, entry.device.id) ??
-        defaultSessionMinutes;
+  /// The cashier typed money: keep the amount, and work the minutes back
+  /// from it at this machine's mode rate. An empty box means "وقت مفتوح".
+  void _setDeviceAmount(DeviceWithType d, double? amount) {
+    final mode = _modeForDevice(d.device.id);
+    final rate = _rateFor(d, mode);
+    final minutes = _minutesFromAmount(amount, rate);
+    final durations = {...ref.read(deviceDurationsProvider)};
+    if (minutes == null) {
+      durations.remove(d.device.id);
+    } else {
+      durations[d.device.id] = minutes;
+    }
+    ref.read(deviceDurationsProvider.notifier).state = durations;
+    final amounts = {...ref.read(deviceAmountsProvider)};
+    if (amount == null || amount <= 0) {
+      amounts.remove(d.device.id);
+    } else {
+      amounts[d.device.id] = amount;
+    }
+    ref.read(deviceAmountsProvider.notifier).state = amounts;
+  }
+
+  /// فردي ↔ مالتي: the same money is re-priced at the other rate, so the
+  /// time shown on the card follows immediately.
+  void _setDeviceMode(DeviceWithType d, String mode) {
+    ref.read(deviceModesProvider.notifier).state = {
+      ...ref.read(deviceModesProvider),
+      d.device.id: mode,
+    };
+    final amount = ref.read(deviceAmountsProvider)[d.device.id];
+    if (amount != null && amount > 0) _setDeviceAmount(d, amount);
+  }
+
+  /// "＋ وقت": the cashier types minutes OR money and the session gets
+  /// that much time, at the session's current mode rate. Reached from the
+  /// run-time card (mid-session) AND from the time-up card — the popup
+  /// never skips the cashier's choice.
+  Future<void> _openExtendDialog(SessionBoardEntry entry) async {
+    final minutes = await showDialog<int>(
+      context: context,
+      builder: (_) => _ExtendTimeDialog(
+        sessionTitle: '${entry.type.name} — ${entry.device.name}',
+        modeLabel: entry.session.mode == 'multi' ? 'مالتي' : 'فردي',
+        rate: _sessionRateFor(entry),
+      ),
+    );
+    if (minutes == null || minutes <= 0) return;
     await ref.read(sessionRepositoryProvider).extend(entry, minutes);
-    _irCommand(entry.device.id, 'power');
-    _wakeWallScreen(entry.device.id);
+    _timeUpHandledSessionIds.remove(entry.session.id);
+    // If it came in from a time-up card the screen must come back on;
+    // a running session leaves its screen alone either way.
+    if (entry.session.status == 'timeup') {
+      _irCommand(entry.device.id, 'power');
+      _wakeWallScreen(entry.device.id);
+    }
+  }
+
+  /// The rate the given session bills at right now (its own mode).
+  double _sessionRateFor(SessionBoardEntry e) {
+    final multi =
+        e.device.customHourlyRateMulti ?? e.type.defaultHourlyRateMulti;
+    final single = e.device.customHourlyRate ?? e.type.defaultHourlyRate;
+    if (e.session.mode == 'multi' && multi > 0) return multi;
+    return single;
   }
 
   /// Session collected: the console goes to sleep and the wall screen goes
@@ -374,13 +534,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   /// "بدء بباقة" — shows the active packages that apply to this device's
   /// type, and starts a flat-price session for the chosen one.
   Future<void> _startFromPackage(DeviceWithType device) async {
-    final packages =
-        (ref.read(activePackagesProvider).valueOrNull ?? const [])
-            .where((p) => p.package.deviceTypeId == device.type.id)
-            .toList();
+    final packages = (ref.read(activePackagesProvider).valueOrNull ?? const [])
+        .where((p) => p.package.deviceTypeId == device.type.id)
+        .toList();
     if (packages.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('مفيش باقات متاحة لنوع الجهاز ده')));
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('مفيش باقات متاحة لنوع الجهاز ده')));
       return;
     }
     final chosen = await showDialog<PackageWithType>(
@@ -482,7 +641,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 
   DeviceUiModel _toUiModel(DeviceRow device, DeviceTypeRow type,
-    SessionBoardEntry? session, Map<int, double> ordersBySession) {
+      SessionBoardEntry? session, Map<int, double> ordersBySession) {
     final ordersTotal =
         session == null ? 0.0 : (ordersBySession[session.session.id] ?? 0.0);
     return DeviceUiModel(
@@ -490,13 +649,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       type: _mapType(type.name),
       status: _mapStatus(session?.session.status ?? device.status),
       customerName: session?.customer?.name,
-      elapsed: session == null ? null : _formatDuration(session.elapsedActiveMinutes),
-      remaining: session == null ? null : _formatRemaining(session.remainingMinutes),
-      mode: session == null ? null : (session.session.mode == 'multi' ? 'مالتي' : 'فردي'),
-      timeCost: session == null ? null : 'EGP ${session.liveCost.toStringAsFixed(2)}',
-      ordersCost: session == null
+      elapsed: session == null
           ? null
-          : 'EGP ${ordersTotal.toStringAsFixed(2)}',
+          : _formatDuration(session.elapsedActiveMinutes),
+      remaining:
+          session == null ? null : _formatRemaining(session.remainingMinutes),
+      mode: session == null
+          ? null
+          : (session.session.mode == 'multi' ? 'مالتي' : 'فردي'),
+      timeCost:
+          session == null ? null : 'EGP ${session.liveCost.toStringAsFixed(2)}',
+      ordersCost:
+          session == null ? null : 'EGP ${ordersTotal.toStringAsFixed(2)}',
     );
   }
 
@@ -510,9 +674,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final s = totalSeconds % 60;
     final mm = m.toString().padLeft(2, '0');
     final ss = s.toString().padLeft(2, '0');
-    return h > 0
-        ? '$h:$mm:$ss'
-        : '$mm:$ss';
+    return h > 0 ? '$h:$mm:$ss' : '$mm:$ss';
   }
 
   String _formatDuration(double minutes) {
@@ -556,10 +718,214 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 }
 
+/// "＋ وقت" dialog on a running device card: the cashier types minutes OR
+/// money — the two fields mirror each other at the session's current mode
+/// rate — and confirming pushes the deadline out by that much time.
+class _ExtendTimeDialog extends StatefulWidget {
+  const _ExtendTimeDialog({
+    required this.sessionTitle,
+    required this.modeLabel,
+    required this.rate,
+  });
+
+  final String sessionTitle;
+  final String modeLabel;
+  final double rate;
+
+  @override
+  State<_ExtendTimeDialog> createState() => _ExtendTimeDialogState();
+}
+
+class _ExtendTimeDialogState extends State<_ExtendTimeDialog> {
+  final _minutesCtrl = TextEditingController();
+  final _moneyCtrl = TextEditingController();
+  final _minutesFocus = FocusNode();
+  final _moneyFocus = FocusNode();
+  int _resultMinutes = 0;
+
+  @override
+  void dispose() {
+    _minutesCtrl.dispose();
+    _moneyCtrl.dispose();
+    _minutesFocus.dispose();
+    _moneyFocus.dispose();
+    super.dispose();
+  }
+
+  void _onMinutes(String raw) {
+    final m = int.tryParse(raw.trim());
+    _resultMinutes = m == null || m <= 0 ? 0 : m;
+    if (_resultMinutes > 0 && !_moneyFocus.hasFocus) {
+      final money = (_resultMinutes * widget.rate / 60).round();
+      _moneyCtrl.value = TextEditingValue(
+        text: money.toString(),
+        selection: TextSelection.collapsed(offset: money.toString().length),
+      );
+    }
+    setState(() {});
+  }
+
+  void _onMoney(String raw) {
+    final amount = double.tryParse(raw.trim());
+    var m =
+        amount == null || amount <= 0 ? 0 : (amount * 60 / widget.rate).floor();
+    if (m < 1) m = 0;
+    _resultMinutes = m;
+    if (m > 0 && !_minutesFocus.hasFocus) {
+      _minutesCtrl.value = TextEditingValue(
+        text: m.toString(),
+        selection: TextSelection.collapsed(offset: m.toString().length),
+      );
+    }
+    setState(() {});
+  }
+
+  Widget _field({
+    required bool money,
+    required FocusNode focus,
+    required TextEditingController ctrl,
+    required String hint,
+    required ValueChanged<String> onChanged,
+  }) {
+    return TextField(
+      controller: ctrl,
+      focusNode: focus,
+      keyboardType: TextInputType.number,
+      textAlign: TextAlign.center,
+      onChanged: onChanged,
+      style: const TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.w800,
+          color: AppColors.textPrimary),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(fontSize: 12, color: AppColors.textTertiary),
+        filled: true,
+        fillColor: AppColors.glassFill,
+        border: OutlineInputBorder(
+          borderRadius: AppRadius.smallR,
+          borderSide: const BorderSide(color: AppColors.glassBorder),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: AppRadius.smallR,
+          borderSide: const BorderSide(color: AppColors.glassBorder),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: AppRadius.smallR,
+          borderSide: const BorderSide(color: AppColors.glassBorderPurple),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: Container(
+        width: 440,
+        padding: const EdgeInsets.all(AppSpacing.xl),
+        decoration: BoxDecoration(
+          color: AppColors.bgElevated,
+          borderRadius: AppRadius.largeR,
+          border: Border.all(color: AppColors.glassBorderPurple),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('إضافة وقت للجلسة', style: AppTypography.sectionTitle),
+            const SizedBox(height: 2),
+            Text(widget.sessionTitle, style: AppTypography.secondary),
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              'السعر الحالي: EGP ${widget.rate.round()}/ساعة'
+              ' (${widget.modeLabel}) · الدقيقة ≈ '
+              '${(widget.rate / 60).toStringAsFixed(1)}',
+              style:
+                  const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('الدقائق', style: AppTypography.secondary),
+                      const SizedBox(height: 6),
+                      _field(
+                        money: false,
+                        focus: _minutesFocus,
+                        ctrl: _minutesCtrl,
+                        hint: '30',
+                        onChanged: _onMinutes,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('المبلغ (EGP)',
+                          style: AppTypography.secondary),
+                      const SizedBox(height: 6),
+                      _field(
+                        money: true,
+                        focus: _moneyFocus,
+                        ctrl: _moneyCtrl,
+                        hint: '50',
+                        onChanged: _onMoney,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              'اكتب أي واحد منهما — التاني بيتظبط لوحده',
+              style:
+                  const TextStyle(fontSize: 12, color: AppColors.textTertiary),
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            Row(
+              children: [
+                Expanded(
+                  child: SecondaryButton(
+                    label: 'إلغاء',
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  flex: 2,
+                  child: PrimaryButton(
+                    label: 'إضافة',
+                    icon: Icons.add_rounded,
+                    expand: true,
+                    onPressed: _resultMinutes > 0
+                        ? () => Navigator.of(context).pop(_resultMinutes)
+                        : null,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Small picker for "بدء بباقة": lists the active packages for a device
 /// type and returns the chosen one.
 class _PackagePickerDialog extends StatelessWidget {
-  const _PackagePickerDialog({required this.deviceName, required this.packages});
+  const _PackagePickerDialog(
+      {required this.deviceName, required this.packages});
   final String deviceName;
   final List<PackageWithType> packages;
 
