@@ -38,7 +38,7 @@ import '../tv/tv_mode_screen.dart';
 import '../tv/tv_screens_page.dart';
 import '../../core/database/daos/device_dao.dart';
 import '../../core/database/daos/session_dao.dart';
-import '../../core/tv/hard_lock.dart';
+
 import '../../core/tv/tv_display_service.dart';
 import '../../core/tv/tv_screen_report.dart';
 import '../../data/repositories/device_repository.dart';

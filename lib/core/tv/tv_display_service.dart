@@ -476,10 +476,15 @@ if (!tvAllowed) return false;
   /// that cannot be reached now is a screen that was already off, which is
   /// where it needed to be anyway.
   Future<void> releaseAllScreens() async {
-    // When the wall-screen feature is off (the default), the program must
-    // never send this or any other command to a television. Closing the
-    // window is no exception.
-    if (!featureEnabled) return;
+    // Gated on the machine's switch, not on `featureEnabled`.
+    //
+    // `featureEnabled` mirrors the in-program setting and is false until the
+    // shell first builds, so gating on it means a wall can be left black: the
+    // one thing this method exists to prevent. Releasing a screen is the safe
+    // direction anyway — it hands the television back to the console — so the
+    // only thing that should be able to stop it is a machine that is not
+    // allowed to touch a television at all.
+    if (!tvAllowed) return;
     final known = _controlCache.keys.toList(growable: false);
     if (known.isEmpty) return;
     for (final ip in known) {
