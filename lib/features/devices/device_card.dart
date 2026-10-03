@@ -71,8 +71,12 @@ class DeviceCard extends StatelessWidget {
     this.selectedMinutes,
     this.onSelectDuration,
     this.onSelectOpenTime,
-    this.onMinutesChanged,
+    this.onAmountChanged,
+    this.onSelectMode,
+    this.selectedAmount,
+    this.selectedMode = 'single',
     this.hourlyRate = 0,
+    this.multiHourlyRate = 0,
     this.onStart,
     this.onStartPackage,
     this.onOrder,
@@ -81,6 +85,7 @@ class DeviceCard extends StatelessWidget {
     this.onCheckout,
     this.onSwitchMode,
     this.onExtend,
+    this.onExtendCustom,
   });
 
   final DeviceUiModel device;
@@ -103,12 +108,27 @@ class DeviceCard extends StatelessWidget {
   /// Toggles "وقت مفتوح" (open-ended): no cap, billed per minute.
   final ValueChanged<bool>? onSelectOpenTime;
 
-  /// Fired when the cashier types their own number of minutes (35, 90…).
-  final ValueChanged<int>? onMinutesChanged;
+  /// Fired when the cashier types an amount of money — the card walks it
+  /// back to minutes at this machine's rate (type EGP, read the time).
+  final ValueChanged<double?>? onAmountChanged;
+
+  /// Fired when the cashier picks "فردي" or "مالتي" — changes which hourly
+  /// rate prices the time/money.
+  final ValueChanged<String>? onSelectMode;
+
+  /// The amount last typed for this machine (EGP) — mirrors the minutes
+  /// the cashier already chose, so the money field never lies.
+  final double? selectedAmount;
+
+  /// "single" | "multi" — decides which rate the card prices with.
+  final String selectedMode;
 
   /// This machine's effective hourly rate — used to price those minutes
   /// instantly (rate ÷ 60 × minutes).
   final double hourlyRate;
+
+  /// The "مالتي" rate (falls back to [hourlyRate] when never priced).
+  final double multiHourlyRate;
 
   final VoidCallback? onStart;
 
@@ -129,8 +149,13 @@ class DeviceCard extends StatelessWidget {
   /// deadline out and puts the device back to work.
   final VoidCallback? onExtend;
 
-  EdgeInsets get _pad =>
-      compact ? const EdgeInsets.all(AppSpacing.sm) : const EdgeInsets.all(AppSpacing.lg);
+  /// "＋ وقت" on a RUNNING card: opens the custom top-up dialog (type
+  /// minutes OR money), no need to wait for the clock to hit zero.
+  final VoidCallback? onExtendCustom;
+
+  EdgeInsets get _pad => compact
+      ? const EdgeInsets.all(AppSpacing.sm)
+      : const EdgeInsets.all(AppSpacing.lg);
 
   @override
   Widget build(BuildContext context) {
@@ -171,12 +196,15 @@ class DeviceCard extends StatelessWidget {
   }
 
   Widget _buildAvailable() {
+    // Vertical breathing room between every block on the card. The "بدء
+    // جلسة" button is pinned to the card's bottom via the Spacer, so it
+    // always sits at the end with fresh clearance under it.
+    final gap = compact ? AppSpacing.md : AppSpacing.lg;
     return GlassCard(
       hoverable: true,
       padding: _pad,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           _buildHeader(),
           SizedBox(height: compact ? AppSpacing.xs : AppSpacing.lg),
@@ -187,24 +215,35 @@ class DeviceCard extends StatelessWidget {
                       fontSize: 11, color: AppColors.textTertiary))
             else
               const Text('لسه ما اشتغلتش النهارده',
-                  style:
-                      TextStyle(fontSize: 11, color: AppColors.textTertiary))
+                  style: TextStyle(fontSize: 11, color: AppColors.textTertiary))
           else
             const Text('الجهاز متاح دلوقتي',
                 style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
-          SizedBox(height: compact ? AppSpacing.xs : AppSpacing.md),
+          SizedBox(height: gap),
+          // This machine's own mode (single or multi). The cashier picks
+          // it right on the card, and it prices everything below.
+          if (onSelectMode != null) ...[
+            _modeToggles(),
+            SizedBox(height: gap),
+          ],
           // This machine's own time. Each card keeps its own choice, so
           // one tap on the card is all it takes to start it.
           if (onSelectDuration != null) ...[
             _durationChips(),
-            SizedBox(height: compact ? AppSpacing.xs : AppSpacing.sm),
+            SizedBox(height: gap),
           ],
-          // Type any number of minutes (35, 90, …) and the price of that
-          // time is worked out instantly from this machine's hourly rate.
-          if (onMinutesChanged != null) ...[
-            _minutesAndPrice(),
-            SizedBox(height: compact ? AppSpacing.xs : AppSpacing.sm),
+          // Type the money, read the time: the price of [selectedMinutes]
+          // lives in the money field, and typing EGP walks back to minutes.
+          if (onAmountChanged != null) ...[
+            _moneyAndTime(),
+            SizedBox(height: gap),
           ],
+          // Twin flexible spacers (above AND below the start button) center it
+          // vertically in the middle of the leftover card space — half the
+          // room between the money field and the card's bottom margin sits
+          // above it, half below. It never crowds the money field.
+          const Spacer(),
+          // The start button is big (full card width).
           if (onStartPackage != null && !compact) ...[
             Row(
               children: [
@@ -233,17 +272,70 @@ class DeviceCard extends StatelessWidget {
                 icon: Icons.play_arrow_rounded,
                 onPressed: onStart,
                 expand: true),
+          // The other half of the leftover space sits under the button,
+          // relaxing it toward the card's bottom margin.
+          const Spacer(),
         ],
       ),
     );
   }
 
-  /// The minutes box and its price are ONE control, not three loose
-  /// boxes: type the minutes on the right, read the money on the left,
-  /// and flip to "وقت مفتوح" from inside the same frame.
-  Widget _minutesAndPrice() {
-    final open = selectedMinutes == null;
-    final price = open ? 0.0 : (hourlyRate / 60) * selectedMinutes!;
+  /// فردي / مالتي toggle — sits right on the card like the time chips,
+  /// and decides which hourly rate prices everything below it.
+  Widget _modeToggles() {
+    final isMulti = selectedMode == 'multi';
+    Widget toggle(String label, {required String mode, required bool active}) {
+      return Expanded(
+        child: GestureDetector(
+          onTap: () => onSelectMode?.call(mode),
+          child: Container(
+            padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8),
+            decoration: BoxDecoration(
+              color: active
+                  ? AppColors.accentPrimary.withOpacity(0.25)
+                  : AppColors.glassFill,
+              borderRadius: AppRadius.smallR,
+              border: Border.all(
+                color: active
+                    ? AppColors.glassBorderPurple
+                    : AppColors.glassBorder,
+              ),
+            ),
+            child: Text(
+              label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: compact ? 12 : 14,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+                color: active ? AppColors.textPrimary : AppColors.textSecondary,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        toggle('فردي', mode: 'single', active: !isMulti),
+        const SizedBox(width: 4),
+        toggle('مالتي', mode: 'multi', active: isMulti),
+      ],
+    );
+  }
+
+  /// The rate this card prices with — multi takes over when it is priced
+  /// and the cashier picked it, else the single hourly rate.
+  double get _rateForMode => selectedMode == 'multi' && multiHourlyRate > 0
+      ? multiHourlyRate
+      : hourlyRate;
+
+  /// The money←→time control, inverted from the old minutes box: type the
+  /// EGP on the right, the card turns it into minutes under the current
+  /// rate, and the frame always shows the time that money buys. Flipping
+  /// to "وقت مفتوح" lives inside the same frame as before.
+  Widget _moneyAndTime() {
+    final open = selectedMinutes == null || selectedMinutes! <= 0;
 
     return Container(
       height: 40,
@@ -252,20 +344,17 @@ class DeviceCard extends StatelessWidget {
         color: AppColors.glassFill,
         borderRadius: AppRadius.smallR,
         border: Border.all(
-          color: open
-              ? AppColors.glassBorderPurple
-              : AppColors.glassBorder,
+          color: open ? AppColors.glassBorderPurple : AppColors.glassBorder,
         ),
       ),
       child: Row(
         children: [
-          const Icon(Icons.schedule_rounded,
+          const Icon(Icons.payments_rounded,
               size: 15, color: AppColors.textTertiary),
           const SizedBox(width: 4),
-          _MinutesField(
-            minutes: selectedMinutes,
-            borderless: true,
-            onChanged: onMinutesChanged,
+          _MoneyField(
+            amount: selectedAmount,
+            onChanged: onAmountChanged,
           ),
           _innerDivider(),
           Expanded(
@@ -273,15 +362,14 @@ class DeviceCard extends StatelessWidget {
               fit: BoxFit.scaleDown,
               child: Text(
                 open
-                    ? 'وقت مفتوح · ${hourlyRate.toStringAsFixed(0)}/ساعة'
-                    : 'EGP ${price.toStringAsFixed(2)}',
+                    ? 'وقت مفتوح · ${_rateForMode.round()}/ساعة'
+                    : '$selectedMinutes دقيقة',
                 maxLines: 1,
                 style: TextStyle(
                   fontSize: open ? 11 : 15,
                   fontWeight: open ? FontWeight.w500 : FontWeight.w800,
-                  color: open
-                      ? AppColors.accentSecondary
-                      : AppColors.textPrimary,
+                  color:
+                      open ? AppColors.accentSecondary : AppColors.textPrimary,
                   fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
@@ -319,36 +407,37 @@ class DeviceCard extends StatelessWidget {
         color: AppColors.glassBorder,
       );
 
-  /// 60 / 30 / 15 / 7 minutes, sized to stay inside the compact card.
+  /// 60 / 30 / 15 minutes, sized to stay inside the compact card.
   Widget _durationChips() {
+    const chips = [60, 30, 15];
     return Row(
       children: [
-        for (final minutes in const [60, 30, 15, 7]) ...[
+        for (var i = 0; i < chips.length; i++) ...[
           Expanded(
             child: GestureDetector(
-              onTap: () => onSelectDuration!(minutes),
+              onTap: () => onSelectDuration!(chips[i]),
               child: Container(
                 padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8),
                 decoration: BoxDecoration(
-                  color: selectedMinutes == minutes
+                  color: selectedMinutes == chips[i]
                       ? AppColors.accentPrimary.withOpacity(0.25)
                       : AppColors.glassFill,
                   borderRadius: AppRadius.smallR,
                   border: Border.all(
-                    color: selectedMinutes == minutes
+                    color: selectedMinutes == chips[i]
                         ? AppColors.glassBorderPurple
                         : AppColors.glassBorder,
                   ),
                 ),
                 child: Text(
-                  '$minutes',
+                  '${chips[i]}',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: compact ? 12 : 14,
-                    fontWeight: selectedMinutes == minutes
+                    fontWeight: selectedMinutes == chips[i]
                         ? FontWeight.w700
                         : FontWeight.w400,
-                    color: selectedMinutes == minutes
+                    color: selectedMinutes == chips[i]
                         ? AppColors.textPrimary
                         : AppColors.textSecondary,
                   ),
@@ -356,7 +445,7 @@ class DeviceCard extends StatelessWidget {
               ),
             ),
           ),
-          if (minutes != 7) const SizedBox(width: 4),
+          if (i != chips.length - 1) const SizedBox(width: 4),
         ],
       ],
     );
@@ -464,6 +553,38 @@ class DeviceCard extends StatelessWidget {
                       fontWeight: FontWeight.w700,
                       color: AppColors.warning)),
             ),
+          // Top-up while the session is still running: "＋ وقت" opens the
+          // dialog where the cashier types minutes OR money.
+          if (compact && onExtendCustom != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Center(
+              child: GestureDetector(
+                onTap: onExtendCustom,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.accentPrimary.withOpacity(0.15),
+                    borderRadius: AppRadius.smallR,
+                    border: Border.all(color: AppColors.glassBorderPurple),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.more_time_rounded,
+                          size: 13, color: AppColors.accentSecondary),
+                      SizedBox(width: 4),
+                      Text('＋ وقت',
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: AppColors.accentSecondary,
+                              fontWeight: FontWeight.w600)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
           if (device.mode != null && !compact) ...[
             const SizedBox(height: 4),
             Center(
@@ -656,37 +777,35 @@ class DeviceCard extends StatelessWidget {
   String _sumCost() => device.timeCost ?? '—';
 }
 
-/// The free-form "minutes" box on a device card. It owns its controller
-/// so typing is never interrupted by a rebuild, and mirrors the value when
-/// a duration chip or the open-time toggle changes it from outside.
-/// An empty box means "وقت مفتوح" (reported to the parent as -1).
-class _MinutesField extends StatefulWidget {
-  const _MinutesField({
-    required this.minutes,
-    this.onChanged,
-    this.borderless = false,
-  });
+/// The free-form "money" box on a device card. It owns its controller so
+/// typing is never interrupted by a rebuild, and mirrors the amount when
+/// a duration chip or the open-time toggle changes it from outside. An
+/// empty box means "وقت مفتوح" (reported to the parent as null).
+class _MoneyField extends StatefulWidget {
+  const _MoneyField({required this.amount, this.onChanged});
 
-  final int? minutes;
-  final ValueChanged<int>? onChanged;
-
-  /// Sits INSIDE the unified time/price frame, so it draws no box of its
-  /// own — the frame around it is the border.
-  final bool borderless;
+  final double? amount;
+  final ValueChanged<double?>? onChanged;
 
   @override
-  State<_MinutesField> createState() => _MinutesFieldState();
+  State<_MoneyField> createState() => _MoneyFieldState();
 }
 
-class _MinutesFieldState extends State<_MinutesField> {
+class _MoneyFieldState extends State<_MoneyField> {
   late final TextEditingController _controller =
-      TextEditingController(text: widget.minutes?.toString() ?? '');
+      TextEditingController(text: _textFor(widget.amount));
+  final FocusNode _focus = FocusNode();
+
+  static String _textFor(double? amount) =>
+      amount == null ? '' : amount.round().toString();
 
   @override
-  void didUpdateWidget(covariant _MinutesField oldWidget) {
+  void didUpdateWidget(covariant _MoneyField oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.minutes != widget.minutes) {
-      final text = widget.minutes?.toString() ?? '';
+    // Never clobber the cashier's keystrokes: only mirror the value from
+    // outside (chips, open-toggle, mode switch) while the field is idle.
+    if (!_focus.hasFocus) {
+      final text = _textFor(widget.amount);
       if (_controller.text != text) {
         _controller.value = TextEditingValue(
           text: text,
@@ -699,24 +818,21 @@ class _MinutesFieldState extends State<_MinutesField> {
   @override
   void dispose() {
     _controller.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final borderless = widget.borderless;
     return SizedBox(
-      width: 46,
+      width: 70,
       height: 38,
       child: TextField(
         controller: _controller,
+        focusNode: _focus,
         textAlign: TextAlign.center,
         keyboardType: TextInputType.number,
-        onChanged: (raw) {
-          final minutes = int.tryParse(raw.trim());
-          // -1 == "the cashier cleared the box" → back to open-ended.
-          widget.onChanged?.call(minutes ?? -1);
-        },
+        onChanged: (raw) => widget.onChanged?.call(double.tryParse(raw.trim())),
         style: TextStyle(
             fontSize: 15,
             fontWeight: FontWeight.w700,
@@ -725,29 +841,13 @@ class _MinutesFieldState extends State<_MinutesField> {
         decoration: InputDecoration(
           isDense: true,
           contentPadding: EdgeInsets.zero,
-          hintText: 'دقيقة',
-          hintStyle: const TextStyle(fontSize: 11, color: AppColors.textTertiary),
-          filled: !borderless,
-          fillColor: AppColors.glassFillStrong,
-          border: borderless
-              ? InputBorder.none
-              : OutlineInputBorder(
-                  borderRadius: AppRadius.smallR,
-                  borderSide: const BorderSide(color: AppColors.glassBorder),
-                ),
-          enabledBorder: borderless
-              ? InputBorder.none
-              : OutlineInputBorder(
-                  borderRadius: AppRadius.smallR,
-                  borderSide: const BorderSide(color: AppColors.glassBorder),
-                ),
-          focusedBorder: borderless
-              ? InputBorder.none
-              : OutlineInputBorder(
-                  borderRadius: AppRadius.smallR,
-                  borderSide:
-                      const BorderSide(color: AppColors.glassBorderPurple),
-                ),
+          hintText: 'EGP',
+          hintStyle:
+              const TextStyle(fontSize: 11, color: AppColors.textTertiary),
+          filled: false,
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
         ),
       ),
     );

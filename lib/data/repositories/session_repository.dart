@@ -41,6 +41,7 @@ class SessionRepository {
     int? packageId,
     double? fixedPrice,
     int? plannedMinutes,
+    String mode = 'single',
   }) =>
       _db.sessionDao.start(
         deviceId: deviceId,
@@ -49,6 +50,7 @@ class SessionRepository {
         packageId: packageId,
         fixedPrice: fixedPrice,
         plannedMinutes: plannedMinutes,
+        mode: mode,
       );
 
   /// Flips every fixed-duration session whose deadline has passed to
@@ -148,7 +150,7 @@ final oneSecondTickerProvider = StreamProvider<int>((ref) {
 
 /// The quick duration buttons on the Dashboard, in the order the cashier
 /// reads them. Null duration = open-ended (per-second) session.
-const List<int?> quickDurations = [60, 30, 15, 7];
+const List<int?> quickDurations = [60, 30, 15];
 
 /// The café's default session length. Every device starts on this, and the
 /// cashier can override it per machine from the card's own duration chips.
@@ -175,10 +177,18 @@ int? durationForDevice(WidgetRef ref, int deviceId) {
   return chosen <= 0 ? null : chosen;
 }
 
+/// Per-device "فردي/مالتي" choice (deviceId → "single" | "multi"). The
+/// cashier picks it on the device card and the session starts in that
+/// mode — [SessionDao.start] writes it into the session row.
+final deviceModesProvider = StateProvider<Map<int, String>>((ref) => {});
+
+/// Per-device amount the cashier last typed on the card (deviceId → EGP).
+/// Kept so a mode switch can re-price the same money at the other rate.
+final deviceAmountsProvider = StateProvider<Map<int, double>>((ref) => {});
+
 /// When each device's last session finished — the waiting row is sorted by
 /// this so the device that ran out of time first is served first.
-final lastFinishedByDeviceProvider =
-    StreamProvider<Map<int, DateTime>>((ref) {
+final lastFinishedByDeviceProvider = StreamProvider<Map<int, DateTime>>((ref) {
   return ref.watch(sessionRepositoryProvider).watchLastFinishedByDevice();
 });
 

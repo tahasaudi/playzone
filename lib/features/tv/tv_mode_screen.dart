@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -72,7 +72,7 @@ class TvScreenSlot {
 class TvConfig {
   const TvConfig({
     this.ip = '192.168.1.22',
-    this.enabled = true,
+    this.enabled = false,
     this.mirror = true,
     this.showCards = false,
     this.deviceId,
@@ -205,9 +205,8 @@ class TvConfig {
         showCards: showCards ?? this.showCards,
         deviceId: clearDevice ? null : (deviceId ?? this.deviceId),
         secondIp: secondIp ?? this.secondIp,
-        secondDeviceId: clearSecondDevice
-            ? null
-            : (secondDeviceId ?? this.secondDeviceId),
+        secondDeviceId:
+            clearSecondDevice ? null : (secondDeviceId ?? this.secondDeviceId),
         name: name ?? this.name,
         secondName: secondName ?? this.secondName,
         extras: extras ?? this.extras,
@@ -239,7 +238,8 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
   static String ipKeyFor(int slot) => slot == 0 ? ipKey : 'tv_ip_${slot + 1}';
   static String deviceKeyFor(int slot) =>
       slot == 0 ? deviceKey : 'tv_device_id_${slot + 1}';
-  static String nameKeyFor(int slot) => slot == 0 ? nameKey : 'tv_name_${slot + 1}';
+  static String nameKeyFor(int slot) =>
+      slot == 0 ? nameKey : 'tv_name_${slot + 1}';
 
   /// The next storage index free for a new screen.
   ///
@@ -294,7 +294,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     if (ip != null && ip.isNotEmpty) {
       state = state.copyWith(
         ip: ip,
-        enabled: enabled != '0',
+        enabled: enabled == '1',
         showCards: cards == '1',
         deviceId: _parseDevice(device),
         secondIp: ip2 ?? '',
@@ -307,7 +307,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     } else {
       // First run: remember the detected TV so the push starts on its own.
       setIp(state.ip);
-      setEnabled(true);
+      setEnabled(false);
     }
     state = state.copyWith(loaded: true);
   }
@@ -333,14 +333,14 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     // Refused before anything is written, so a rejected save cannot leave the
     // address changed and the machine still pointing at the old screen.
     if (deviceId != null) {
-      final clash = state.slots.any((s) =>
-          s.index != index && !s.isEmpty && s.deviceId == deviceId);
+      final clash = state.slots
+          .any((s) => s.index != index && !s.isEmpty && s.deviceId == deviceId);
       if (clash) return deviceId;
     }
     final cleanIp = ip?.trim();
     if (cleanIp != null && cleanIp.isNotEmpty) {
-      final clash = state.slots.any((s) =>
-          s.index != index && !s.isEmpty && s.ip.trim() == cleanIp);
+      final clash = state.slots
+          .any((s) => s.index != index && !s.isEmpty && s.ip.trim() == cleanIp);
       if (clash) return -1;
     }
 
@@ -386,8 +386,8 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     state = state.copyWith(extras: next);
     await _db.settingsDao.setValue(ipKeyFor(index), updated.ip);
     await _db.settingsDao.setValue(nameKeyFor(index), updated.name);
-    await _db.settingsDao.setValue(
-        deviceKeyFor(index), updated.deviceId?.toString() ?? 'all');
+    await _db.settingsDao
+        .setValue(deviceKeyFor(index), updated.deviceId?.toString() ?? 'all');
     return null;
   }
 
@@ -478,7 +478,8 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
   }
 }
 
-final tvConfigProvider = StateNotifierProvider<TvConfigNotifier, TvConfig>((ref) {
+final tvConfigProvider =
+    StateNotifierProvider<TvConfigNotifier, TvConfig>((ref) {
   final notifier = TvConfigNotifier(ref.watch(appDatabaseProvider));
   // Without this the notifier keeps its in-memory defaults forever, so the
   // saved screen bindings are ignored and no screen ever matches a machine.
@@ -491,7 +492,8 @@ final tvConfigProvider = StateNotifierProvider<TvConfigNotifier, TvConfig>((ref)
 final fullscreenTvProvider = StateProvider<bool>((ref) => false);
 
 /// Live snapshot for the status line.
-final tvPushStatusProvider = StreamProvider<TvStatus>((ref) async* {  final service = TvDisplayService.instance;
+final tvPushStatusProvider = StreamProvider<TvStatus>((ref) async* {
+  final service = TvDisplayService.instance;
   while (true) {
     yield TvStatus(
       running: service.isRunning,
@@ -559,7 +561,8 @@ final tvScreenReportsProvider =
                     .where((d) => d.device.id == slot.deviceId)
                     .map((d) => '${d.type.name} — ${d.device.name}')
                     .firstOrNull,
-            sessionRunning: slot.deviceId != null && running.contains(slot.deviceId),
+            sessionRunning:
+                slot.deviceId != null && running.contains(slot.deviceId),
           ),
       ];
 
@@ -698,8 +701,8 @@ class _TvModeScreenState extends ConsumerState<TvModeScreen> {
           statusAsync.valueOrNull,
           Column(
             children: [
-              _devicePicker(sessions, devices, boundId, (id) =>
-                  ref.read(tvConfigProvider.notifier).setDevice(id)),
+              _devicePicker(sessions, devices, boundId,
+                  (id) => ref.read(tvConfigProvider.notifier).setDevice(id)),
               const SizedBox(height: AppSpacing.lg),
               Expanded(
                 child: RepaintBoundary(
@@ -776,15 +779,15 @@ class _TvModeScreenState extends ConsumerState<TvModeScreen> {
         children: [
           Row(
             children: [
-              const Text('شاشة التلفزيون',
-                  style: AppTypography.sectionTitle),
+              const Text('شاشة التلفزيون', style: AppTypography.sectionTitle),
               const SizedBox(width: AppSpacing.md),
               Expanded(child: _statusPill(status)),
               const SizedBox(width: AppSpacing.md),
               SecondaryButton(
                 label: 'ملء الشاشة',
                 icon: Icons.fullscreen_rounded,
-                onPressed: () => ref.read(fullscreenTvProvider.notifier).state = true,
+                onPressed: () =>
+                    ref.read(fullscreenTvProvider.notifier).state = true,
               ),
               const SizedBox(width: AppSpacing.sm),
               SecondaryButton(
@@ -835,8 +838,7 @@ class _TvModeScreenState extends ConsumerState<TvModeScreen> {
           Icon(ok ? Icons.tv_rounded : Icons.tv_off_rounded,
               size: 15, color: color),
           const SizedBox(width: 6),
-          Text(label,
-              style: TextStyle(fontSize: 12, color: color)),
+          Text(label, style: TextStyle(fontSize: 12, color: color)),
         ],
       ),
     );
@@ -862,8 +864,8 @@ class _TvModeScreenState extends ConsumerState<TvModeScreen> {
         // they are already covered by `devices`; running ones are implied.
         if (devices.isEmpty)
           for (final s in sessions)
-            _pickerChip('${s.type.name} — ${s.device.name}', focus == s.device.id,
-                () => onPick(s.device.id)),
+            _pickerChip('${s.type.name} — ${s.device.name}',
+                focus == s.device.id, () => onPick(s.device.id)),
       ],
     );
   }
@@ -885,9 +887,8 @@ class _TvModeScreenState extends ConsumerState<TvModeScreen> {
         child: Text(label,
             style: TextStyle(
                 fontSize: 13,
-                color: active
-                    ? AppColors.textPrimary
-                    : AppColors.textSecondary)),
+                color:
+                    active ? AppColors.textPrimary : AppColors.textSecondary)),
       ),
     );
   }
@@ -909,4 +910,3 @@ class _TvModeScreenState extends ConsumerState<TvModeScreen> {
     });
   }
 }
-

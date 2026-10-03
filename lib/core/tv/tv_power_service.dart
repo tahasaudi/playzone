@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'hard_lock.dart';
 import 'tv_display_service.dart';
 
 /// Controls the LG TV's wall screen, so a session can switch it on and off.
@@ -89,6 +90,7 @@ class TvPowerService {
   /// part of ten seconds, and running it here is what made session start
   /// feel like the whole app had frozen.
   bool turnOn(String tvIp) {
+    if (kHardLockWallNetwork) return true;
     _lastCommandAt = DateTime.now();
     _beginTiming();
     _tvHost = tvIp;
@@ -182,6 +184,7 @@ class TvPowerService {
   /// Also returns immediately — the invoice is already written, and the
   /// cashier must never wait on a TV.
   bool turnOff(String tvIp) {
+    if (kHardLockWallNetwork) return true;
     _lastCommandAt = DateTime.now();
     _beginTiming();
     _tvHost = tvIp;
@@ -225,7 +228,8 @@ class TvPowerService {
     _blanked(tvIp, 'الشاشة رفضت الأمر — اقفلها بالريموت', watch, ok: false);
   }
 
-  void _blanked(String tvIp, String message, Stopwatch watch, {bool ok = true}) {
+  void _blanked(String tvIp, String message, Stopwatch watch,
+      {bool ok = true}) {
     watch.stop();
     _lastResult = message;
     _lastTookMs = watch.elapsedMilliseconds;
@@ -247,7 +251,8 @@ class TvPowerService {
   Future<void> _sendMagicPacket() async {
     for (var round = 0; round < 3; round++) {
       await _sendMagicPacketOnce(macsFor(_tvHost));
-      if (round < 2) await Future<void>.delayed(const Duration(milliseconds: 350));
+      if (round < 2)
+        await Future<void>.delayed(const Duration(milliseconds: 350));
     }
   }
 
