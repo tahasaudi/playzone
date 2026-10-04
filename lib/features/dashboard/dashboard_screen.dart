@@ -406,6 +406,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         session == null || session.session.status != 'active'
                             ? null
                             : (mode) => _switchModeTo(session, mode),
+                    onToggleScreen: session == null
+                        ? null
+                        : () => _toggleWallScreen(session),
                     onExtend: session == null || !session.isTimeUp
                         ? null
                         : () => _openExtendDialog(session),
@@ -601,12 +604,39 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     _irCommand(device.device.id, 'power');
   }
 
+  /// The machine's own wall switch, one button for both directions.
+  ///
+  /// Whatever the previous press on this card did, this one undoes. The
+  /// cashier never has to remember which way round the button goes, and
+  /// nothing has to be read before pressing it.
+  void _toggleWallScreen(SessionBoardEntry entry) {
+    final ip = ref.read(tvConfigProvider).screenFor(entry.device.id);
+    if (ip == null) return;
+    final power = TvPowerService.instance;
+    if (power.isScreenDark(ip)) {
+      power.turnOn(ip);
+    } else {
+      power.turnOff(ip);
+    }
+  }
+
+  /// Stopping the clock stops the machines too.
+  ///
+  /// Players walk away for a smoke and the billiard table keeps running, the
+  /// console keeps playing and someone walks in and plays. Pausing the time is
+  /// exactly the moment to close the wall, and resuming is the moment to open
+  /// it — which is why this one button's two halves are wired to the same two
+  /// buttons the card already has.
   Future<void> _pause(SessionBoardEntry entry) async {
     await ref.read(sessionRepositoryProvider).pause(entry);
+    final ip = ref.read(tvConfigProvider).screenFor(entry.device.id);
+    if (ip != null) TvPowerService.instance.turnOff(ip);
   }
 
   Future<void> _resume(SessionBoardEntry entry) async {
     await ref.read(sessionRepositoryProvider).resume(entry);
+    final ip = ref.read(tvConfigProvider).screenFor(entry.device.id);
+    if (ip != null) TvPowerService.instance.turnOn(ip);
   }
 
   Future<void> _switchMode(SessionBoardEntry entry) async {
@@ -700,6 +730,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }) {
     final ordersTotal =
         session == null ? 0.0 : (ordersBySession[session.session.id] ?? 0.0);
+    final ip = ref.read(tvConfigProvider).screenFor(device.id);
     return DeviceUiModel(
       name: device.name,
       type: _mapType(type.name),
@@ -719,6 +750,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       ordersCost:
           session == null ? null : 'EGP ${ordersTotal.toStringAsFixed(2)}',
       orderLines: orderLines,
+      wallScreenDark: ip != null && TvPowerService.instance.isScreenDark(ip),
     );
   }
 

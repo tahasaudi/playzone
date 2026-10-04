@@ -183,6 +183,15 @@ class TvPowerService {
   ///
   /// Also returns immediately — the invoice is already written, and the
   /// cashier must never wait on a TV.
+  /// Whether the wall at [tvIp] is currently showing our black frame.
+  ///
+  /// Asked, not remembered: the screen also goes dark on its own when a
+  /// session's minutes run out, and a button that says "مفتوحة" over a wall
+  /// that has already gone black would be asking the cashier to press a
+  /// switch that is already pressed.
+  bool isScreenDark(String tvIp) =>
+      TvDisplayService.instance.isScreenClosed(tvIp);
+
   bool turnOff(String tvIp) {
     if (kHardLockWallNetwork) return true;
     _lastCommandAt = DateTime.now();

@@ -51,6 +51,7 @@ class DeviceUiModel {
     this.timeCost,
     this.ordersCost,
     this.orderLines = const <String>[],
+    this.wallScreenDark = false,
   });
 
   final String name;
@@ -76,6 +77,14 @@ class DeviceUiModel {
   /// question they ask when the customer says they did not, and that is the
   /// one worth being able to answer without opening the till.
   final List<String> orderLines;
+
+  /// Whether this machine's wall screen is currently showing our black frame.
+  ///
+  /// Read from the screen service rather than remembered here, because the
+  /// screen also goes dark on its own when the minutes run out — a card whose
+  /// button said "مفتوحة" over a wall that had quietly gone black would be
+  /// asking the cashier to press a button that is already pressed.
+  final bool wallScreenDark;
 }
 
 class DeviceCard extends StatelessWidget {
@@ -101,6 +110,7 @@ class DeviceCard extends StatelessWidget {
     this.onCheckout,
     this.onSwitchMode,
     this.onSwitchModeTo,
+    this.onToggleScreen,
     this.onExtend,
     this.onExtendCustom,
   });
@@ -171,6 +181,14 @@ class DeviceCard extends StatelessWidget {
   /// is on should be able to say so with one tap instead of tapping and
   /// checking. Null unless the session is actually running.
   final ValueChanged<String>? onSwitchModeTo;
+
+  /// The wall screen's own switch, on the machine's card.
+  ///
+  /// One button for both directions on purpose: the press that took the
+  /// television dark brings it back, so there is no state the cashier can get
+  /// wrong and nothing to read before pressing. Null when this machine has no
+  /// screen bound to it — there is nothing for the button to do.
+  final VoidCallback? onToggleScreen;
 
   /// Time is up but the players want to keep playing — pushes the
   /// deadline out and puts the device back to work.
@@ -591,35 +609,50 @@ class DeviceCard extends StatelessWidget {
                       fontWeight: FontWeight.w700,
                       color: AppColors.warning)),
             ),
-          // Top-up while the session is still running: "＋ وقت" opens the
-          // dialog where the cashier types minutes OR money.
-          if (compact && onExtendCustom != null) ...[
+          // Top-up while the session is still running: the cashier types
+          // minutes OR money. Beside it, the wall screen's own switch.
+          // The two small switches a running card carries, side by side. They
+          // share the row rather than taking a row each, because a card that
+          // grows a line per control is a card that stops holding six machines
+          // on one screen.
+          if (compact &&
+              (onExtendCustom != null || onToggleScreen != null)) ...[
             const SizedBox(height: AppSpacing.xs),
             Center(
-              child: GestureDetector(
-                onTap: onExtendCustom,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppColors.accentPrimary.withOpacity(0.15),
-                    borderRadius: AppRadius.smallR,
-                    border: Border.all(color: AppColors.glassBorderPurple),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.more_time_rounded,
-                          size: 13, color: AppColors.accentSecondary),
-                      SizedBox(width: 4),
-                      Text('＋ وقت',
-                          style: TextStyle(
-                              fontSize: 11,
-                              color: AppColors.accentSecondary,
-                              fontWeight: FontWeight.w600)),
-                    ],
-                  ),
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (onToggleScreen != null) _screenToggleChip(),
+                  if (onToggleScreen != null && onExtendCustom != null)
+                    const SizedBox(width: 6),
+                  if (onExtendCustom != null)
+                    GestureDetector(
+                      onTap: onExtendCustom,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: AppColors.accentPrimary.withOpacity(0.15),
+                          borderRadius: AppRadius.smallR,
+                          border:
+                              Border.all(color: AppColors.glassBorderPurple),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.more_time_rounded,
+                                size: 13, color: AppColors.accentSecondary),
+                            SizedBox(width: 4),
+                            Text('＋ وقت',
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    color: AppColors.accentSecondary,
+                                    fontWeight: FontWeight.w600)),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ],
@@ -695,6 +728,50 @@ class DeviceCard extends StatelessWidget {
     );
   }
 
+  /// The machine's wall screen, as a switch.
+  ///
+  /// Measured to sit beside "＋ وقت" with the same 4px the two mode chips use,
+  /// so the card's small controls all speak the same spacing rather than each
+  /// one arriving with its own idea of it.
+  Widget _screenToggleChip() {
+    final dark = device.wallScreenDark;
+    return GestureDetector(
+      onTap: onToggleScreen,
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        decoration: BoxDecoration(
+          color: dark
+              ? AppColors.glassFill
+              : AppColors.accentPrimary.withOpacity(0.15),
+          borderRadius: AppRadius.smallR,
+          border: Border.all(
+            color: dark ? AppColors.glassBorder : AppColors.glassBorderPurple,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              dark ? Icons.visibility_off_rounded : Icons.tv_rounded,
+              size: 13,
+              color: dark ? AppColors.textSecondary : AppColors.accentSecondary,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              dark ? 'الشاشة مقفولة' : 'الشاشة مفتوحة',
+              style: TextStyle(
+                fontSize: 11,
+                color:
+                    dark ? AppColors.textSecondary : AppColors.accentSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildPaused() {
     return GlassCard(
       hoverable: true,
@@ -737,6 +814,14 @@ class DeviceCard extends StatelessWidget {
                       TextStyle(fontSize: 12, color: AppColors.statusPaused)),
             ),
             const SizedBox(height: AppSpacing.md),
+          ],
+          // Stopping the clock takes the wall dark, so a paused card has to
+          // carry the same switch — otherwise resuming the session is the only
+          // way to get the television on again, and the television is not the
+          // thing that was paused.
+          if (onToggleScreen != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Center(child: _screenToggleChip()),
           ],
           PrimaryButton(
               label: compact ? 'استئناف' : 'استئناف',
