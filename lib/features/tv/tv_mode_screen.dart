@@ -72,7 +72,7 @@ class TvScreenSlot {
 class TvConfig {
   const TvConfig({
     this.ip = '192.168.1.22',
-    this.enabled = false,
+    this.enabled = true,
     this.mirror = true,
     this.showCards = false,
     this.deviceId,
@@ -294,7 +294,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     if (ip != null && ip.isNotEmpty) {
       state = state.copyWith(
         ip: ip,
-        enabled: enabled == '1',
+        enabled: enabled != '0',
         showCards: cards == '1',
         deviceId: _parseDevice(device),
         secondIp: ip2 ?? '',
@@ -307,7 +307,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     } else {
       // First run: remember the detected TV so the push starts on its own.
       setIp(state.ip);
-      setEnabled(false);
+      setEnabled(true);
     }
     state = state.copyWith(loaded: true);
   }

@@ -116,7 +116,13 @@ class TvDisplayService {
 
   /// Whether the TV feature is switched on at all — a screen cannot be
   /// blamed for being dark when the whole feature is off.
-  static bool featureEnabled = false;
+  ///
+  /// Starts on, because the shell overwrites it from the saved settings on its
+  /// first build and a wall that waits for that to say "on" is a wall that
+  /// spends the first moments of the morning in whatever state it was left in.
+  /// Whether *this machine* may touch a screen at all is a different question,
+  /// and it is answered by [tvAllowed] — which is what has to be closed.
+  static bool featureEnabled = true;
 
   /// Set once at startup from the `PLAYZONE_TV` environment variable.
   ///
