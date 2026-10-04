@@ -274,6 +274,14 @@ class DeviceCard extends StatelessWidget {
             ),
             SizedBox(height: gap),
           ],
+          // The wall's own switch, offered before anyone sits down. The
+          // cashier used to have to start a session to find out what the
+          // screen was doing, and a wall left black from last night's checkout
+          // looked exactly like a working one from here.
+          if (onToggleScreen != null) ...[
+            Center(child: _screenToggleChip()),
+            SizedBox(height: gap),
+          ],
           // This machine's own time. Each card keeps its own choice, so
           // one tap on the card is all it takes to start it.
           if (onSelectDuration != null) ...[

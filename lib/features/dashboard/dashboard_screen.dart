@@ -80,22 +80,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
   /// The café's roster reads in this order (device numbers): 1, 2, 4, 5, 6
   /// then 3 — the machines' physical layout at the counter. Any device
-  /// outside the list keeps its natural number order after them.
-  static const _rosterPriority = [1, 2, 4, 5, 6, 3];
-
-  int _rosterRank(DeviceWithType d) {
-    final n = deviceNumberOf(d.device.name);
-    if (n == null) return 500;
-    final i = _rosterPriority.indexOf(n);
-    return i == -1 ? 400 : i;
-  }
-
-  int _rosterCompare(DeviceWithType a, DeviceWithType b) {
-    final rank = _rosterRank(a).compareTo(_rosterRank(b));
-    return rank != 0
-        ? rank
-        : compareDeviceNumbers(a.device.name, b.device.name);
-  }
+  /// outside the list keeps its natural number order after them. The order
+  /// itself lives in [cafeRosterOrder] so the screens page reads the same.
+  int _rosterCompare(DeviceWithType a, DeviceWithType b) =>
+      compareCafeRoster(a.device.name, b.device.name);
 
   double _rateFor(DeviceWithType d, String mode) =>
       mode == 'multi' && d.effectiveHourlyRateMulti > 0
@@ -406,9 +394,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         session == null || session.session.status != 'active'
                             ? null
                             : (mode) => _switchModeTo(session, mode),
-                    onToggleScreen: session == null
-                        ? null
-                        : () => _toggleWallScreen(session),
+                    onToggleScreen:
+                        // Before a session exists too: the cashier wants to know
+                        // what the wall is showing before anyone sits down, not
+                        // after.
+                        ref.read(tvConfigProvider).screenFor(d.device.id) ==
+                                null
+                            ? null
+                            : () => _toggleWallScreenFor(d.device.id),
                     onExtend: session == null || !session.isTimeUp
                         ? null
                         : () => _openExtendDialog(session),
@@ -609,8 +602,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   /// Whatever the previous press on this card did, this one undoes. The
   /// cashier never has to remember which way round the button goes, and
   /// nothing has to be read before pressing it.
-  void _toggleWallScreen(SessionBoardEntry entry) {
-    final ip = ref.read(tvConfigProvider).screenFor(entry.device.id);
+  void _toggleWallScreenFor(int deviceId) {
+    final ip = ref.read(tvConfigProvider).screenFor(deviceId);
     if (ip == null) return;
     final power = TvPowerService.instance;
     if (power.isScreenDark(ip)) {

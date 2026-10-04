@@ -111,15 +111,28 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
     _seed(config);
     final reports = ref.watch(tvScreenReportsProvider).valueOrNull ??
         TvDisplayService.instance.reports();
-    final devices = ref.watch(devicesWithTypeProvider).valueOrNull ??
-        const <DeviceWithType>[];
+    // In the café's own walk order, matching the board. This list is walked
+    // with a remote in one hand and a notepad in the other; a page that read
+    // 3, 1, 2 here while the board read 1, 2, 3 made the person configuring a
+    // wall check the same machine twice.
+    final devices = List.of(ref.watch(devicesWithTypeProvider).valueOrNull ??
+        const <DeviceWithType>[])
+      ..sort((a, b) => compareCafeRoster(a.device.name, b.device.name));
+    final deviceNameById = {
+      for (final d in devices) d.device.id: d.device.name,
+    };
 
     // Each panel is built by a method rather than inline in the loop. Every
     // button below captures the screen it belongs to, and a closure written
     // inside a `for` body captures the *final* value of the loop variable —
     // which would have made every screen's buttons steer the last screen.
+    //
+    // Ordered by the machine each screen is bound to, not by the order they
+    // were typed in. Screens with nothing bound go to the bottom, because
+    // there is no machine to place them by, and tie-break on the storage index
+    // so `sort`'s lack of stability cannot shuffle them between rebuilds.
     final panels = <Widget>[
-      for (final slot in config.slots)
+      for (final slot in _slotsInRoomOrder(config.slots, deviceNameById))
         Padding(
           padding: const EdgeInsets.only(bottom: AppSpacing.sm),
           child: _panel(slot, config, reports, devices),
@@ -198,6 +211,28 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
         ),
       ],
     );
+  }
+
+  /// [slots] in the order a person walks the room.
+  ///
+  /// A total order, deliberately: two screens bound to the same machine, or two
+  /// bound to nothing, would otherwise tie and be free to swap places on every
+  /// rebuild — a list that reorders itself while you are reading it. The
+  /// storage index settles those ties, and it is stable for the life of the
+  /// slot.
+  List<TvScreenSlot> _slotsInRoomOrder(
+    List<TvScreenSlot> slots,
+    Map<int, String> deviceNameById,
+  ) {
+    final byRoom = List.of(slots);
+    byRoom.sort((a, b) {
+      final rank = compareCafeRoster(
+        deviceNameById[a.deviceId] ?? '',
+        deviceNameById[b.deviceId] ?? '',
+      );
+      return rank != 0 ? rank : a.index.compareTo(b.index);
+    });
+    return byRoom;
   }
 
   /// The panel for one configured screen, wired to that screen and to no other.
@@ -297,7 +332,8 @@ class _DuplicateCopyWarning extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.copy_all_rounded, size: 18, color: AppColors.warning),
+          const Icon(Icons.copy_all_rounded,
+              size: 18, color: AppColors.warning),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Column(
@@ -315,7 +351,8 @@ class _DuplicateCopyWarning extends StatelessWidget {
                 Text(
                   'اقفل النسخة القديمة وافتح نسخة واحدة بس — النسخة اللي '
                   'فاتحة هي اللي بتحكم الشاشات.',
-                  style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                  style:
+                      TextStyle(fontSize: 11, color: AppColors.textSecondary),
                 ),
               ],
             ),
@@ -579,8 +616,7 @@ class _ScreenPanel extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.glassFill,
         borderRadius: AppRadius.mediumR,
-        border: Border.all(
-            color: tone.withValues(alpha: 0.35), width: 1.2),
+        border: Border.all(color: tone.withValues(alpha: 0.35), width: 1.2),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -642,9 +678,8 @@ class _ScreenPanel extends StatelessWidget {
               _Pill(
                 label: r?.label ?? 'بنفحص…',
                 tone: tone,
-                icon: r == null
-                    ? Icons.hourglass_empty_rounded
-                    : _reportIcon(r),
+                icon:
+                    r == null ? Icons.hourglass_empty_rounded : _reportIcon(r),
               ),
             ],
           ),
@@ -656,8 +691,8 @@ class _ScreenPanel extends StatelessWidget {
           Row(
             children: [
               const Text('مربوطة بجهاز:',
-                  style: TextStyle(
-                      fontSize: 12, color: AppColors.textTertiary)),
+                  style:
+                      TextStyle(fontSize: 12, color: AppColors.textTertiary)),
               const SizedBox(width: AppSpacing.sm),
               SizedBox(
                 width: 210,
@@ -692,7 +727,8 @@ class _ScreenPanel extends StatelessWidget {
               ),
               const SizedBox(width: AppSpacing.md),
               _Pill(
-                label: identity.sessionRunning ? 'فيه جلسة دلوقتي' : 'مفيش جلسة',
+                label:
+                    identity.sessionRunning ? 'فيه جلسة دلوقتي' : 'مفيش جلسة',
                 tone: identity.sessionRunning
                     ? AppColors.statusActive
                     : AppColors.textTertiary,
@@ -712,7 +748,8 @@ class _ScreenPanel extends StatelessWidget {
             const SizedBox(height: AppSpacing.xs),
             Text(
               r.claimVsEvidence,
-              style: const TextStyle(fontSize: 11, color: AppColors.textTertiary),
+              style:
+                  const TextStyle(fontSize: 11, color: AppColors.textTertiary),
             ),
           ],
           // The one action that fixes it, when there is one. This is the
@@ -736,7 +773,9 @@ class _ScreenPanel extends StatelessWidget {
                     child: Text(
                       r.remedy,
                       style: const TextStyle(
-                          fontSize: 12, color: AppColors.textPrimary, height: 1.35),
+                          fontSize: 12,
+                          color: AppColors.textPrimary,
+                          height: 1.35),
                     ),
                   ),
                 ],
@@ -805,7 +844,9 @@ class _ScreenPanel extends StatelessWidget {
           Row(
             children: [
               _ActionChip(
-                  label: 'افتح', icon: Icons.power_settings_new_rounded, onTap: onOpen),
+                  label: 'افتح',
+                  icon: Icons.power_settings_new_rounded,
+                  onTap: onOpen),
               const SizedBox(width: 6),
               _ActionChip(
                   label: 'غمّض',
@@ -911,9 +952,8 @@ class _EventLog extends StatelessWidget {
                       e.text,
                       style: TextStyle(
                         fontSize: 11,
-                        color: e.ok
-                            ? AppColors.textSecondary
-                            : AppColors.danger,
+                        color:
+                            e.ok ? AppColors.textSecondary : AppColors.danger,
                       ),
                     ),
                   ),
@@ -980,8 +1020,7 @@ class _ActionChipState extends State<_ActionChip> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               else
-                Icon(widget.icon,
-                    size: 14, color: AppColors.textSecondary),
+                Icon(widget.icon, size: 14, color: AppColors.textSecondary),
               const SizedBox(width: 6),
               Text(
                 widget.label,
@@ -1032,8 +1071,7 @@ class _Switches extends StatelessWidget {
               ),
               const SizedBox(width: AppSpacing.sm),
               const Text('ابعت الشاشات للتلفزيون',
-                  style:
-                      TextStyle(color: AppColors.textPrimary, fontSize: 13)),
+                  style: TextStyle(color: AppColors.textPrimary, fontSize: 13)),
               const Spacer(),
               Switch(
                 value: showCards,
@@ -1042,8 +1080,7 @@ class _Switches extends StatelessWidget {
               ),
               const SizedBox(width: AppSpacing.sm),
               const Text('اعرض كارت الوقت على الشاشة',
-                  style:
-                      TextStyle(color: AppColors.textPrimary, fontSize: 13)),
+                  style: TextStyle(color: AppColors.textPrimary, fontSize: 13)),
             ],
           ),
           const SizedBox(height: 4),
@@ -1081,9 +1118,7 @@ class _Footer extends StatelessWidget {
         _Pill(
           label: running ? 'السيرفر شغال' : 'السيرفر واقف',
           tone: running ? AppColors.statusAvailable : AppColors.warning,
-          icon: running
-              ? Icons.dns_rounded
-              : Icons.power_off_rounded,
+          icon: running ? Icons.dns_rounded : Icons.power_off_rounded,
         ),
         const SizedBox(width: AppSpacing.sm),
         Text(
@@ -1095,8 +1130,7 @@ class _Footer extends StatelessWidget {
           TextButton.icon(
             onPressed: onStartServer,
             icon: const Icon(Icons.play_circle_outline_rounded, size: 15),
-            label: const Text('افتح السيرفر',
-                style: TextStyle(fontSize: 12)),
+            label: const Text('افتح السيرفر', style: TextStyle(fontSize: 12)),
           ),
         if (!enabled)
           const Padding(
