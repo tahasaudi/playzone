@@ -320,10 +320,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               physics: const NeverScrollableScrollPhysics(),
               mainAxisSpacing: AppSpacing.sm,
               crossAxisSpacing: AppSpacing.sm,
-              // Taller than wide so the card breathes: header, mode
+// Taller than wide so the card breathes: header, mode
               // toggles, the minutes + money row and the start button
               // each get their own space.
-              childAspectRatio: 0.7,
+              //
+              // 0.65 rather than 0.7: a RUNNING card now carries the same two mode
+              // chips an empty card does, which is one row taller. The chips were
+              // not squeezed or restyled to make it fit - the row was given the room it
+              // needs, because a card that measures its own controls differently
+              // depending on whether somebody is playing is worse than a card that
+              // is a few pixels taller.
+              childAspectRatio: 0.65,
               children: devices.map((d) {
                 final session = sessionByDevice[d.device.id];
                 final model =
@@ -365,6 +372,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         session == null || session.session.status != 'active'
                             ? null
                             : () => _switchMode(session),
+                    onSwitchModeTo:
+                        session == null || session.session.status != 'active'
+                            ? null
+                            : (mode) => _switchModeTo(session, mode),
                     onExtend: session == null || !session.isTimeUp
                         ? null
                         : () => _openExtendDialog(session),
@@ -573,6 +584,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     await ref.read(sessionRepositoryProvider).switchMode(entry, newMode);
   }
 
+  /// The card's two chips name the mode they move to, so this is the honest
+  /// form of [\_switchMode]: tapping "فردي" on a session already on "فردي"
+  /// asks for the mode it is already in, and doing nothing is the correct
+  /// answer to that — not a write that would re-cut the segment and re-price
+  /// the minutes the players have already served.
+  Future<void> _switchModeTo(SessionBoardEntry entry, String mode) async {
+    if (entry.session.mode == mode) return;
+    await ref.read(sessionRepositoryProvider).switchMode(entry, mode);
+  }
+
   Future<void> _checkout(SessionBoardEntry entry) async {
     // A live happy-hour offer pre-fills the discount (percentage only;
     // fixed offers are applied as an explicit EGP discount by staff).
@@ -657,6 +678,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       mode: session == null
           ? null
           : (session.session.mode == 'multi' ? 'مالتي' : 'فردي'),
+      isMultiMode: session?.session.mode == 'multi',
       timeCost:
           session == null ? null : 'EGP ${session.liveCost.toStringAsFixed(2)}',
       ordersCost:

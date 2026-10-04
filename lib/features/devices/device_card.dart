@@ -47,6 +47,7 @@ class DeviceUiModel {
     this.elapsed,
     this.remaining,
     this.mode,
+    this.isMultiMode = false,
     this.timeCost,
     this.ordersCost,
   });
@@ -58,6 +59,11 @@ class DeviceUiModel {
   final String? elapsed; // formatted HH:MM:SS
   final String? remaining; // MM:SS left on a fixed-duration session
   final String? mode; // "Single" / "Multi"
+
+  /// Whether the live session is running on the "مالتي" rate, kept beside
+  /// [mode] so a card can light the right chip without having to match the
+  /// Arabic label back to a rate.
+  final bool isMultiMode;
   final String? timeCost;
   final String? ordersCost;
 }
@@ -84,6 +90,7 @@ class DeviceCard extends StatelessWidget {
     this.onResume,
     this.onCheckout,
     this.onSwitchMode,
+    this.onSwitchModeTo,
     this.onExtend,
     this.onExtendCustom,
   });
@@ -144,6 +151,16 @@ class DeviceCard extends StatelessWidget {
   /// Only relevant while active (spec: switch mode, and be able to
   /// switch it back, within the same session).
   final VoidCallback? onSwitchMode;
+
+  /// The two chips on a RUNNING card, each one naming the mode it moves the
+  /// live session to — "فردي" and "مالتي", rather than a single badge that
+  /// flips whichever way it happens to be.
+  ///
+  /// Named apart from [onSwitchMode] on purpose: this one is a choice, that
+  /// one is a coin toss, and a cashier who is not sure which mode the machine
+  /// is on should be able to say so with one tap instead of tapping and
+  /// checking. Null unless the session is actually running.
+  final ValueChanged<String>? onSwitchModeTo;
 
   /// Time is up but the players want to keep playing — pushes the
   /// deadline out and puts the device back to work.
@@ -223,7 +240,10 @@ class DeviceCard extends StatelessWidget {
           // This machine's own mode (single or multi). The cashier picks
           // it right on the card, and it prices everything below.
           if (onSelectMode != null) ...[
-            _modeToggles(),
+            _modeToggles(
+              activeMode: selectedMode,
+              onPick: (mode) => onSelectMode?.call(mode),
+            ),
             SizedBox(height: gap),
           ],
           // This machine's own time. Each card keeps its own choice, so
@@ -282,12 +302,20 @@ class DeviceCard extends StatelessWidget {
 
   /// فردي / مالتي toggle — sits right on the card like the time chips,
   /// and decides which hourly rate prices everything below it.
-  Widget _modeToggles() {
-    final isMulti = selectedMode == 'multi';
+  ///
+  /// One widget for both cards on purpose. The empty card and the running
+  /// card offer the same two choices, and a card that measured them twice
+  /// would be a card whose chips sat at a different height depending on
+  /// whether a customer happened to be sitting there.
+  Widget _modeToggles({
+    required String activeMode,
+    required ValueChanged<String> onPick,
+  }) {
+    final isMulti = activeMode == 'multi';
     Widget toggle(String label, {required String mode, required bool active}) {
       return Expanded(
         child: GestureDetector(
-          onTap: () => onSelectMode?.call(mode),
+          onTap: () => onPick(mode),
           child: Container(
             padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8),
             decoration: BoxDecoration(
@@ -585,37 +613,33 @@ class DeviceCard extends StatelessWidget {
               ),
             ),
           ],
-          if (device.mode != null && !compact) ...[
+          if (device.mode != null && onSwitchModeTo != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            // Two chips, not one badge that flips whichever way it happens to
+            // be: the cashier says which mode they want, instead of tapping and
+            // then reading the card to find out whether they guessed right.
+            // Measured by [_modeToggles], so they sit exactly where the empty
+            // card's chips sit and the card grows by one row, not by a redesign.
+            _modeToggles(
+              activeMode: device.isMultiMode ? 'multi' : 'single',
+              onPick: onSwitchModeTo!,
+            ),
+          ] else if (device.mode != null) ...[
+            // Nothing running to move: read the mode and leave it alone.
             const SizedBox(height: 4),
             Center(
-              child: GestureDetector(
-                onTap: onSwitchMode,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: AppColors.accentPrimary.withOpacity(0.15),
-                    borderRadius: AppRadius.smallR,
-                    border: onSwitchMode != null
-                        ? Border.all(color: AppColors.glassBorderPurple)
-                        : null,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(device.mode!,
-                          style: const TextStyle(
-                              fontSize: 11,
-                              color: AppColors.accentSecondary,
-                              fontWeight: FontWeight.w600)),
-                      if (onSwitchMode != null) ...[
-                        const SizedBox(width: 4),
-                        const Icon(Icons.swap_horiz_rounded,
-                            size: 12, color: AppColors.accentSecondary),
-                      ],
-                    ],
-                  ),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                  color: AppColors.accentPrimary.withOpacity(0.15),
+                  borderRadius: AppRadius.smallR,
                 ),
+                child: Text(device.mode!,
+                    style: const TextStyle(
+                        fontSize: 11,
+                        color: AppColors.accentSecondary,
+                        fontWeight: FontWeight.w600)),
               ),
             ),
           ],
