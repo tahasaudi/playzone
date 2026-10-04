@@ -123,6 +123,35 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     return map;
   }
 
+  /// What one live session ordered, one line per product — "مياه ×2 — 40.00".
+  ///
+  /// Merged by description rather than listed line by line, because the till
+  /// writes a fresh invoice line per tap: a customer who asked for three waters
+  /// gets three lines, and the panel would then say the same thing three times
+  /// while looking longer than it is. Quantity is folded into the label and
+  /// the money is summed, so the panel shows what was ordered rather than how
+  /// many times the cashier touched the screen.
+  List<String> _orderLinesFor(SessionBoardEntry entry) {
+    final rows =
+        ref.watch(sessionOrderLinesProvider(entry.session.id)).valueOrNull ??
+            const <InvoiceItemRow>[];
+    final qty = <String, int>{};
+    final money = <String, double>{};
+    final order = <String>[];
+    for (final r in rows) {
+      final key = r.description.trim();
+      if (key.isEmpty) continue;
+      if (!qty.containsKey(key)) order.add(key);
+      qty[key] = (qty[key] ?? 0) + r.quantity;
+      money[key] = (money[key] ?? 0) + r.total;
+    }
+    return [
+      for (final key in order)
+        '${qty[key]! > 1 ? '${qty[key]}× ' : ''}$key — '
+            '${(money[key] ?? 0).toStringAsFixed(2)}',
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final devicesAsync = ref.watch(devicesWithTypeProvider);
@@ -178,6 +207,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               _selectedEntry!.type,
               _selectedEntry!,
               ordersBySession,
+              orderLines: _orderLinesFor(_selectedEntry!),
             ),
             onClose: _closeSelectedEntry,
             onCheckout: () => _checkout(_selectedEntry!),
@@ -661,8 +691,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     ref.read(escCloseHandlerProvider.notifier).state = null;
   }
 
-  DeviceUiModel _toUiModel(DeviceRow device, DeviceTypeRow type,
-      SessionBoardEntry? session, Map<int, double> ordersBySession) {
+  DeviceUiModel _toUiModel(
+    DeviceRow device,
+    DeviceTypeRow type,
+    SessionBoardEntry? session,
+    Map<int, double> ordersBySession, {
+    List<String> orderLines = const <String>[],
+  }) {
     final ordersTotal =
         session == null ? 0.0 : (ordersBySession[session.session.id] ?? 0.0);
     return DeviceUiModel(
@@ -683,6 +718,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           session == null ? null : 'EGP ${session.liveCost.toStringAsFixed(2)}',
       ordersCost:
           session == null ? null : 'EGP ${ordersTotal.toStringAsFixed(2)}',
+      orderLines: orderLines,
     );
   }
 

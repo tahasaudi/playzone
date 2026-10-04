@@ -23,8 +23,7 @@ class _LedgerBucket {
   final List<String> items = <String>[];
 
   /// "مشروبات: مياه ×2، عصير ×1"
-  String get note =>
-      items.isEmpty ? label : '$label: ${items.join('، ')}';
+  String get note => items.isEmpty ? label : '$label: ${items.join('، ')}';
 }
 
 /// One line the caller wants on the invoice — used for both a POS cart
@@ -45,15 +44,23 @@ class InvoiceLineInput {
   double get total => unitPrice * quantity;
 }
 
-@DriftAccessor(tables: [Invoices, InvoiceItems, Products, Categories, Customers, LoyaltySettings, Accounts, AccountEntries])
+@DriftAccessor(tables: [
+  Invoices,
+  InvoiceItems,
+  Products,
+  Categories,
+  Customers,
+  LoyaltySettings,
+  Accounts,
+  AccountEntries
+])
 class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
   InvoiceDao(super.db);
 
-  Stream<List<InvoiceRow>> watchRecent({int limit = 50}) =>
-      (select(invoices)
-            ..orderBy([(i) => OrderingTerm.desc(i.createdAt)])
-            ..limit(limit))
-          .watch();
+  Stream<List<InvoiceRow>> watchRecent({int limit = 50}) => (select(invoices)
+        ..orderBy([(i) => OrderingTerm.desc(i.createdAt)])
+        ..limit(limit))
+      .watch();
 
   /// Today's invoices — used for the Dashboard's daily revenue KPI and
   /// the per-employee breakdown (grouping happens in the repository,
@@ -99,13 +106,13 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
 
       final splitPayment = paidCash > 0 || paidCard > 0;
       final effectiveCash = splitPayment ? paidCash : total;
-      final effectiveCard = splitPayment ? (paidCard > 0 ? paidCard : 0.0) : 0.0;
+      final effectiveCard =
+          splitPayment ? (paidCard > 0 ? paidCard : 0.0) : 0.0;
       if (effectiveCash + effectiveCard + 0.001 < total) {
         throw Exception('مبلغ الدفع أقل من الإجمالي المطلوب');
       }
-      final paymentMethod = effectiveCard > 0
-          ? (effectiveCash > 0 ? 'mixed' : 'card')
-          : 'cash';
+      final paymentMethod =
+          effectiveCard > 0 ? (effectiveCash > 0 ? 'mixed' : 'card') : 'cash';
 
       final invoiceId = await into(invoices).insert(InvoicesCompanion.insert(
         sessionId: Value(sessionId),
@@ -141,8 +148,7 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
               .getSingle();
           await (update(products)..where((p) => p.id.equals(line.productId!)))
               .write(ProductsCompanion(
-            stockQuantity:
-                Value(product.stockQuantity - line.quantity),
+            stockQuantity: Value(product.stockQuantity - line.quantity),
             updatedAt: Value(DateTime.now()),
           ));
           final category = await (select(categories)
@@ -154,11 +160,9 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
         final label = line.productId == null
             ? 'وقت اللعب'
             : categoryNameOf[line.productId] ?? 'أصناف';
-        final bucket =
-            buckets.putIfAbsent(label, () => _LedgerBucket(label));
+        final bucket = buckets.putIfAbsent(label, () => _LedgerBucket(label));
         bucket.subtotal += line.total;
-        bucket.items.add(
-            '${line.description} ×${line.quantity}');
+        bucket.items.add('${line.description} ×${line.quantity}');
       }
 
       if (customerId != null) {
@@ -233,8 +237,7 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
     required DateTime to,
   }) {
     return select(invoices).watch().map((rows) => rows
-        .where((r) =>
-            !r.createdAt.isBefore(from) && r.createdAt.isBefore(to))
+        .where((r) => !r.createdAt.isBefore(from) && r.createdAt.isBefore(to))
         .toList());
   }
 
@@ -264,6 +267,23 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
   Stream<List<InvoiceRow>> watchForSession(int sessionId) =>
       (select(invoices)..where((i) => i.sessionId.equals(sessionId))).watch();
 
+  /// The individual lines behind those invoices — "مياه ×2، عصير ×1".
+  ///
+  /// A separate read from [watchForSession] on purpose: the panel needs the
+  /// sum AND the names, and the names only exist on the lines. Filtering in
+  /// SQL rather than pulling the whole table, because a busy evening's worth of
+  /// invoice lines is not something to hand to a widget that will show one
+  /// session's worth of it.
+  Stream<List<InvoiceItemRow>> watchItemsForSession(int sessionId) {
+    final query = select(invoiceItems).join([
+      innerJoin(invoices, invoices.id.equalsExp(invoiceItems.invoiceId)),
+    ]);
+    return query.watch().map((rows) => rows
+        .where((r) => r.readTable(invoices).sessionId == sessionId)
+        .map((r) => r.readTable(invoiceItems))
+        .toList());
+  }
+
   /// One-shot ranged read (non-stream) — used by the partnership ledger
   /// to compute period profit without holding a subscription open.
   Future<List<InvoiceRow>> getBetween({
@@ -272,12 +292,10 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
   }) async {
     final rows = await select(invoices).get();
     return rows
-        .where((r) =>
-            !r.createdAt.isBefore(from) && r.createdAt.isBefore(to))
+        .where((r) => !r.createdAt.isBefore(from) && r.createdAt.isBefore(to))
         .toList();
   }
 
   Future<List<InvoiceItemRow>> itemsForInvoice(int invoiceId) =>
-      (select(invoiceItems)..where((i) => i.invoiceId.equals(invoiceId)))
-          .get();
+      (select(invoiceItems)..where((i) => i.invoiceId.equals(invoiceId))).get();
 }

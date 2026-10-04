@@ -50,6 +50,7 @@ class DeviceUiModel {
     this.isMultiMode = false,
     this.timeCost,
     this.ordersCost,
+    this.orderLines = const <String>[],
   });
 
   final String name;
@@ -66,6 +67,15 @@ class DeviceUiModel {
   final bool isMultiMode;
   final String? timeCost;
   final String? ordersCost;
+
+  /// What the customer actually ordered, one line per item —
+  /// "مياه ×2 — 40.00", already formatted and summed per product.
+  ///
+  /// A sum alone answers "how much", which is the question the cashier asks
+  /// while they are charging. It does not answer "ordered what", which is the
+  /// question they ask when the customer says they did not, and that is the
+  /// one worth being able to answer without opening the till.
+  final List<String> orderLines;
 }
 
 class DeviceCard extends StatelessWidget {
@@ -796,9 +806,23 @@ class DeviceCard extends StatelessWidget {
     );
   }
 
-  // Placeholder sum for UI display only — real total comes from the
-  // pricing engine built in the data-layer phase (admin-configured prices).
-  String _sumCost() => device.timeCost ?? '—';
+  /// "الإجمالي" on a card: what the customer owes, which is the play
+  /// time AND everything they ordered from the counter. Those are two
+  /// different things and both of them are owed.
+  ///
+  /// It used to print the time alone, so a customer who had eaten and
+  /// drunk saw a total that was short of what the till was about to ask
+  /// for, and the correction had to happen at the checkout - in front of
+  /// the customer.
+  String _sumCost() {
+    final time = _egp(device.timeCost);
+    final orders = _egp(device.ordersCost);
+    if (time == null && orders == null) return '-';
+    return 'EGP ${((time ?? 0) + (orders ?? 0)).toStringAsFixed(2)}';
+  }
+
+  static double? _egp(String? s) =>
+      double.tryParse((s ?? '').replaceFirst('EGP ', '').trim());
 }
 
 /// The free-form "money" box on a device card. It owns its controller so

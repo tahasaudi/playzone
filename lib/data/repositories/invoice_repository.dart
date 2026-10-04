@@ -29,6 +29,9 @@ class InvoiceRepository {
   Stream<List<InvoiceRow>> watchForSession(int sessionId) =>
       _db.invoiceDao.watchForSession(sessionId);
 
+  Stream<List<InvoiceItemRow>> watchItemsForSession(int sessionId) =>
+      _db.invoiceDao.watchItemsForSession(sessionId);
+
   Future<List<InvoiceItemRow>> itemsForInvoice(int invoiceId) =>
       _db.invoiceDao.itemsForInvoice(invoiceId);
 
@@ -100,10 +103,19 @@ final invoicesInRangeProvider = StreamProvider<List<InvoiceRow>>((ref) {
 
 /// Invoice lines inside the selected window — the Statistics screen's
 /// top-products ranking.
-final invoiceItemsInRangeProvider =
-    StreamProvider<List<InvoiceItemRow>>((ref) {
+final invoiceItemsInRangeProvider = StreamProvider<List<InvoiceItemRow>>((ref) {
   final range = currentReportRange(ref.watch(reportPeriodProvider));
   return ref
       .watch(invoiceRepositoryProvider)
       .watchItemsBetween(from: range.from, to: range.to);
+});
+
+/// What one live session actually ordered, line by line.
+///
+/// Family, not a single stream, because the dashboard asks this question about
+/// the session the cashier just tapped — and a card that lists everybody's
+/// orders would be a card nobody could read.
+final sessionOrderLinesProvider =
+    StreamProvider.family<List<InvoiceItemRow>, int>((ref, sessionId) {
+  return ref.watch(invoiceRepositoryProvider).watchItemsForSession(sessionId);
 });

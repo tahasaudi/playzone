@@ -91,11 +91,15 @@ class SessionDetailsPanel extends StatelessWidget {
                 const SizedBox(height: AppSpacing.md),
                 _row('العميل', device.customerName ?? '—'),
                 _row('الوضع الحالي', device.mode ?? '—'),
-                const Divider(color: AppColors.glassBorder, height: AppSpacing.md),
-                _row('تكلفة الوقت', device.timeCost ?? 'EGP 0'),
+                const Divider(
+                    color: AppColors.glassBorder, height: AppSpacing.md),
+                _row('الوقت', device.timeCost ?? 'EGP 0'),
                 _row('الطلبات', device.ordersCost ?? 'EGP 0'),
-                _row('الخصم', 'EGP 0'),
-                const Divider(color: AppColors.glassBorder, height: AppSpacing.md),
+                if (device.orderLines.isNotEmpty)
+                  ..._orderedItems(device.orderLines),
+                _row('خصم', 'EGP 0'),
+                const Divider(
+                    color: AppColors.glassBorder, height: AppSpacing.md),
                 _row('الإجمالي', 'EGP ${total.toStringAsFixed(2)}',
                     emphasize: true),
                 const SizedBox(height: AppSpacing.md),
@@ -129,6 +133,42 @@ class SessionDetailsPanel extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// What was ordered, line by line, under the "الطلبات" sum.
+  ///
+  /// Sits in the panel rather than on the card because it is an answer to a
+  /// question, not a figure: nobody reads a list off a card six tiles across,
+  /// but "what did he order" is exactly what gets asked at the moment the
+  /// panel is open. Kept to one line per product so a session with a long
+  /// order scrolls instead of pushing the total off the panel.
+  List<Widget> _orderedItems(List<String> lines) {
+    return [
+      const Padding(
+        padding: EdgeInsets.only(top: 2, bottom: 2),
+        child: Text('طلب:',
+            style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: AppColors.textTertiary)),
+      ),
+      for (final line in lines)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(line,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 12, color: AppColors.textSecondary)),
+              ),
+              Icon(Icons.check_rounded,
+                  size: 12, color: AppColors.textTertiary),
+            ],
+          ),
+        ),
+    ];
   }
 
   Widget _row(String label, String value, {bool emphasize = false}) {
