@@ -78,12 +78,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     if (box != null) box.send('power'); // ignore result on purpose
   }
 
-  /// The café's roster reads in this order (device numbers): 1, 2, 4, 5, 6
-  /// then 3 — the machines' physical layout at the counter. Any device
-  /// outside the list keeps its natural number order after them. The order
-  /// itself lives in [cafeRosterOrder] so the screens page reads the same.
+  /// The machines' order on the board, and on the screens page: straight by the
+  /// number they are numbered with in the room. One function for both, so the
+  /// two pages cannot end up describing the same café differently.
   int _rosterCompare(DeviceWithType a, DeviceWithType b) =>
-      compareCafeRoster(a.device.name, b.device.name);
+      compareDeviceNumbers(a.device.name, b.device.name);
 
   double _rateFor(DeviceWithType d, String mode) =>
       mode == 'multi' && d.effectiveHourlyRateMulti > 0

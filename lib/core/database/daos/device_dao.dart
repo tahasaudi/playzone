@@ -139,6 +139,13 @@ int? deviceNumberOf(String name) {
 /// Ascending by the device number, so the roster always reads 1→2→3…
 /// Names without a number keep a stable alphabetical order after the
 /// numbered ones.
+///
+/// This is the café's one machine order, and both the board and the screens
+/// page read through it. It used to layer a hand-written list over the top
+/// (1, 2, 4, 5, 6, 3) to push one machine to the back — a list that had to be
+/// edited by hand every time a machine was added or renumbered, and that the
+/// two pages could disagree about. The numbers are already the order the room
+/// is numbered in, so the numbers are the order.
 int compareDeviceNumbers(String a, String b) {
   final na = deviceNumberOf(a);
   final nb = deviceNumberOf(b);
@@ -146,30 +153,4 @@ int compareDeviceNumbers(String a, String b) {
   if (na != null) return -1;
   if (nb != null) return 1;
   return a.compareTo(b);
-}
-
-/// The café's own walk order: 1→2→4→5→6→3.
-///
-/// Not 1→2→3, because machine 3 is the odd one out in the room and the
-/// cashier reads the wall by where each machine physically stands. Lives here,
-/// next to the number helpers, rather than in the dashboard: the screens page
-/// has to answer to the same order, and a second copy of this list is a second
-/// order — the day they drift, the two pages describe one café differently and
-/// the person who has to notice is the one holding the remote.
-const cafeRosterOrder = <int>[1, 2, 4, 5, 6, 3];
-
-/// Where a machine named [name] sits in that walk order. Machines with no
-/// number, and numbered machines the café never listed, go to the back but
-/// keep a stable place among themselves.
-int cafeRosterRankOf(String name) {
-  final n = deviceNumberOf(name);
-  if (n == null) return 500;
-  final i = cafeRosterOrder.indexOf(n);
-  return i == -1 ? 400 : i;
-}
-
-/// Two device names compared in the café's walk order.
-int compareCafeRoster(String a, String b) {
-  final rank = cafeRosterRankOf(a).compareTo(cafeRosterRankOf(b));
-  return rank != 0 ? rank : compareDeviceNumbers(a, b);
 }

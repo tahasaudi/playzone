@@ -117,7 +117,7 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
     // wall check the same machine twice.
     final devices = List.of(ref.watch(devicesWithTypeProvider).valueOrNull ??
         const <DeviceWithType>[])
-      ..sort((a, b) => compareCafeRoster(a.device.name, b.device.name));
+      ..sort((a, b) => compareDeviceNumbers(a.device.name, b.device.name));
     final deviceNameById = {
       for (final d in devices) d.device.id: d.device.name,
     };
@@ -226,7 +226,7 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
   ) {
     final byRoom = List.of(slots);
     byRoom.sort((a, b) {
-      final rank = compareCafeRoster(
+      final rank = compareDeviceNumbers(
         deviceNameById[a.deviceId] ?? '',
         deviceNameById[b.deviceId] ?? '',
       );
