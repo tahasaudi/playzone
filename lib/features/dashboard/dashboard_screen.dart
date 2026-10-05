@@ -26,8 +26,7 @@ import '../devices/device_card.dart';
 import '../devices/session_details_panel.dart';
 import '../devices/checkout_modal.dart';
 import '../devices/session_order_modal.dart';
-import '../search/global_search_dialog.dart';
-import '../shell/app_shell.dart';
+import '../tv/screens_popup.dart';
 
 /// Dashboard screen. Devices AND their live sessions come from the real
 /// database; the timer/cost update every second, billed per second, and
@@ -212,26 +211,21 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     );
   }
 
-  /// Bottom-left lens that opens the one search box for the whole app —
-  /// customers, machines, products, invoices, employees, bookings.
+  /// Bottom-left lens that opens the screens panel — every wall, in the
+  /// café's walk order, with open/close on each one.
   ///
   /// It sits on the board rather than in the drawer because the question it
-  /// answers ("which table is that?") comes up while you are looking at the
-  /// table, not while you are looking at a menu. Same box as Ctrl+K, so
-  /// there is one search to learn instead of two.
+  /// answers comes up while standing in front of the machines: which screen is
+  /// still on, and turn it off. Getting that out of the screens page meant
+  /// walking a configuration page to find one panel.
   Widget _searchButton() {
     return Tooltip(
-      message: 'بحث في الكل (Ctrl+K)',
+      message: 'الشاشات',
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(22),
-          onTap: () {
-            showGlobalSearchDialog(
-              context,
-              (route) => ref.read(activeRouteProvider.notifier).state = route,
-            );
-          },
+          onTap: () => showScreensPopup(context),
           child: Ink(
             width: 44,
             height: 44,
