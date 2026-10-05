@@ -22,13 +22,19 @@ class CheckoutResult {
   final double paidCard;
 }
 
-/// Shows the checkout modal for completing a session. Displays the time
-/// cost, lets staff apply a manual discount and/or redeem the customer's
-/// loyalty points, choose cash / card / mixed payment, then confirms.
+/// Shows the checkout modal for completing a session.
+///
+/// [timeCost] and [ordersTotal] are the two halves of the bill, and the bill is
+/// what this screen is about: the card said time plus orders, and a checkout
+/// that quoted less than the card was asking the cashier to remember which of
+/// the two numbers was the real one. [ordersTotal] has already been paid for at
+/// the counter when it was ordered, so it is shown as part of the bill and not
+/// charged again here — see the "already settled" line.
 Future<void> showCheckoutModal(
   BuildContext context,
   DeviceUiModel device, {
   double timeCost = 0,
+  double ordersTotal = 0,
   int? customerId,
   int customerPoints = 0,
   double discountRate = 0,
@@ -49,6 +55,7 @@ Future<void> showCheckoutModal(
           child: _CheckoutModalContent(
             device: device,
             timeCost: timeCost,
+            ordersTotal: ordersTotal,
             customerId: customerId,
             customerPoints: customerPoints,
             discountRate: discountRate,
@@ -64,6 +71,7 @@ class _CheckoutModalContent extends ConsumerStatefulWidget {
   const _CheckoutModalContent({
     required this.device,
     required this.timeCost,
+    required this.ordersTotal,
     required this.customerId,
     required this.customerPoints,
     required this.discountRate,
@@ -72,6 +80,7 @@ class _CheckoutModalContent extends ConsumerStatefulWidget {
 
   final DeviceUiModel device;
   final double timeCost;
+  final double ordersTotal;
   final int? customerId;
   final int customerPoints;
   final double discountRate;
@@ -84,8 +93,7 @@ class _CheckoutModalContent extends ConsumerStatefulWidget {
 
 enum _PayMethod { cash, card, mixed }
 
-class _CheckoutModalContentState
-    extends ConsumerState<_CheckoutModalContent> {
+class _CheckoutModalContentState extends ConsumerState<_CheckoutModalContent> {
   final _discount = TextEditingController();
   final _cash = TextEditingController();
   final _card = TextEditingController();
@@ -117,37 +125,47 @@ class _CheckoutModalContentState
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(loyaltySettingsProvider).value;
-    final pointValue = settings?.pointValueEGP ??
-        LoyaltyRepository.defaultPointValueEGP;
+    final pointValue =
+        settings?.pointValueEGP ?? LoyaltyRepository.defaultPointValueEGP;
     final minimum = settings?.minimumRedeemPoints ??
         LoyaltyRepository.defaultMinimumRedeemPoints;
 
+    // The bill is the time plus what the machine ordered — the same two numbers
+    // the card adds up, so the two screens cannot quote different bills for the
+    // same sitting.
     final subtotal = widget.timeCost;
-    final afterManual =
+    final bill = subtotal + widget.ordersTotal;
+    // Discounts and points come off the time, not the whole bill: the orders
+    // were charged at the counter when they were ordered, so discounting them
+    // here would take money back that has already been handed over.
+    final timeAfterDiscount =
         (subtotal - _manualDiscount).clamp(0, double.infinity).toDouble();
 
     // Redemption: only with a customer, enough points, and something left
     // to cover. Points spent are capped by both the balance and the bill.
     final canRedeem = widget.customerId != null &&
         widget.customerPoints >= minimum &&
-        afterManual > 0 &&
+        timeAfterDiscount > 0 &&
         pointValue > 0;
     final maxRedeemablePoints = pointValue > 0
-        ? (afterManual / pointValue).floor().clamp(0, widget.customerPoints)
+        ? (timeAfterDiscount / pointValue)
+            .floor()
+            .clamp(0, widget.customerPoints)
         : 0;
     final redeemedPoints = _redeem ? maxRedeemablePoints : 0;
     final redeemValue = redeemedPoints * pointValue;
-    final total =
-        (afterManual - redeemValue).clamp(0, double.infinity).toDouble();
+    final dueNow =
+        (timeAfterDiscount - redeemValue).clamp(0, double.infinity).toDouble();
+    final total = dueNow + widget.ordersTotal;
 
     final paidCash = switch (_payMethod) {
-      _PayMethod.cash => total,
+      _PayMethod.cash => dueNow,
       _PayMethod.card => 0.0,
       _PayMethod.mixed => double.tryParse(_cash.text.trim()) ?? 0,
     };
     final paidCard = switch (_payMethod) {
       _PayMethod.cash => 0.0,
-      _PayMethod.card => total,
+      _PayMethod.card => dueNow,
       _PayMethod.mixed => double.tryParse(_card.text.trim()) ?? 0,
     };
 
@@ -174,12 +192,13 @@ class _CheckoutModalContentState
               const SizedBox(height: AppSpacing.lg),
               _row('مدة اللعب', widget.device.elapsed ?? '00:00:00'),
               _row('تكلفة الوقت', 'EGP ${subtotal.toStringAsFixed(2)}'),
-              _row('طلبات الكافيه', widget.device.ordersCost ?? 'EGP 0'),
+              _row('طلبات الكافيه',
+                  'EGP ${widget.ordersTotal.toStringAsFixed(2)}'),
               _discountRow(),
               if (redeemedPoints > 0)
-                _row('نقاط الولاء',
-                    '− EGP ${redeemValue.toStringAsFixed(2)}'),
-              const Divider(color: AppColors.glassBorder, height: AppSpacing.xl),
+                _row('نقاط الولاء', '− EGP ${redeemValue.toStringAsFixed(2)}'),
+              const Divider(
+                  color: AppColors.glassBorder, height: AppSpacing.xl),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -192,6 +211,18 @@ class _CheckoutModalContentState
                       style: AppTypography.numberLarge),
                 ],
               ),
+              // What the cashier takes now, and why it is not the total. The
+              // orders were charged when they were ordered; charging them a
+              // second time here is the mistake this screen was quietly set up
+              // to make.
+              if (widget.ordersTotal > 0) ...[
+                const SizedBox(height: 6),
+                _row('الطلبات اتحصلت قبل كدا',
+                    'EGP ${widget.ordersTotal.toStringAsFixed(2)}',
+                    tone: AppColors.textTertiary),
+                _row('المستحق دلوقتي', 'EGP ${dueNow.toStringAsFixed(2)}',
+                    strong: true, tone: AppColors.statusActive),
+              ],
               const SizedBox(height: AppSpacing.lg),
               if (widget.customerId != null)
                 _loyaltyRow(canRedeem, widget.customerPoints, minimum),
@@ -208,18 +239,19 @@ class _CheckoutModalContentState
                     Expanded(child: _amountField(_card, 'كارت')),
                   ],
                 ),
-                if (paidCash + paidCard + 0.001 < total)
+                if (paidCash + paidCard + 0.001 < dueNow)
                   const Padding(
                     padding: EdgeInsets.only(top: 6),
                     child: Text('المبلغ المدفوع أقل من الإجمالي',
-                        style: TextStyle(color: AppColors.danger, fontSize: 12)),
+                        style:
+                            TextStyle(color: AppColors.danger, fontSize: 12)),
                   ),
               ],
               if (_error != null) ...[
                 const SizedBox(height: AppSpacing.sm),
                 Text(_error!,
-                    style: const TextStyle(
-                        color: AppColors.danger, fontSize: 13)),
+                    style:
+                        const TextStyle(color: AppColors.danger, fontSize: 13)),
               ],
               const SizedBox(height: AppSpacing.lg),
               Row(
@@ -238,8 +270,11 @@ class _CheckoutModalContentState
                       icon: Icons.check_circle_rounded,
                       expand: true,
                       onPressed: () => _confirm(
-                          total, _manualDiscount + redeemValue, redeemedPoints,
-                          paidCash, paidCard),
+                          dueNow,
+                          _manualDiscount + redeemValue,
+                          redeemedPoints,
+                          paidCash,
+                          paidCard),
                     ),
                   ),
                 ],
@@ -251,9 +286,13 @@ class _CheckoutModalContentState
     );
   }
 
-  Future<void> _confirm(double total, double discount, int redeemedPoints,
+  /// [due] is what the cashier has to hand over now, not the bill: the orders
+  /// were charged when they were ordered, so checking the tender against the
+  /// bill would either reject a correct payment or accept one short by the
+  /// price of every drink the customer had.
+  Future<void> _confirm(double due, double discount, int redeemedPoints,
       double paidCash, double paidCard) async {
-    if (paidCash + paidCard + 0.001 < total) {
+    if (paidCash + paidCard + 0.001 < due) {
       setState(() => _error = 'المبلغ المدفوع أقل من الإجمالي المطلوب');
       return;
     }
@@ -287,7 +326,8 @@ class _CheckoutModalContentState
               keyboardType: TextInputType.number,
               textAlign: TextAlign.end,
               onChanged: (_) => setState(() {}),
-              style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
+              style:
+                  const TextStyle(color: AppColors.textPrimary, fontSize: 13),
               decoration: _fieldDecoration('0'),
             ),
           ),
@@ -306,8 +346,7 @@ class _CheckoutModalContentState
       ),
       child: Row(
         children: [
-          const Icon(Icons.stars_rounded,
-              size: 18, color: AppColors.warning),
+          const Icon(Icons.stars_rounded, size: 18, color: AppColors.warning),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text('رصيد الولاء: $points نقطة',
@@ -413,20 +452,20 @@ class _CheckoutModalContentState
     );
   }
 
-  Widget _row(String label, String value) {
+  Widget _row(String label, String value, {Color? tone, bool strong = false}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label,
-              style: const TextStyle(
-                  color: AppColors.textSecondary, fontSize: 13)),
+              style: TextStyle(
+                  color: tone ?? AppColors.textSecondary, fontSize: 13)),
           Text(value,
-              style: const TextStyle(
-                  color: AppColors.textPrimary,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14)),
+              style: TextStyle(
+                  color: tone ?? AppColors.textPrimary,
+                  fontWeight: strong ? FontWeight.w800 : FontWeight.w600,
+                  fontSize: strong ? 15 : 14)),
         ],
       ),
     );

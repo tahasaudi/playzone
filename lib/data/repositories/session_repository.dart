@@ -101,10 +101,21 @@ class SessionRepository {
     double paidCash = 0,
     double paidCard = 0,
     double? collectedTimeCost,
+    double ordersTotal = 0,
   }) async {
-    final finalCost =
+    // What this sitting was worth: the gaming time plus everything the machine
+    // ordered. Stored on the session rather than left for each screen to add
+    // up on its own — the Sessions list read the time alone, so a table that
+    // ordered drinks and played for an hour read as an hour with nothing on it.
+    //
+    // The invoice still bills the time only. The orders were charged at the
+    // counter when they were ordered and already carry their own invoice, their
+    // own stock movement and their own ledger entry; billing them here as well
+    // would count every drink twice in the day's revenue.
+    final timePart =
         entry.session.fixedPrice ?? (collectedTimeCost ?? entry.liveCost);
-    await _db.sessionDao.complete(entry, overrideFinalCost: finalCost);
+    await _db.sessionDao
+        .complete(entry, overrideFinalCost: timePart + ordersTotal);
     await invoiceDao.createInvoice(
       sessionId: entry.session.id,
       customerId: entry.session.customerId,
@@ -117,7 +128,7 @@ class SessionRepository {
         InvoiceLineInput(
           description: '${entry.type.name} — ${entry.device.name} (وقت اللعب)',
           quantity: 1,
-          unitPrice: finalCost,
+          unitPrice: timePart,
         ),
       ],
     );

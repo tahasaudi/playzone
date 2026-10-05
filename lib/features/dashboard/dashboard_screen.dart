@@ -658,11 +658,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     // ticking, but the customer was quoted this price. The repository
     // uses this same frozen value for the final bill.
     final baseCost = entry.liveCost;
+    // What this machine ordered, read once and frozen alongside the time: the
+    // modal and the stored bill have to be quoting the same sitting.
+    final orders =
+        (_currentOrdersBySession()[entry.session.id] ?? 0).toDouble();
 
     await showCheckoutModal(
       context,
       _toUiModel(entry.device, entry.type, entry, _currentOrdersBySession()),
       timeCost: baseCost,
+      ordersTotal: orders,
       customerId: entry.session.customerId,
       customerPoints: entry.customer?.loyaltyPoints ?? 0,
       discountRate: discountRate,
@@ -675,6 +680,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               paidCash: result.paidCash,
               paidCard: result.paidCard,
               collectedTimeCost: baseCost,
+              ordersTotal: orders,
             );
         // The bill is saved, so the screen can go dark immediately. Both
         // commands are fire-and-forget: the cashier must never wait on the
