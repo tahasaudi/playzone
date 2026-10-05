@@ -17,12 +17,20 @@ part 'invoice_dao.g.dart';
 /// makes the Accounting screen answer "اتباع من اي؟" without opening
 /// the invoice.
 class _LedgerBucket {
-  _LedgerBucket(this.label);
+  _LedgerBucket(this.label, {required this.isGaming});
   final String label;
+
+  /// True for the gaming-time line, false for anything the café sold.
+  ///
+  /// Carried on the bucket because it decides the ACCOUNT the money lands in,
+  /// and the café and the PlayStation are two separate books: a table that
+  /// played for an hour and drank two waters has to read as a PlayStation hour
+  /// and two drinks, not as one anonymous lump.
+  final bool isGaming;
   double subtotal = 0;
   final List<String> items = <String>[];
 
-  /// "مشروبات: مياه ×2، عصير ×1"
+  /// "وقت اللعب: بليستيشن ×1، بلايستيشن 2 ×1"
   String get note => items.isEmpty ? label : '$label: ${items.join('، ')}';
 }
 
@@ -90,6 +98,13 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
   /// the customer's points against the bill (subtracted from total via
   /// their configured point value); points are always earned on the
   /// final total when a customer is attached.
+  ///
+  /// [settled] false writes a bill that has been rung up but not paid for —
+  /// a café order taken during a session, waiting to go on the one bill at
+  /// checkout. Stock still moves, because the drinks left the shelf; the
+  /// customer's visit, their loyalty points and the ledger entry wait for the
+  /// real bill, because no money has changed hands yet. Those drafts are
+  /// folded into the session's final bill by [removeSessionOrders].
   Future<int> createInvoice({
     required List<InvoiceLineInput> lines,
     int? sessionId,
@@ -99,6 +114,7 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
     int redeemedPoints = 0,
     double paidCash = 0,
     double paidCard = 0,
+    bool settled = true,
   }) {
     return transaction(() async {
       final subtotal = lines.fold<double>(0, (sum, l) => sum + l.total);
@@ -108,11 +124,14 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
       final effectiveCash = splitPayment ? paidCash : total;
       final effectiveCard =
           splitPayment ? (paidCard > 0 ? paidCard : 0.0) : 0.0;
-      if (effectiveCash + effectiveCard + 0.001 < total) {
+      if (settled && effectiveCash + effectiveCard + 0.001 < total) {
         throw Exception('مبلغ الدفع أقل من الإجمالي المطلوب');
       }
-      final paymentMethod =
-          effectiveCard > 0 ? (effectiveCash > 0 ? 'mixed' : 'card') : 'cash';
+      final paymentMethod = !settled
+          ? 'unpaid'
+          : effectiveCard > 0
+              ? (effectiveCash > 0 ? 'mixed' : 'card')
+              : 'cash';
 
       final invoiceId = await into(invoices).insert(InvoicesCompanion.insert(
         sessionId: Value(sessionId),
@@ -122,8 +141,8 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
         discount: Value(discount),
         total: Value(total),
         paymentMethod: Value(paymentMethod),
-        paidCash: Value(effectiveCash),
-        paidCard: Value(effectiveCard),
+        paidCash: Value(settled ? effectiveCash : 0),
+        paidCard: Value(settled ? effectiveCard : 0),
       ));
 
       // Bucket every line by where it came from — the café category for
@@ -160,12 +179,15 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
         final label = line.productId == null
             ? 'وقت اللعب'
             : categoryNameOf[line.productId] ?? 'أصناف';
-        final bucket = buckets.putIfAbsent(label, () => _LedgerBucket(label));
+        final bucket = buckets.putIfAbsent(
+          label,
+          () => _LedgerBucket(label, isGaming: line.productId == null),
+        );
         bucket.subtotal += line.total;
         bucket.items.add('${line.description} ×${line.quantity}');
       }
 
-      if (customerId != null) {
+      if (customerId != null && settled) {
         final customer = await (select(customers)
               ..where((c) => c.id.equals(customerId)))
             .getSingle();
@@ -190,19 +212,22 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
         ));
       }
 
-      // Post the sale to the ledger: gaming/session invoices hit the
-      // "sales" category, pure café invoices hit "cafe_sales".
+      // Post the sale to the ledger: one entry per bucket, and each bucket
+      // lands in the book that owns it. Gaming time goes to "sales" (the
+      // PlayStation side), every drink to "cafe_sales" (the café side), so one
+      // bill reads as an hour of play AND a café order — which is what lets
+      // الحسابات answer "how much did each side take" without anyone splitting
+      // the ticket by hand.
       //
-      // One entry per bucket, so الحسابات shows exactly what was sold and
-      // from which category ("مشروبات: مياه ×2، عصير ×1"). Each entry
-      // carries a proportional slice of the FINAL total (after discount)
-      // and the last one takes the rounding remainder, so the postings
-      // always add up to exactly the invoice total.
-      final accountCode = sessionId == null ? 'cafe_sales' : 'sales';
-      final account = await (select(accounts)
-            ..where((a) => a.code.equals(accountCode)))
-          .getSingleOrNull();
-      if (account != null && buckets.isNotEmpty) {
+      // Each entry carries a proportional slice of the FINAL total (after
+      // discount) and the last one takes the rounding remainder, so the
+      // postings always add up to exactly the invoice total.
+      //
+      // An unsettled draft posts nothing: no money has changed hands yet, and
+      // the entry that counts arrives with the bill that settles it.
+      if (settled && buckets.isNotEmpty) {
+        final gamingAccount = await _accountByCode('sales');
+        final cafeAccount = await _accountByCode('cafe_sales');
         final ordered = buckets.values.toList()
           ..sort((a, b) => b.subtotal.compareTo(a.subtotal));
         var allocated = 0.0;
@@ -214,6 +239,8 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
           // Two decimals per entry; the last entry absorbs the remainder.
           final amount = isLast ? raw : (raw * 100).roundToDouble() / 100;
           allocated += amount;
+          final account = ordered[i].isGaming ? gamingAccount : cafeAccount;
+          if (account == null) continue;
           await into(accountEntries).insert(AccountEntriesCompanion.insert(
             accountId: account.id,
             amount: amount < 0 ? 0.0 : amount,
@@ -227,6 +254,45 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
 
       return invoiceId;
     });
+  }
+
+  /// The ledger book with this [code], or null when the chart of accounts has
+  /// no such line — a missing book must not silently swallow a sale.
+  Future<AccountRow?> _accountByCode(String code) {
+    return (select(accounts)..where((a) => a.code.equals(code)))
+        .getSingleOrNull();
+  }
+
+  /// Folds a session's café drafts into the bill that settles them.
+  ///
+  /// Each order taken during a sitting was rung up on its own so the stock
+  /// moved and the drinks were recorded the moment they were asked for. Those
+  /// drafts carry no payment — the money is taken once, at checkout — so if they
+  /// were left standing they would count every drink a second time in the day's
+  /// revenue, on top of the bill that already includes them.
+  ///
+  /// Only drafts are touched: identified by `paymentMethod == 'unpaid'`, so the
+  /// settled bill that replaces them is never in scope.
+  ///
+  /// Call this AFTER the final bill is written. The other order loses nothing
+  /// worth keeping if the delete fails (a visible double count that can be
+  /// repaired by hand); this order never risks losing the record of what was
+  /// ordered.
+  Future<void> removeSessionOrders(int sessionId) async {
+    final drafts = await (select(invoices)
+          ..where((i) =>
+              i.sessionId.equals(sessionId) & i.paymentMethod.equals('unpaid')))
+        .get();
+    if (drafts.isEmpty) return;
+
+    final ids = drafts.map((d) => d.id).toList();
+    for (final id in ids) {
+      // Unsettled drafts post no ledger entry, but clearing any that exist
+      // keeps this safe to run against a database written by an older build.
+      await (delete(accountEntries)..where((e) => e.sourceId.equals(id))).go();
+      await (delete(invoiceItems)..where((l) => l.invoiceId.equals(id))).go();
+    }
+    await (delete(invoices)..where((i) => i.id.isIn(ids))).go();
   }
 
   /// Invoices created inside [from]..[to] — feeds the per-employee
@@ -282,6 +348,54 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
         .where((r) => r.readTable(invoices).sessionId == sessionId)
         .map((r) => r.readTable(invoiceItems))
         .toList());
+  }
+
+  /// The café lines of a session's unpaid drafts, ready to be copied onto the
+  /// bill that settles them.
+  ///
+  /// Read as lines rather than as money because the bill is rebuilt from them:
+  /// the drinks keep their own names and prices on the customer's one ticket,
+  /// instead of collapsing into a single "طلبات الكافيه" figure they never
+  /// wrote.
+  Future<List<InvoiceLineInput>> draftLinesForSession(int sessionId) async {
+    final drafts = await (select(invoices)
+          ..where((i) =>
+              i.sessionId.equals(sessionId) & i.paymentMethod.equals('unpaid')))
+        .get();
+    if (drafts.isEmpty) return const [];
+
+    final byId = <int, InvoiceRow>{
+      for (final d in drafts) d.id: d,
+    };
+    final query = select(invoiceItems).join([
+      innerJoin(invoices, invoices.id.equalsExp(invoiceItems.invoiceId)),
+    ])
+      ..where(invoiceItems.invoiceId.isIn(byId.keys.toList()));
+    final rows = await query.get();
+
+    // Newest draft first, then its own line order — the drinks come back in the
+    // order they were asked for rather than by id, which the caller has no way
+    // to know.
+    rows.sort((a, b) {
+      final ai = byId[a.readTable(invoices).id]!.createdAt;
+      final bi = byId[b.readTable(invoices).id]!.createdAt;
+      final byDraft = bi.compareTo(ai);
+      return byDraft != 0
+          ? byDraft
+          : a
+              .readTable(invoiceItems)
+              .id
+              .compareTo(b.readTable(invoiceItems).id);
+    });
+    return rows.map((r) {
+      final line = r.readTable(invoiceItems);
+      return InvoiceLineInput(
+        productId: line.productId,
+        description: line.description,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+      );
+    }).toList();
   }
 
   /// One-shot ranged read (non-stream) — used by the partnership ledger

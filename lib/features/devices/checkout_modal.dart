@@ -130,42 +130,35 @@ class _CheckoutModalContentState extends ConsumerState<_CheckoutModalContent> {
     final minimum = settings?.minimumRedeemPoints ??
         LoyaltyRepository.defaultMinimumRedeemPoints;
 
-    // The bill is the time plus what the machine ordered — the same two numbers
-    // the card adds up, so the two screens cannot quote different bills for the
-    // same sitting.
-    final subtotal = widget.timeCost;
-    final bill = subtotal + widget.ordersTotal;
-    // Discounts and points come off the time, not the whole bill: the orders
-    // were charged at the counter when they were ordered, so discounting them
-    // here would take money back that has already been handed over.
-    final timeAfterDiscount =
-        (subtotal - _manualDiscount).clamp(0, double.infinity).toDouble();
+    // One bill: the gaming time plus what the machine ordered, paid once, here.
+    // The same two numbers the card adds up, so no two screens can quote
+    // different bills for the same sitting.
+    final bill = widget.timeCost + widget.ordersTotal;
+    final afterDiscount =
+        (bill - _manualDiscount).clamp(0, double.infinity).toDouble();
 
     // Redemption: only with a customer, enough points, and something left
     // to cover. Points spent are capped by both the balance and the bill.
     final canRedeem = widget.customerId != null &&
         widget.customerPoints >= minimum &&
-        timeAfterDiscount > 0 &&
+        afterDiscount > 0 &&
         pointValue > 0;
     final maxRedeemablePoints = pointValue > 0
-        ? (timeAfterDiscount / pointValue)
-            .floor()
-            .clamp(0, widget.customerPoints)
+        ? (afterDiscount / pointValue).floor().clamp(0, widget.customerPoints)
         : 0;
     final redeemedPoints = _redeem ? maxRedeemablePoints : 0;
     final redeemValue = redeemedPoints * pointValue;
-    final dueNow =
-        (timeAfterDiscount - redeemValue).clamp(0, double.infinity).toDouble();
-    final total = dueNow + widget.ordersTotal;
+    final total =
+        (afterDiscount - redeemValue).clamp(0, double.infinity).toDouble();
 
     final paidCash = switch (_payMethod) {
-      _PayMethod.cash => dueNow,
+      _PayMethod.cash => total,
       _PayMethod.card => 0.0,
       _PayMethod.mixed => double.tryParse(_cash.text.trim()) ?? 0,
     };
     final paidCard = switch (_payMethod) {
       _PayMethod.cash => 0.0,
-      _PayMethod.card => dueNow,
+      _PayMethod.card => total,
       _PayMethod.mixed => double.tryParse(_card.text.trim()) ?? 0,
     };
 
@@ -191,9 +184,8 @@ class _CheckoutModalContentState extends ConsumerState<_CheckoutModalContent> {
                   style: AppTypography.secondary),
               const SizedBox(height: AppSpacing.lg),
               _row('مدة اللعب', widget.device.elapsed ?? '00:00:00'),
-              _row('تكلفة الوقت', 'EGP ${subtotal.toStringAsFixed(2)}'),
-              _row('طلبات الكافيه',
-                  'EGP ${widget.ordersTotal.toStringAsFixed(2)}'),
+              _row('اللعب', 'EGP ${widget.timeCost.toStringAsFixed(2)}'),
+              _row('الكافيه', 'EGP ${widget.ordersTotal.toStringAsFixed(2)}'),
               _discountRow(),
               if (redeemedPoints > 0)
                 _row('نقاط الولاء', '− EGP ${redeemValue.toStringAsFixed(2)}'),
@@ -211,18 +203,6 @@ class _CheckoutModalContentState extends ConsumerState<_CheckoutModalContent> {
                       style: AppTypography.numberLarge),
                 ],
               ),
-              // What the cashier takes now, and why it is not the total. The
-              // orders were charged when they were ordered; charging them a
-              // second time here is the mistake this screen was quietly set up
-              // to make.
-              if (widget.ordersTotal > 0) ...[
-                const SizedBox(height: 6),
-                _row('الطلبات اتحصلت قبل كدا',
-                    'EGP ${widget.ordersTotal.toStringAsFixed(2)}',
-                    tone: AppColors.textTertiary),
-                _row('المستحق دلوقتي', 'EGP ${dueNow.toStringAsFixed(2)}',
-                    strong: true, tone: AppColors.statusActive),
-              ],
               const SizedBox(height: AppSpacing.lg),
               if (widget.customerId != null)
                 _loyaltyRow(canRedeem, widget.customerPoints, minimum),
@@ -239,7 +219,7 @@ class _CheckoutModalContentState extends ConsumerState<_CheckoutModalContent> {
                     Expanded(child: _amountField(_card, 'كارت')),
                   ],
                 ),
-                if (paidCash + paidCard + 0.001 < dueNow)
+                if (paidCash + paidCard + 0.001 < total)
                   const Padding(
                     padding: EdgeInsets.only(top: 6),
                     child: Text('المبلغ المدفوع أقل من الإجمالي',
@@ -270,7 +250,7 @@ class _CheckoutModalContentState extends ConsumerState<_CheckoutModalContent> {
                       icon: Icons.check_circle_rounded,
                       expand: true,
                       onPressed: () => _confirm(
-                          dueNow,
+                          total,
                           _manualDiscount + redeemValue,
                           redeemedPoints,
                           paidCash,
@@ -286,13 +266,9 @@ class _CheckoutModalContentState extends ConsumerState<_CheckoutModalContent> {
     );
   }
 
-  /// [due] is what the cashier has to hand over now, not the bill: the orders
-  /// were charged when they were ordered, so checking the tender against the
-  /// bill would either reject a correct payment or accept one short by the
-  /// price of every drink the customer had.
-  Future<void> _confirm(double due, double discount, int redeemedPoints,
+  Future<void> _confirm(double total, double discount, int redeemedPoints,
       double paidCash, double paidCard) async {
-    if (paidCash + paidCard + 0.001 < due) {
+    if (paidCash + paidCard + 0.001 < total) {
       setState(() => _error = 'المبلغ المدفوع أقل من الإجمالي المطلوب');
       return;
     }

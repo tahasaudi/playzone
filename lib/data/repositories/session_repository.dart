@@ -86,8 +86,8 @@ class SessionRepository {
   /// a real invoice for it (spec §30) — this is what the Checkout modal
   /// calls on "إتمام التحصيل". [paidCash]/[paidCard] carry the tender
   /// split (mixed payment), [redeemedPoints] spends the customer's
-  /// loyalty points against the bill. The gaming-time line is separate
-  /// from any café items (those are POS's own invoices for now).
+  /// loyalty points against the bill. The café orders taken during the
+  /// sitting go on the same bill, each as its own named line.
   ///
   /// [collectedTimeCost] is the exact time cost the cashier confirmed in
   /// the modal (frozen at open). It is used verbatim for the final bill
@@ -107,13 +107,15 @@ class SessionRepository {
     // ordered. Stored on the session rather than left for each screen to add
     // up on its own — the Sessions list read the time alone, so a table that
     // ordered drinks and played for an hour read as an hour with nothing on it.
-    //
-    // The invoice still bills the time only. The orders were charged at the
-    // counter when they were ordered and already carry their own invoice, their
-    // own stock movement and their own ledger entry; billing them here as well
-    // would count every drink twice in the day's revenue.
     final timePart =
         entry.session.fixedPrice ?? (collectedTimeCost ?? entry.liveCost);
+
+    // The drinks as they were rung up, so the customer's one ticket lists them
+    // by name and price rather than as a bare "طلبات الكافيه" total. Read
+    // BEFORE the bill is written, and taken from the order drafts themselves so
+    // the bill can never disagree with what was actually ordered.
+    final orderLines = await invoiceDao.draftLinesForSession(entry.session.id);
+
     await _db.sessionDao
         .complete(entry, overrideFinalCost: timePart + ordersTotal);
     await invoiceDao.createInvoice(
@@ -130,8 +132,15 @@ class SessionRepository {
           quantity: 1,
           unitPrice: timePart,
         ),
+        for (final line in orderLines) line,
       ],
     );
+
+    // Only now, with the money recorded on the real bill, are the drafts
+    // cleared. Left standing they would count every drink a second time in the
+    // day's revenue — once as the order, and once inside the bill that already
+    // includes it.
+    await invoiceDao.removeSessionOrders(entry.session.id);
   }
 }
 

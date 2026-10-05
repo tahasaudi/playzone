@@ -62,8 +62,15 @@ class AppShell extends ConsumerStatefulWidget {
   ConsumerState<AppShell> createState() => _AppShellState();
 }
 
+/// Which screen the shell is showing.
+///
+/// Shared rather than private widget state because a button on the board has to
+/// be able to send the cashier somewhere: the search dialog exists to jump to
+/// another screen, and while the route lived in the shell's own field the only
+/// thing that could change it was the shell itself.
+final activeRouteProvider = StateProvider<String>((ref) => 'dashboard');
+
 class _AppShellState extends ConsumerState<AppShell> {
-  String _activeRoute = 'dashboard';
   final FocusNode _shortcutsFocusNode = FocusNode();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
@@ -182,7 +189,7 @@ class _AppShellState extends ConsumerState<AppShell> {
         (HardwareKeyboard.instance.isControlPressed ||
             HardwareKeyboard.instance.isMetaPressed)) {
       showGlobalSearchDialog(context, (route) {
-        if (mounted) setState(() => _activeRoute = route);
+        ref.read(activeRouteProvider.notifier).state = route;
       });
       return KeyEventResult.handled;
     }
@@ -206,17 +213,17 @@ class _AppShellState extends ConsumerState<AppShell> {
     }
 
     if (event.logicalKey == LogicalKeyboardKey.f1) {
-      setState(() => _activeRoute = 'dashboard');
+      ref.read(activeRouteProvider.notifier).state = 'dashboard';
       return KeyEventResult.handled;
     }
     if (event.logicalKey == LogicalKeyboardKey.f2) {
-      setState(() => _activeRoute = 'pos');
+      ref.read(activeRouteProvider.notifier).state = 'pos';
       return KeyEventResult.handled;
     }
     if (event.logicalKey == LogicalKeyboardKey.f3) {
       final role = ref.read(effectiveRoleProvider);
       if (routeAllowed('settings', role))
-        setState(() => _activeRoute = 'settings');
+        ref.read(activeRouteProvider.notifier).state = 'settings';
       return KeyEventResult.handled;
     }
 
@@ -230,6 +237,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     // them back to the dashboard instead of leaving them on a page they
     // can't use.
     final role = ref.watch(effectiveRoleProvider);
+    final activeRoute = ref.watch(activeRouteProvider);
 
     // TV wiring: each wall screen follows one machine. Starting a session
     // hands that screen back to HDMI (the console); collecting it paints
@@ -262,7 +270,7 @@ class _AppShellState extends ConsumerState<AppShell> {
         s.device.id,
     };
     TvDisplayService.featureEnabled =
-          tvConfig.enabled && TvDisplayService.tvAllowed;
+        tvConfig.enabled && TvDisplayService.tvAllowed;
     TvDisplayService.screenIdentities = [
       for (final slot in tvConfig.identities)
         TvScreenIdentity(
@@ -283,7 +291,7 @@ class _AppShellState extends ConsumerState<AppShell> {
         ),
     ];
 
-if (TvDisplayService.tvAllowed &&
+    if (TvDisplayService.tvAllowed &&
         tvConfig.enabled &&
         tvConfig.addresses.isNotEmpty) {
       final tv = TvDisplayService.instance;
@@ -321,9 +329,9 @@ if (TvDisplayService.tvAllowed &&
         }));
       }
     }
-    if (!routeAllowed(_activeRoute, role) && _activeRoute != 'dashboard') {
+    if (!routeAllowed(activeRoute, role) && activeRoute != 'dashboard') {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() => _activeRoute = 'dashboard');
+        ref.read(activeRouteProvider.notifier).state = 'dashboard';
       });
     }
 
@@ -334,8 +342,9 @@ if (TvDisplayService.tvAllowed &&
       child: Scaffold(
         key: _scaffoldKey,
         drawer: AppNavDrawer(
-          activeRoute: _activeRoute,
-          onSelect: (route) => setState(() => _activeRoute = route),
+          activeRoute: activeRoute,
+          onSelect: (route) =>
+              ref.read(activeRouteProvider.notifier).state = route,
         ),
         body: Container(
           decoration: const BoxDecoration(gradient: AppColors.appBackground),
@@ -367,11 +376,11 @@ if (TvDisplayService.tvAllowed &&
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     AppTopBar(
-                      title: _titleFor(_activeRoute),
-                      subtitle: _subtitleFor(_activeRoute),
+                      title: _titleFor(activeRoute),
+                      subtitle: _subtitleFor(activeRoute),
                       onMenuTap: _openDrawer,
                       onNavigate: (route) =>
-                          setState(() => _activeRoute = route),
+                          ref.read(activeRouteProvider.notifier).state = route,
                     ),
                     const SizedBox(height: AppSpacing.md),
                     Expanded(child: _buildContent()),
@@ -389,14 +398,15 @@ if (TvDisplayService.tvAllowed &&
   }
 
   Widget _buildContent() {
-    switch (_activeRoute) {
+    switch (ref.watch(activeRouteProvider)) {
       case 'dashboard':
         return const DashboardScreen();
       case 'pos':
         return const PosScreen();
       case 'settings':
         return PricingSettingsScreen(
-          onNavigate: (route) => setState(() => _activeRoute = route),
+          onNavigate: (route) =>
+              ref.read(activeRouteProvider.notifier).state = route,
         );
       case 'tv':
         return const TvModeScreen();
@@ -405,7 +415,7 @@ if (TvDisplayService.tvAllowed &&
       case 'tv_full':
         return TvModeScreen(
           fullscreen: true,
-          onExit: () => setState(() => _activeRoute = 'tv'),
+          onExit: () => ref.read(activeRouteProvider.notifier).state = 'tv',
         );
       case 'inventory':
         return const InventoryScreen();
@@ -454,7 +464,7 @@ if (TvDisplayService.tvAllowed &&
       default:
         return Center(
           child: Text(
-            'شاشة "$_activeRoute" — قيد الإنشاء في المرحلة الجاية',
+            'شاشة "${ref.read(activeRouteProvider)}" — قيد الإنشاء في المرحلة الجاية',
             style: const TextStyle(color: AppColors.textSecondary),
           ),
         );

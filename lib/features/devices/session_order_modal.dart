@@ -64,8 +64,7 @@ class _SessionOrderModalContentState
   String? _error;
   bool _saving = false;
 
-  double get _total =>
-      _lines.values.fold<double>(0, (sum, l) => sum + l.total);
+  double get _total => _lines.values.fold<double>(0, (sum, l) => sum + l.total);
 
   void _add(ProductWithCategory product) {
     final existing = _lines[product.product.id];
@@ -84,9 +83,11 @@ class _SessionOrderModalContentState
       _error = null;
     });
     try {
-      await ref
-          .read(invoiceRepositoryProvider)
-          .createInvoice(
+      // Written with no payment against it. The order is rung up now and
+      // settled once, with the rest of the bill, at checkout — a customer who
+      // ordered three waters is not charged for them twice because the
+      // cashier took the money at the counter and then again at the table.
+      await ref.read(invoiceRepositoryProvider).createInvoice(
             sessionId: widget.sessionId,
             customerId: widget.customerId,
             employeeId: widget.employeeId,
@@ -99,8 +100,7 @@ class _SessionOrderModalContentState
                   unitPrice: line.product.product.sellingPrice,
                 ),
             ],
-            paidCash: _card ? 0 : _total,
-            paidCard: _card ? _total : 0,
+            settled: false,
           );
       if (mounted) {
         Navigator.of(context).pop();
@@ -133,7 +133,8 @@ class _SessionOrderModalContentState
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('طلب من الكافيه للجلسة', style: AppTypography.sectionTitle),
+            const Text('طلب من الكافيه للجلسة',
+                style: AppTypography.sectionTitle),
             if (widget.deviceTitle.isNotEmpty) ...[
               const SizedBox(height: 2),
               Text(widget.deviceTitle, style: AppTypography.secondary),
@@ -147,7 +148,8 @@ class _SessionOrderModalContentState
                         style: const TextStyle(color: AppColors.danger))),
                 data: (products) {
                   final available = products
-                      .where((p) => p.product.active && p.product.stockQuantity > 0)
+                      .where((p) =>
+                          p.product.active && p.product.stockQuantity > 0)
                       .toList();
                   if (available.isEmpty) {
                     return const Center(
@@ -210,7 +212,8 @@ class _SessionOrderModalContentState
                                     style: const TextStyle(
                                         fontSize: 13,
                                         color: AppColors.textPrimary))),
-                            Text('${line.quantity} × EGP '
+                            Text(
+                                '${line.quantity} × EGP '
                                 '${line.product.product.sellingPrice.toStringAsFixed(0)}',
                                 style: const TextStyle(
                                     fontSize: 12,

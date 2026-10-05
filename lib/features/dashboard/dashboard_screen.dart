@@ -26,6 +26,8 @@ import '../devices/device_card.dart';
 import '../devices/session_details_panel.dart';
 import '../devices/checkout_modal.dart';
 import '../devices/session_order_modal.dart';
+import '../search/global_search_dialog.dart';
+import '../shell/app_shell.dart';
 
 /// Dashboard screen. Devices AND their live sessions come from the real
 /// database; the timer/cost update every second, billed per second, and
@@ -201,7 +203,49 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             onSwitchMode: () => _switchMode(_selectedEntry!),
             onOrder: () => _openOrderModal(_selectedEntry!),
           ),
+        Positioned(
+          left: AppSpacing.md,
+          bottom: AppSpacing.md,
+          child: _searchButton(),
+        ),
       ],
+    );
+  }
+
+  /// Bottom-left lens that opens the one search box for the whole app —
+  /// customers, machines, products, invoices, employees, bookings.
+  ///
+  /// It sits on the board rather than in the drawer because the question it
+  /// answers ("which table is that?") comes up while you are looking at the
+  /// table, not while you are looking at a menu. Same box as Ctrl+K, so
+  /// there is one search to learn instead of two.
+  Widget _searchButton() {
+    return Tooltip(
+      message: 'بحث في الكل (Ctrl+K)',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: () {
+            showGlobalSearchDialog(
+              context,
+              (route) => ref.read(activeRouteProvider.notifier).state = route,
+            );
+          },
+          child: Ink(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: AppColors.glassFillStrong.withOpacity(0.9),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: AppColors.glassBorderPurple),
+              boxShadow: AppShadows.card,
+            ),
+            child: const Icon(Icons.search_rounded,
+                size: 22, color: AppColors.textPrimary),
+          ),
+        ),
+      ),
     );
   }
 

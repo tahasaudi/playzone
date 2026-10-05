@@ -50,6 +50,7 @@ class InvoiceRepository {
     int redeemedPoints = 0,
     double paidCash = 0,
     double paidCard = 0,
+    bool settled = true,
   }) {
     return _db.invoiceDao.createInvoice(
       lines: lines,
@@ -60,6 +61,7 @@ class InvoiceRepository {
       redeemedPoints: redeemedPoints,
       paidCash: paidCash,
       paidCard: paidCard,
+      settled: settled,
     );
   }
 }
