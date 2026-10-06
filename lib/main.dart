@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:window_manager/window_manager.dart';
 import 'core/theme/app_theme.dart';
 import 'core/tv/tv_display_service.dart';
 import 'features/shell/app_shell.dart';
 
-void main() {
+void main() async {
   // Runs before the first frame, so the screens are never shown mid-release.
   WidgetsFlutterBinding.ensureInitialized();
+  // Opens the window channel the app uses for F11 full-screen toggling
+  // (the shortcut itself lives in AppShell).
+  await windowManager.ensureInitialized();
   runApp(const ProviderScope(child: PlayZoneApp()));
 }
 
@@ -18,8 +22,7 @@ class PlayZoneApp extends StatefulWidget {
   State<PlayZoneApp> createState() => _PlayZoneAppState();
 }
 
-class _PlayZoneAppState extends State<PlayZoneApp>
-    with WidgetsBindingObserver {
+class _PlayZoneAppState extends State<PlayZoneApp> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();

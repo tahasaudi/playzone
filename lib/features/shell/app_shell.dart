@@ -36,6 +36,7 @@ import '../search/global_search_dialog.dart';
 import '../tv/tv_broadcaster.dart';
 import '../tv/tv_mode_screen.dart';
 import '../tv/tv_screens_page.dart';
+import 'package:window_manager/window_manager.dart';
 import '../../core/database/daos/device_dao.dart';
 import '../../core/database/daos/session_dao.dart';
 
@@ -87,6 +88,45 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   /// Screens already handed back this launch, so a screen is not told twice.
   final Set<String> _wallsReleased = {};
+
+  /// The windowed state to give back when F11 toggles out of full screen.
+  Rect? _windowedBounds;
+  bool _windowedMaximized = false;
+
+  /// F11 flips between true full screen (no title bar, over the taskbar)
+  /// and the windowed layout the cashier left. Under the hood it is the
+  /// window_manager channel: setFullScreen removes the window frame, and
+  /// always-on-top guarantees the taskbar cannot sit on top of the app.
+  ///
+  /// Burned in as a shortcut rather than a settings toggle because the
+  /// owner toggles it dozens of times a day (hand the PC back to Windows,
+  /// take it again), and a menu affordance is two clicks too many.
+  Future<void> _toggleFullScreen() async {
+    try {
+      if (await windowManager.isFullScreen()) {
+        await windowManager.setFullScreen(false);
+        await windowManager.setAlwaysOnTop(false);
+        final saved = _windowedBounds;
+        if (saved != null) {
+          if (_windowedMaximized) {
+            await windowManager.maximize();
+          } else {
+            await windowManager.setBounds(saved);
+          }
+        }
+      } else {
+        _windowedBounds = await windowManager.getBounds();
+        _windowedMaximized = await windowManager.isMaximized();
+        await windowManager.setFullScreen(true);
+        // Above the taskbar, not just flush with it: a window sized to the
+        // whole screen can still have the taskbar drawn over its bottom
+        // edge, so full screen also means always-on-top.
+        await windowManager.setAlwaysOnTop(true);
+      }
+    } catch (_) {
+      // Window channel not ready (tests / odd startup) — F11 is a no-op.
+    }
+  }
 
   /// Hands any wall back to the console on startup, so a crash cannot leave a
   /// black screen behind with nobody able to clear it.
@@ -224,6 +264,12 @@ class _AppShellState extends ConsumerState<AppShell> {
       final role = ref.read(effectiveRoleProvider);
       if (routeAllowed('settings', role))
         ref.read(activeRouteProvider.notifier).state = 'settings';
+      return KeyEventResult.handled;
+    }
+
+    // F11 — true full screen (over the title bar and the taskbar) and back.
+    if (event.logicalKey == LogicalKeyboardKey.f11) {
+      _toggleFullScreen();
       return KeyEventResult.handled;
     }
 
