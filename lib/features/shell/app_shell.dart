@@ -408,15 +408,8 @@ class _AppShellState extends ConsumerState<AppShell> {
           onNavigate: (route) =>
               ref.read(activeRouteProvider.notifier).state = route,
         );
-      case 'tv':
-        return const TvModeScreen();
       case 'screens':
         return const TvScreensPage();
-      case 'tv_full':
-        return TvModeScreen(
-          fullscreen: true,
-          onExit: () => ref.read(activeRouteProvider.notifier).state = 'tv',
-        );
       case 'inventory':
         return const InventoryScreen();
       case 'reports':

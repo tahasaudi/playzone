@@ -56,13 +56,6 @@ class AppTopBar extends ConsumerWidget {
             tooltip: 'الكاشير (F2)',
             onTap: () => onNavigate?.call('pos'),
           ),
-          const SizedBox(width: AppSpacing.sm),
-          // The wall screen that gets pushed/cast to the LG TV.
-          _TopIconButton(
-            icon: Icons.tv_rounded,
-            tooltip: 'شاشة التلفزيون',
-            onTap: () => onNavigate?.call('tv'),
-          ),
           const SizedBox(width: AppSpacing.md),
 
           // Settings shortcut — goes straight to the pricing/system page.
