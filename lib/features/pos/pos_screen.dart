@@ -139,8 +139,9 @@ class _PosScreenState extends ConsumerState<PosScreen> {
 
     return productsAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) =>
-          Center(child: Text('خطأ في تحميل المنتجات: $e', style: const TextStyle(color: AppColors.danger))),
+      error: (e, _) => Center(
+          child: Text('خطأ في تحميل المنتجات: $e',
+              style: const TextStyle(color: AppColors.danger))),
       data: (allProducts) {
         final byCategory = <String, List<ProductWithCategory>>{};
         for (final p in allProducts) {
@@ -160,23 +161,16 @@ class _PosScreenState extends ConsumerState<PosScreen> {
           byCategory.removeWhere((_, list) => list.isEmpty);
         }
         final categories = byCategory.keys.toList();
-        if (categories.isEmpty) {
-          return Center(
-            child: Text(
-              query.isEmpty
-                  ? 'لا توجد منتجات بعد'
-                  : 'مفيش منتج بالاسم ده',
-              style: const TextStyle(color: AppColors.textTertiary),
-            ),
-          );
-        }
         // If the active category lost its last product (deleted from the
-        // catalogue) fall back to the first available one.
-        if (_activeCategory == null || !byCategory.containsKey(_activeCategory)) {
-          _activeCategory = categories.first;
+        // catalogue, or filtered away by the search) fall back to the first
+        // one that still has matches.
+        if (_activeCategory == null ||
+            !byCategory.containsKey(_activeCategory)) {
+          _activeCategory = categories.isEmpty ? null : categories.first;
         }
-        final products = byCategory[_activeCategory] ?? [];
-        final subtotal = _cart.fold<double>(0, (sum, l) => sum + _lineTotal(l, allProducts));
+        final products = byCategory[_activeCategory] ?? const [];
+        final subtotal =
+            _cart.fold<double>(0, (sum, l) => sum + _lineTotal(l, allProducts));
 
         return Column(
           children: [
@@ -184,149 +178,179 @@ class _PosScreenState extends ConsumerState<PosScreen> {
             const SizedBox(height: AppSpacing.sm),
             Expanded(
               child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Categories
-            SizedBox(
-              width: 130,
-              child: GlassCard(
-                padding: const EdgeInsets.all(AppSpacing.xs),
-                child: SingleChildScrollView(
-                  child: Column(
-                    children: categories.map((c) {
-                      final active = c == _activeCategory;
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: GestureDetector(
-                          onTap: () => setState(() => _activeCategory = c),
-                          child: Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 9),
-                            decoration: BoxDecoration(
-                              color: active
-                                  ? AppColors.accentPrimary.withOpacity(0.18)
-                                  : Colors.transparent,
-                              borderRadius: AppRadius.smallR,
-                              border: active
-                                  ? Border.all(color: AppColors.glassBorderPurple)
-                                  : null,
-                            ),
-                            child: Text(c,
-                                textAlign: TextAlign.center,
-                                overflow: TextOverflow.ellipsis,
-                                maxLines: 1,
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    color: active
-                                        ? AppColors.textPrimary
-                                        : AppColors.textSecondary,
-                                    fontWeight:
-                                        active ? FontWeight.w600 : FontWeight.w400)),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Categories — hidden while the search matches nothing; the
+                  // grid below shows the reason instead of an empty column.
+                  if (categories.isNotEmpty) ...[
+                    // Categories
+                    SizedBox(
+                      width: 130,
+                      child: GlassCard(
+                        padding: const EdgeInsets.all(AppSpacing.xs),
+                        child: SingleChildScrollView(
+                          child: Column(
+                            children: categories.map((c) {
+                              final active = c == _activeCategory;
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 4),
+                                child: GestureDetector(
+                                  onTap: () =>
+                                      setState(() => _activeCategory = c),
+                                  child: Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 6, vertical: 9),
+                                    decoration: BoxDecoration(
+                                      color: active
+                                          ? AppColors.accentPrimary
+                                              .withOpacity(0.18)
+                                          : Colors.transparent,
+                                      borderRadius: AppRadius.smallR,
+                                      border: active
+                                          ? Border.all(
+                                              color:
+                                                  AppColors.glassBorderPurple)
+                                          : null,
+                                    ),
+                                    child: Text(c,
+                                        textAlign: TextAlign.center,
+                                        overflow: TextOverflow.ellipsis,
+                                        maxLines: 1,
+                                        style: TextStyle(
+                                            fontSize: 12,
+                                            color: active
+                                                ? AppColors.textPrimary
+                                                : AppColors.textSecondary,
+                                            fontWeight: active
+                                                ? FontWeight.w600
+                                                : FontWeight.w400)),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
                           ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: AppSpacing.sm),
-
-            // Product grid
-            Expanded(
-              flex: 3,
-              child: GridView.count(
-                crossAxisCount: 4,
-                mainAxisSpacing: AppSpacing.sm,
-                crossAxisSpacing: AppSpacing.sm,
-                childAspectRatio: 1.15,
-                children: products.map((p) => _productCard(p)).toList(),
-              ),
-            ),
-            const SizedBox(width: AppSpacing.sm),
-
-            // Cart — deliberately narrow: it only needs a name, a stepper
-            // and a price, so the product grid keeps most of the screen.
-            SizedBox(
-              width: 230,
-              child: GlassCard(
-                padding: const EdgeInsets.all(AppSpacing.sm),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('الطلب', style: AppTypography.cardTitle),
-                    const SizedBox(height: AppSpacing.xs),
-                    Expanded(
-                      child: _cart.isEmpty
-                          ? const Center(
-                              child: Text('السلة فاضية',
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      color: AppColors.textTertiary)),
-                            )
-                          : SingleChildScrollView(
-                              child: Column(
-                                children: _cart
-                                    .map((l) => _cartLineWidget(l, allProducts))
-                                    .toList(),
-                              ),
-                            ),
-                    ),
-                    const Divider(color: AppColors.glassBorder, height: AppSpacing.md),
-                    GestureDetector(
-                      onTap: _pickCustomer,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: AppColors.glassFill,
-                          borderRadius: AppRadius.smallR,
-                          border: Border.all(color: AppColors.glassBorder),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.person_rounded,
-                                size: 14, color: AppColors.accentSecondary),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                _customer == null
-                                    ? 'ربط بعميل'
-                                    : '${_customer!.name} · ${_customer!.loyaltyPoints}',
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: _customer == null
-                                        ? AppColors.textTertiary
-                                        : AppColors.textPrimary),
-                              ),
-                            ),
-                            if (_customer != null)
-                              GestureDetector(
-                                onTap: () => setState(() => _customer = null),
-                                child: const Icon(Icons.close_rounded,
-                                    size: 12, color: AppColors.textTertiary),
-                              ),
-                          ],
                         ),
                       ),
                     ),
-                    const SizedBox(height: AppSpacing.sm),
-                    _totalRow('الإجمالي', subtotal, emphasize: true),
-                    const SizedBox(height: AppSpacing.sm),
-                    PrimaryButton(
-                      label: 'الدفع',
-                      icon: Icons.payment_rounded,
-                      expand: true,
-                      onPressed:
-                          _cart.isEmpty ? null : () => _checkout(allProducts),
+                    const SizedBox(width: AppSpacing.sm),
+                  ], // end categories.isNotEmpty
+
+                  // Product grid — the "no match" message lives HERE so the search
+                  // bar above and the cart beside it both stay on screen.
+                  Expanded(
+                    flex: 3,
+                    child: products.isEmpty
+                        ? Center(
+                            child: Text(
+                              query.isEmpty
+                                  ? 'لا توجد منتجات بعد'
+                                  : 'مفيش منتج بالاسم ده',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  color: AppColors.textTertiary),
+                            ),
+                          )
+                        : GridView.count(
+                            crossAxisCount: 4,
+                            mainAxisSpacing: AppSpacing.sm,
+                            crossAxisSpacing: AppSpacing.sm,
+                            childAspectRatio: 1.15,
+                            children:
+                                products.map((p) => _productCard(p)).toList(),
+                          ),
+                  ),
+                  const SizedBox(width: AppSpacing.sm),
+
+                  // Cart — deliberately narrow: it only needs a name, a stepper
+                  // and a price, so the product grid keeps most of the screen.
+                  SizedBox(
+                    width: 230,
+                    child: GlassCard(
+                      padding: const EdgeInsets.all(AppSpacing.sm),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('الطلب', style: AppTypography.cardTitle),
+                          const SizedBox(height: AppSpacing.xs),
+                          Expanded(
+                            child: _cart.isEmpty
+                                ? const Center(
+                                    child: Text('السلة فاضية',
+                                        style: TextStyle(
+                                            fontSize: 12,
+                                            color: AppColors.textTertiary)),
+                                  )
+                                : SingleChildScrollView(
+                                    child: Column(
+                                      children: _cart
+                                          .map((l) =>
+                                              _cartLineWidget(l, allProducts))
+                                          .toList(),
+                                    ),
+                                  ),
+                          ),
+                          const Divider(
+                              color: AppColors.glassBorder,
+                              height: AppSpacing.md),
+                          GestureDetector(
+                            onTap: _pickCustomer,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: AppColors.glassFill,
+                                borderRadius: AppRadius.smallR,
+                                border:
+                                    Border.all(color: AppColors.glassBorder),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.person_rounded,
+                                      size: 14,
+                                      color: AppColors.accentSecondary),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      _customer == null
+                                          ? 'ربط بعميل'
+                                          : '${_customer!.name} · ${_customer!.loyaltyPoints}',
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          color: _customer == null
+                                              ? AppColors.textTertiary
+                                              : AppColors.textPrimary),
+                                    ),
+                                  ),
+                                  if (_customer != null)
+                                    GestureDetector(
+                                      onTap: () =>
+                                          setState(() => _customer = null),
+                                      child: const Icon(Icons.close_rounded,
+                                          size: 12,
+                                          color: AppColors.textTertiary),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: AppSpacing.sm),
+                          _totalRow('الإجمالي', subtotal, emphasize: true),
+                          const SizedBox(height: AppSpacing.sm),
+                          PrimaryButton(
+                            label: 'الدفع',
+                            icon: Icons.payment_rounded,
+                            expand: true,
+                            onPressed: _cart.isEmpty
+                                ? null
+                                : () => _checkout(allProducts),
+                          ),
+                        ],
+                      ),
                     ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+                  ),
+                ],
               ),
             ),
           ],
@@ -345,7 +369,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
         style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
         decoration: InputDecoration(
           hintText: 'دوّر على منتج بالاسم…',
-          hintStyle: const TextStyle(color: AppColors.textTertiary, fontSize: 13),
+          hintStyle:
+              const TextStyle(color: AppColors.textTertiary, fontSize: 13),
           prefixIcon: const Icon(Icons.search_rounded,
               size: 18, color: AppColors.textSecondary),
           suffixIcon: _search.isEmpty
@@ -395,13 +420,15 @@ class _PosScreenState extends ConsumerState<PosScreen> {
             Text(p.product.name, style: AppTypography.cardTitle),
             const SizedBox(height: 4),
             Text('EGP ${p.product.sellingPrice.toStringAsFixed(0)}',
-                style: const TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 13)),
             const SizedBox(height: 2),
             Text(
               outOfStock ? 'غير متاح' : 'متوفر: ${p.product.stockQuantity}',
               style: TextStyle(
                   fontSize: 11,
-                  color: outOfStock ? AppColors.danger : AppColors.textTertiary),
+                  color:
+                      outOfStock ? AppColors.danger : AppColors.textTertiary),
             ),
           ],
         ),
@@ -482,7 +509,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       child: Container(
         width: 24,
         height: 24,
-        decoration: BoxDecoration(color: AppColors.glassFill, borderRadius: AppRadius.smallR),
+        decoration: BoxDecoration(
+            color: AppColors.glassFill, borderRadius: AppRadius.smallR),
         child: Icon(icon, size: 14, color: AppColors.textSecondary),
       ),
     );
@@ -496,7 +524,9 @@ class _PosScreenState extends ConsumerState<PosScreen> {
             style: TextStyle(
                 fontSize: emphasize ? 15 : 13,
                 fontWeight: emphasize ? FontWeight.w700 : FontWeight.w400,
-                color: emphasize ? AppColors.textPrimary : AppColors.textSecondary)),
+                color: emphasize
+                    ? AppColors.textPrimary
+                    : AppColors.textSecondary)),
         Text('EGP ${value.toStringAsFixed(0)}',
             style: TextStyle(
                 fontSize: emphasize ? 20 : 14,
@@ -521,8 +551,7 @@ class _CustomerPickerDialog extends ConsumerStatefulWidget {
       _CustomerPickerDialogState();
 }
 
-class _CustomerPickerDialogState
-    extends ConsumerState<_CustomerPickerDialog> {
+class _CustomerPickerDialogState extends ConsumerState<_CustomerPickerDialog> {
   final TextEditingController _query = TextEditingController();
 
   @override
@@ -556,7 +585,8 @@ class _CustomerPickerDialogState
               controller: _query,
               autofocus: true,
               onChanged: (_) => setState(() {}),
-              style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
+              style:
+                  const TextStyle(color: AppColors.textPrimary, fontSize: 13),
               decoration: InputDecoration(
                 hintText: 'ابحث بالاسم أو الموبايل',
                 hintStyle: const TextStyle(
@@ -578,17 +608,17 @@ class _CustomerPickerDialogState
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: AppRadius.smallR,
-                  borderSide: const BorderSide(color: AppColors.glassBorderPurple),
+                  borderSide:
+                      const BorderSide(color: AppColors.glassBorderPurple),
                 ),
               ),
             ),
             const SizedBox(height: AppSpacing.md),
             Flexible(
               child: customersAsync.when(
-                loading: () =>
-                    const Center(child: CircularProgressIndicator()),
-                error: (e, _) => Text('$e',
-                    style: const TextStyle(color: AppColors.danger)),
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (e, _) =>
+                    Text('$e', style: const TextStyle(color: AppColors.danger)),
                 data: (customers) {
                   final q = _query.text.trim().toLowerCase();
                   final filtered = q.isEmpty
