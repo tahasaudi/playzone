@@ -49,7 +49,8 @@ class DeviceRepository {
   }
 
   Future<void> setTypeDefaultRate(int typeId, double rate) async {
-    _permissions.require(_permissions.canChangePrice, 'تغيير السعر الافتراضي للنوع');
+    _permissions.require(
+        _permissions.canChangePrice, 'تغيير السعر الافتراضي للنوع');
     await _db.deviceDao.setTypeDefaultRate(typeId, rate);
     await _auditLog.log(
       action: 'price_changed',
@@ -61,7 +62,8 @@ class DeviceRepository {
 
   /// Per-device custom "مالتي" (multi-player) rate — same guards/logging.
   Future<void> setDeviceRateMulti(int deviceId, double? rate) async {
-    _permissions.require(_permissions.canChangePrice, 'تغيير سعر الجهاز (مالتي)');
+    _permissions.require(
+        _permissions.canChangePrice, 'تغيير سعر الجهاز (مالتي)');
     await _db.deviceDao.setCustomRateMulti(deviceId, rate);
     await _auditLog.log(
       action: 'price_changed',
@@ -73,7 +75,8 @@ class DeviceRepository {
 
   /// Default "مالتي" rate for a device TYPE — same guards/logging.
   Future<void> setTypeDefaultRateMulti(int typeId, double rate) async {
-    _permissions.require(_permissions.canChangePrice, 'تغيير السعر الافتراضي (مالتي)');
+    _permissions.require(
+        _permissions.canChangePrice, 'تغيير السعر الافتراضي (مالتي)');
     await _db.deviceDao.setTypeDefaultRateMulti(typeId, rate);
     await _auditLog.log(
       action: 'price_changed',
@@ -115,9 +118,34 @@ class DeviceRepository {
     );
   }
 
+  /// Only a type nothing points at can go — machines would vanish from the
+  /// roster join and packages would lose the scope they quote otherwise.
+  /// Same empty-slot rule as category deletion, same friendly Arabic error.
+  Future<void> deleteType(DeviceTypeRow type) async {
+    _permissions.require(_permissions.canChangePrice, 'حذف نوع جهاز');
+    final devices = await _db.deviceDao.countDevicesInType(type.id);
+    final packages = await _db.deviceDao.countPackagesInType(type.id);
+    if (devices > 0 || packages > 0) {
+      final blockers = <String>[
+        if (devices > 0) '$devices أجهزة',
+        if (packages > 0) '$packages باقات',
+      ];
+      throw ProductValidationException(
+          'مينفعش تحذف النوع لوجود ${blockers.join(' و')} عليه — حوّلهم أو احذفهم الأول');
+    }
+    await _db.deviceDao.deleteType(type.id);
+    await _auditLog.log(
+      action: 'device_type_deleted',
+      entityType: 'device_type',
+      entityId: type.id,
+      oldValue: type.name,
+    );
+  }
+
   /// Re-classifies a device to another type. Returns false when a session
   /// is running on it — the caller shows the reason.
-  Future<bool> setDeviceType(int deviceId, int deviceTypeId, String typeName) async {
+  Future<bool> setDeviceType(
+      int deviceId, int deviceTypeId, String typeName) async {
     _permissions.require(_permissions.canChangePrice, 'تغيير نوع الجهاز');
     final ok = await _db.deviceDao.setDeviceType(deviceId, deviceTypeId);
     if (ok) {

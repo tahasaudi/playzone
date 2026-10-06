@@ -2,10 +2,11 @@ import 'package:drift/drift.dart';
 import '../app_database.dart';
 import '../tables/devices_table.dart';
 import '../tables/device_types_table.dart';
+import '../tables/packages_table.dart';
 
 part 'device_dao.g.dart';
 
-@DriftAccessor(tables: [Devices, DeviceTypes])
+@DriftAccessor(tables: [Devices, DeviceTypes, Packages])
 class DeviceDao extends DatabaseAccessor<AppDatabase> with _$DeviceDaoMixin {
   DeviceDao(super.db);
 
@@ -83,6 +84,32 @@ class DeviceDao extends DatabaseAccessor<AppDatabase> with _$DeviceDaoMixin {
   Future<void> renameType(int id, String name) =>
       (update(deviceTypes)..where((t) => t.id.equals(id)))
           .write(DeviceTypesCompanion(name: Value(name)));
+
+  /// How many machines carry this type — the delete guard. Every device
+  /// counts (even hidden ones), because history still joins through the
+  /// type's name everywhere.
+  Future<int> countDevicesInType(int typeId) async {
+    final query = selectOnly(devices)
+      ..addColumns([devices.id.count()])
+      ..where(devices.deviceTypeId.equals(typeId));
+    final row = await query.getSingle();
+    return row.read(devices.id.count()) ?? 0;
+  }
+
+  /// How many packages target this type — the second half of the delete
+  /// guard, so removing a type can never orphan the packages that quote it.
+  Future<int> countPackagesInType(int typeId) async {
+    final query = selectOnly(packages)
+      ..addColumns([packages.id.count()])
+      ..where(packages.deviceTypeId.equals(typeId));
+    final row = await query.getSingle();
+    return row.read(packages.id.count()) ?? 0;
+  }
+
+  /// Removes the type for good. Only safe after the guards in the
+  /// repository cleared it — nothing may still point at the row.
+  Future<void> deleteType(int id) =>
+      (delete(deviceTypes)..where((t) => t.id.equals(id))).go();
 
   /// Soft-delete: history (sessions/invoices) keeps the FK intact, but
   /// the device stops appearing in the live roster.

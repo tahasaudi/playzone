@@ -6,6 +6,7 @@ part of 'device_dao.dart';
 mixin _$DeviceDaoMixin on DatabaseAccessor<AppDatabase> {
   $DeviceTypesTable get deviceTypes => attachedDatabase.deviceTypes;
   $DevicesTable get devices => attachedDatabase.devices;
+  $PackagesTable get packages => attachedDatabase.packages;
   DeviceDaoManager get managers => DeviceDaoManager(this);
 }
 
@@ -16,4 +17,6 @@ class DeviceDaoManager {
       $$DeviceTypesTableTableManager(_db.attachedDatabase, _db.deviceTypes);
   $$DevicesTableTableManager get devices =>
       $$DevicesTableTableManager(_db.attachedDatabase, _db.devices);
+  $$PackagesTableTableManager get packages =>
+      $$PackagesTableTableManager(_db.attachedDatabase, _db.packages);
 }

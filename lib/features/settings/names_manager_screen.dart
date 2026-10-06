@@ -4,7 +4,6 @@ import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/widgets/glass_card.dart';
-import '../../core/database/app_database.dart';
 import '../../core/permissions/permission_service.dart';
 import '../../data/repositories/device_repository.dart';
 import '../../data/repositories/product_repository.dart';
@@ -89,12 +88,79 @@ class NamesManagerScreen extends ConsumerWidget {
     }
   }
 
+  /// Confirms with the cashier, calls [onDelete], and surfaces the result —
+  /// including the friendly Arabic guards ("مينفعش تحذف...") straight from
+  /// the repository. Deleting a name is destructive, so it always asks.
+  Future<void> _confirmDelete(
+    BuildContext context,
+    WidgetRef ref, {
+    required String label,
+    required Future<void> Function() onDelete,
+  }) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          width: 360,
+          padding: const EdgeInsets.all(AppSpacing.xl),
+          decoration: BoxDecoration(
+            color: AppColors.bgElevated,
+            borderRadius: AppRadius.largeR,
+            border: Border.all(color: AppColors.glassBorderPurple),
+            boxShadow: AppShadows.cardHover,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('حذف $label', style: AppTypography.sectionTitle),
+              const SizedBox(height: AppSpacing.lg),
+              Text('هيتم حذف "$label". متابعة؟', style: AppTypography.body),
+              const SizedBox(height: AppSpacing.lg),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  SecondaryButton(
+                    label: 'إلغاء',
+                    onPressed: () => Navigator.of(context).pop(false),
+                  ),
+                  const SizedBox(width: 8),
+                  PrimaryButton(
+                    label: 'حذف',
+                    icon: Icons.delete_rounded,
+                    onPressed: () => Navigator.of(context).pop(true),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await onDelete();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('تم الحذف')));
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final permissions = ref.watch(permissionServiceProvider);
 
     final productsAsync = ref.watch(productsWithCategoryProvider);
+    final categoriesAsync = ref.watch(allCategoriesProvider);
     final devicesAsync = ref.watch(devicesWithTypeProvider);
+    final typesAsync = ref.watch(deviceTypesProvider);
     final packagesAsync = ref.watch(allPackagesProvider);
     final offersAsync = ref.watch(allOffersProvider);
     final employeesAsync = ref.watch(activeEmployeesProvider);
@@ -121,18 +187,17 @@ class NamesManagerScreen extends ConsumerWidget {
                     onRename: (p, name) => ref
                         .read(productRepositoryProvider)
                         .renameProduct(p.product.id, name),
-                    prompt: (p) =>
-                        'تغيير اسم المنتج "${p.product.name}"',
+                    prompt: (p) => 'تغيير اسم المنتج "${p.product.name}"',
                   ),
                 ),
               if (permissions.canChangePrice)
                 _Section(
                   title: 'التصنيفات',
                   icon: Icons.category_rounded,
-                  child: FutureBuilder(
-                    future: ref.read(productRepositoryProvider).allCategories(),
-                    builder: (context, snapshot) {
-                      final cats = snapshot.data ?? const <CategoryRow>[];
+                  child: categoriesAsync.when(
+                    loading: () => _empty('...'),
+                    error: (e, _) => _empty('$e'),
+                    data: (cats) {
                       if (cats.isEmpty) return _empty('لا توجد تصنيفات');
                       return Column(
                         children: [
@@ -147,14 +212,23 @@ class NamesManagerScreen extends ConsumerWidget {
                                     .read(productRepositoryProvider)
                                     .renameCategory(c.id, name);
                               },
+                              onDelete: () => _confirmDelete(
+                                context,
+                                ref,
+                                label: 'تصنيف "${c.name}"',
+                                onDelete: () async {
+                                  await ref
+                                      .read(productRepositoryProvider)
+                                      .deleteCategory(c);
+                                },
+                              ),
                             ),
                         ],
                       );
                     },
                   ),
                 ),
-              if (permissions.canEditSettings ||
-                  permissions.canChangePrice)
+              if (permissions.canEditSettings || permissions.canChangePrice)
                 _Section(
                   title: 'الأجهزة',
                   icon: Icons.devices_rounded,
@@ -171,10 +245,10 @@ class NamesManagerScreen extends ConsumerWidget {
                 _Section(
                   title: 'أنواع الأجهزة',
                   icon: Icons.device_unknown_rounded,
-                  child: FutureBuilder(
-                    future: ref.read(deviceRepositoryProvider).allTypes(),
-                    builder: (context, snapshot) {
-                      final types = snapshot.data ?? const <DeviceTypeRow>[];
+                  child: typesAsync.when(
+                    loading: () => _empty('...'),
+                    error: (e, _) => _empty('$e'),
+                    data: (types) {
                       if (types.isEmpty) return _empty('لا توجد أنواع');
                       return Column(
                         children: [
@@ -189,6 +263,17 @@ class NamesManagerScreen extends ConsumerWidget {
                                     .read(deviceRepositoryProvider)
                                     .renameType(t.id, name);
                               },
+                              onDelete: () => _confirmDelete(
+                                context,
+                                ref,
+                                label: 'نوع الجهاز "${t.name}"',
+                                onDelete: () async {
+                                  await ref
+                                      .read(deviceRepositoryProvider)
+                                      .deleteType(t);
+                                  ref.invalidate(deviceTypesProvider);
+                                },
+                              ),
                             ),
                         ],
                       );
@@ -240,9 +325,8 @@ class NamesManagerScreen extends ConsumerWidget {
                   child: _RowList(
                     async: accountsAsync,
                     nameOf: (a) => a.name,
-                    onRename: (a, name) => ref
-                        .read(accountRepositoryProvider)
-                        .rename(a.id, name),
+                    onRename: (a, name) =>
+                        ref.read(accountRepositoryProvider).rename(a.id, name),
                     prompt: (a) => 'تغيير اسم البند "${a.name}"',
                   ),
                 ),
@@ -267,6 +351,7 @@ class NamesManagerScreen extends ConsumerWidget {
     required String label,
     required String current,
     required Future<void> Function(String) onRename,
+    Future<void> Function()? onDelete,
   }) {
     return Row(
       children: [
@@ -276,9 +361,16 @@ class NamesManagerScreen extends ConsumerWidget {
         IconButton(
           icon: const Icon(Icons.edit_rounded,
               size: 18, color: AppColors.accentSecondary),
-          onPressed: () => _promptRename(
-              context, ref, label, current, onRename),
+          onPressed: () =>
+              _promptRename(context, ref, label, current, onRename),
         ),
+        if (onDelete != null)
+          IconButton(
+            icon: const Icon(Icons.delete_outline_rounded,
+                size: 18, color: AppColors.danger),
+            tooltip: 'حذف',
+            onPressed: () => onDelete(),
+          ),
       ],
     );
   }
@@ -326,8 +418,7 @@ class _RowList<T> extends StatelessWidget {
             for (final row in rows)
               Row(
                 children: [
-                  Expanded(
-                      child: Text(nameOf(row), style: AppTypography.body)),
+                  Expanded(child: Text(nameOf(row), style: AppTypography.body)),
                   IconButton(
                     icon: const Icon(Icons.edit_rounded,
                         size: 18, color: AppColors.accentSecondary),
@@ -413,7 +504,8 @@ class _RowList<T> extends StatelessWidget {
 }
 
 class _Section extends StatelessWidget {
-  const _Section({required this.title, required this.icon, required this.child});
+  const _Section(
+      {required this.title, required this.icon, required this.child});
 
   final String title;
   final IconData icon;
