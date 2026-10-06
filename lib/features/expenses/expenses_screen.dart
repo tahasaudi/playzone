@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/database/app_database.dart';
@@ -21,10 +22,8 @@ String _fmt(DateTime d) {
   final now = DateTime.now();
   final sameDay =
       d.year == now.year && d.month == now.month && d.day == now.day;
-  String two(int n) => n.toString().padLeft(2, '0');
-  final time = '${two(d.hour)}:${two(d.minute)}:${two(d.second)}';
-  if (sameDay) return 'اليوم $time';
-  return '${two(d.day)}/${two(d.month)} ${two(d.hour)}:${two(d.minute)}';
+  if (sameDay) return 'اليوم ${clockWithSecondsOf(d)}';
+  return stampOf(d);
 }
 
 /// Expenses ("المصروفات"). Two tabs: the record itself (add / delete /

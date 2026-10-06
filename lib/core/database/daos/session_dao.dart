@@ -1,13 +1,15 @@
 import 'package:drift/drift.dart';
 import '../app_database.dart';
 import '../tables/sessions_table.dart';
+import '../tables/session_events_table.dart';
 import '../tables/devices_table.dart';
 import '../tables/device_types_table.dart';
 import '../tables/customers_table.dart';
 
 part 'session_dao.g.dart';
 
-@DriftAccessor(tables: [Sessions, Devices, DeviceTypes, Customers])
+@DriftAccessor(
+    tables: [Sessions, SessionEvents, Devices, DeviceTypes, Customers])
 class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
   SessionDao(super.db);
 
@@ -64,6 +66,7 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
       DevicesCompanion(
           status: const Value('active'), updatedAt: Value(DateTime.now())),
     );
+    await noteEvent(id, 'start', note: mode);
     return id;
   }
 
@@ -105,22 +108,84 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
     return single;
   }
 
+  /// Stopping the clock, as the two numbers every write that stops it needs:
+  /// where the accumulated total landed, and what THIS segment added — the
+  /// money whose rate is known for certain, because the segment just ran at it.
+  ///
+  /// The split is folded forward here and nowhere else, so `single + multi` is
+  /// always the session's own time bill. Checkout may then put orders on top
+  /// of `accumulatedCost`; the two buckets deliberately do not chase that —
+  /// they answer "what did the play cost", and the invoice answers the rest.
+  _Frozen _freeze(SessionRow session, DeviceRow device, DeviceTypeRow type) {
+    final total = _freezeCurrentSegment(session, device, type);
+    final segment = total - session.accumulatedCost;
+    final mode = session.mode;
+    return _Frozen(
+      accumulated: total,
+      single: session.singleCost + (mode == 'single' ? segment : 0),
+      multi: session.multiCost + (mode == 'multi' ? segment : 0),
+    );
+  }
+
+  /// Appends one thing that happened. Append-only on purpose — the whole point
+  /// of the log is that a new answer can never rewrite the last one.
+  Future<void> noteEvent(int sessionId, String type, {String? note}) {
+    return into(sessionEvents).insert(SessionEventsCompanion.insert(
+      sessionId: sessionId,
+      type: type,
+      at: Value(DateTime.now()),
+      note: Value(note),
+    ));
+  }
+
+  /// The same log, entered from a device rather than a session: the wall goes
+  /// dark and lit from screens whose session may not exist (a machine with
+  /// nothing running on it), so the session is looked up here rather than
+  /// assumed by the caller.
+  Future<void> noteScreenEvent(int deviceId, String type) async {
+    final session = await (select(sessions)
+          ..where((s) =>
+              s.deviceId.equals(deviceId) & s.status.isNotValue('completed'))
+          ..orderBy([(s) => OrderingTerm.desc(s.startTime)])
+          ..limit(1))
+        .getSingleOrNull();
+    if (session == null) return;
+    await noteEvent(session.id, type);
+  }
+
+  /// The whole timeline of one session, oldest first, as a live read.
+  ///
+  /// Watching rather than fetching because the detail sheet is opened over a
+  /// session that is still running — the pause it is about to show may happen
+  /// while the reader is looking at it.
+  Stream<List<SessionEventRow>> watchEventsForSession(int sessionId) {
+    final query = select(sessionEvents)
+      ..where((e) => e.sessionId.equals(sessionId))
+      ..orderBy([
+        (e) => OrderingTerm.asc(e.at),
+        (e) => OrderingTerm.asc(e.id),
+      ]);
+    return query.watch();
+  }
+
   Future<void> pause(SessionBoardEntry entry) async {
-    final frozenCost =
-        _freezeCurrentSegment(entry.session, entry.device, entry.type);
+    final f = _freeze(entry.session, entry.device, entry.type);
+    final at = DateTime.now();
     await (update(sessions)..where((s) => s.id.equals(entry.session.id))).write(
       SessionsCompanion(
-        pausedAt: Value(DateTime.now()),
-        accumulatedCost: Value(frozenCost),
+        pausedAt: Value(at),
         segmentStartAt: const Value(null),
         status: const Value('paused'),
-        updatedAt: Value(DateTime.now()),
+        updatedAt: Value(at),
+        accumulatedCost: Value(f.accumulated),
+        singleCost: Value(f.single),
+        multiCost: Value(f.multi),
       ),
     );
     await (update(devices)..where((d) => d.id.equals(entry.device.id))).write(
-      DevicesCompanion(
-          status: const Value('paused'), updatedAt: Value(DateTime.now())),
+      DevicesCompanion(status: const Value('paused'), updatedAt: Value(at)),
     );
+    await noteEvent(entry.session.id, 'pause');
   }
 
   Future<void> resume(SessionBoardEntry entry) async {
@@ -133,6 +198,10 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
     final pausedMs = session.pausedAt == null
         ? 0
         : DateTime.now().difference(session.pausedAt!).inMilliseconds;
+    // The pause itself already logged the moment it started, and this
+    // resume logs the moment it ended — two entries in order say the whole
+    // thing, and pairing them here would mean the log carried the same fact
+    // twice in two shapes.
     await (update(sessions)..where((s) => s.id.equals(session.id))).write(
       SessionsCompanion(
         pausedAt: const Value(null),
@@ -148,6 +217,7 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
       DevicesCompanion(
           status: const Value('active'), updatedAt: Value(DateTime.now())),
     );
+    await noteEvent(entry.session.id, 'resume');
   }
 
   /// Switches between "single" and "multi" pricing mid-session — freely
@@ -157,16 +227,22 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
   Future<void> switchMode(SessionBoardEntry entry, String newMode) async {
     if (entry.session.status != 'active')
       return; // only makes sense while running
-    final frozenCost =
-        _freezeCurrentSegment(entry.session, entry.device, entry.type);
+    final f = _freeze(entry.session, entry.device, entry.type);
+    final now = DateTime.now();
     await (update(sessions)..where((s) => s.id.equals(entry.session.id))).write(
       SessionsCompanion(
         mode: Value(newMode),
-        accumulatedCost: Value(frozenCost),
-        segmentStartAt: Value(DateTime.now()),
-        updatedAt: Value(DateTime.now()),
+        segmentStartAt: Value(now),
+        updatedAt: Value(now),
+        accumulatedCost: Value(f.accumulated),
+        singleCost: Value(f.single),
+        multiCost: Value(f.multi),
       ),
     );
+    // Logged with the mode it moved TO: the sheet reads "فردي 20:15 → مالتي
+    // 21:02" straight off the order of these entries, and any later switch
+    // overwrites nothing.
+    await noteEvent(entry.session.id, 'mode', note: newMode);
   }
 
   /// The paid time is over: stop the clock, freeze the cost at exactly the
@@ -175,21 +251,23 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
   /// 'timeup' (not 'completed') precisely so the cashier can still press
   /// تحصيل on it and settle the bill — the money is never lost.
   Future<void> timeUp(SessionBoardEntry entry) async {
-    final frozen =
-        _freezeCurrentSegment(entry.session, entry.device, entry.type);
+    final f = _freeze(entry.session, entry.device, entry.type);
     await (update(sessions)..where((s) => s.id.equals(entry.session.id))).write(
       SessionsCompanion(
-        accumulatedCost: Value(frozen),
         segmentStartAt: const Value(null),
         status: const Value('timeup'),
         endTime: Value(entry.session.timeUpAt ?? DateTime.now()),
         updatedAt: Value(DateTime.now()),
+        accumulatedCost: Value(f.accumulated),
+        singleCost: Value(f.single),
+        multiCost: Value(f.multi),
       ),
     );
     await (update(devices)..where((d) => d.id.equals(entry.device.id))).write(
       DevicesCompanion(
           status: const Value('available'), updatedAt: Value(DateTime.now())),
     );
+    await noteEvent(entry.session.id, 'timeup');
   }
 
   /// The players want to keep playing after time-up: push the deadline
@@ -214,6 +292,7 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
     await (update(devices)..where((d) => d.id.equals(entry.device.id))).write(
       DevicesCompanion(status: const Value('active'), updatedAt: Value(now)),
     );
+    await noteEvent(entry.session.id, 'extend', note: '$minutes');
   }
 
   /// Every session whose deadline has already passed — polled by
@@ -261,13 +340,18 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
 
   Future<void> complete(SessionBoardEntry entry,
       {double? overrideFinalCost}) async {
-    final finalCost = overrideFinalCost ??
-        entry.session.fixedPrice ??
-        _freezeCurrentSegment(entry.session, entry.device, entry.type);
+    // The freeze runs unconditionally, even when the total is overridden: the
+    // segment ticking right now would otherwise never be filed under a rate,
+    // and the split would be short of its last minutes forever.
+    final f = _freeze(entry.session, entry.device, entry.type);
+    final finalCost =
+        overrideFinalCost ?? entry.session.fixedPrice ?? f.accumulated;
     await (update(sessions)..where((s) => s.id.equals(entry.session.id))).write(
       SessionsCompanion(
         endTime: Value(DateTime.now()),
         accumulatedCost: Value(finalCost),
+        singleCost: Value(f.single),
+        multiCost: Value(f.multi),
         segmentStartAt: const Value(null),
         status: const Value('completed'),
         finalCost: Value(finalCost),
@@ -278,6 +362,7 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
       DevicesCompanion(
           status: const Value('available'), updatedAt: Value(DateTime.now())),
     );
+    await noteEvent(entry.session.id, 'checkout');
   }
 
   /// Most recently completed sessions, joined with device/type/customer
@@ -400,4 +485,23 @@ class SessionBoardEntry {
     return session.accumulatedCost +
         (currentHourlyRate / 3600) * elapsedSeconds;
   }
+}
+
+/// Where a frozen segment left the money: the new accumulated total, and the
+/// two buckets it split into by the rate each stretch was billed at.
+///
+/// One value rather than three floats passed around, because every write that
+/// stops the clock needs all three and none of them may disagree — a session
+/// whose total and parts differ by a cent is a number nobody can defend at the
+/// counter.
+class _Frozen {
+  const _Frozen({
+    required this.accumulated,
+    required this.single,
+    required this.multi,
+  });
+
+  final double accumulated;
+  final double single;
+  final double multi;
 }

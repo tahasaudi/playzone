@@ -11,6 +11,7 @@ import 'tables/customers_table.dart';
 import 'tables/categories_table.dart';
 import 'tables/products_table.dart';
 import 'tables/sessions_table.dart';
+import 'tables/session_events_table.dart';
 import 'tables/invoices_table.dart';
 import 'tables/invoice_items_table.dart';
 import 'tables/audit_logs_table.dart';
@@ -59,26 +60,59 @@ part 'app_database.g.dart';
 /// Packages & Offers, Loyalty, mixed payment) so far (spec §38).
 @DriftDatabase(
   tables: [
-    Employees, DeviceTypes, Devices, Customers, Categories, Products,
-    Sessions, Invoices, InvoiceItems, AuditLogs, Shifts, Expenses,
+    Employees,
+    DeviceTypes,
+    Devices,
+    Customers,
+    Categories,
+    Products,
+    Sessions,
+    SessionEvents,
+    Invoices,
+    InvoiceItems,
+    AuditLogs,
+    Shifts,
+    Expenses,
     EmployeeFeatureOverrides,
-    Reservations, Packages, Offers, LoyaltySettings,
-    AppSettings, Accounts, AccountEntries, Refunds,
-    StockCounts, StockCountItems,
-    EmployeeTransactions, EmployeeAttendance,
+    Reservations,
+    Packages,
+    Offers,
+    LoyaltySettings,
+    AppSettings,
+    Accounts,
+    AccountEntries,
+    Refunds,
+    StockCounts,
+    StockCountItems,
+    EmployeeTransactions,
+    EmployeeAttendance,
   ],
   daos: [
-    EmployeeDao, DeviceDao, CustomerDao, ProductDao, SessionDao,
-    InvoiceDao, AuditLogDao, ShiftDao, ExpenseDao, EmployeeFeatureDao,
-    ReservationDao, PackageDao, OfferDao, LoyaltyDao,
-    SettingsDao, AccountDao, RefundDao, StockCountDao,
+    EmployeeDao,
+    DeviceDao,
+    CustomerDao,
+    ProductDao,
+    SessionDao,
+    InvoiceDao,
+    AuditLogDao,
+    ShiftDao,
+    ExpenseDao,
+    EmployeeFeatureDao,
+    ReservationDao,
+    PackageDao,
+    OfferDao,
+    LoyaltyDao,
+    SettingsDao,
+    AccountDao,
+    RefundDao,
+    StockCountDao,
   ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 9;
+  int get schemaVersion => 10;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -187,6 +221,38 @@ class AppDatabase extends _$AppDatabase {
             }
             await _reconcileDevices(this);
           }
+          // v10 → the session timeline. One append-only row per thing that
+          // happened — paused, resumed, the wall going dark or lit, a mode
+          // switch — because the session row only ever keeps the CURRENT
+          // answer and the café's question is always "when".
+          //
+          // Also: the order line's own timestamp, so a drink keeps the moment
+          // it was asked for after the drafts are folded into the bill, and the
+          // per-mode cost split the detail sheet reads.
+          if (from < 10) {
+            await m.createTable(sessionEvents);
+            await m.addColumn(invoiceItems, invoiceItems.createdAt);
+            await m.addColumn(sessions, sessions.singleCost);
+            await m.addColumn(sessions, sessions.multiCost);
+
+            // A session already half-run by the old build has money locked in
+            // with no record of which rate earned it. Seeding that money into
+            // the single bucket keeps `single + multi == accumulatedCost` for
+            // the session on the wall right now, so its three numbers still
+            // add up as the rest of it accrues. Completed sessions are left at
+            // zero and read as unsplit — which is the truth about them.
+            final openSessions = await (this.select(this.sessions)
+                  ..where((s) => s.status.isNotValue('completed')))
+                .get();
+            for (final s in openSessions) {
+              if (s.accumulatedCost <= 0) continue;
+              await (this.update(this.sessions)
+                    ..where((x) => x.id.equals(s.id)))
+                  .write(SessionsCompanion(
+                singleCost: Value(s.accumulatedCost),
+              ));
+            }
+          }
         },
       );
 }
@@ -203,18 +269,19 @@ Future<void> _reconcileDevices(AppDatabase db) async {
         .getSingleOrNull();
     if (existing != null) return existing.id;
     return db.into(db.deviceTypes).insert(DeviceTypesCompanion.insert(
-      name: name,
-      defaultHourlyRate: Value(single),
-      defaultHourlyRateMulti: Value(multi),
-    ));
+          name: name,
+          defaultHourlyRate: Value(single),
+          defaultHourlyRateMulti: Value(multi),
+        ));
   }
 
   final ps4 = await typeIdFor('PS4', 20, 30);
   final ps5 = await typeIdFor('PS5', 30, 45);
 
   // Park the old roster out of the way (soft delete — never break history).
-  await db.update(db.devices).write(
-      const DevicesCompanion(active: Value(false)));
+  await db
+      .update(db.devices)
+      .write(const DevicesCompanion(active: Value(false)));
 
   for (final entry in [
     (ps4, 1),
@@ -225,7 +292,8 @@ Future<void> _reconcileDevices(AppDatabase db) async {
     (ps5, 6),
   ]) {
     final name = entry.$2.toString();
-    final clash = await (db.select(db.devices)..where((d) => d.name.equals(name)))
+    final clash = await (db.select(db.devices)
+          ..where((d) => d.name.equals(name)))
         .getSingleOrNull();
     if (clash != null) {
       await (db.update(db.devices)..where((d) => d.id.equals(clash.id))).write(
@@ -239,9 +307,9 @@ Future<void> _reconcileDevices(AppDatabase db) async {
       continue;
     }
     await db.into(db.devices).insert(DevicesCompanion.insert(
-      name: name,
-      deviceTypeId: entry.$1,
-    ));
+          name: name,
+          deviceTypeId: entry.$1,
+        ));
   }
 }
 
@@ -327,8 +395,9 @@ Future<void> _seed(AppDatabase db) async {
   // Café categories + products, matching the old POS mock catalog.
   final categoryIds = <String, int>{};
   for (final name in ['مشروبات', 'قهوة', 'سناكس', 'أكل']) {
-    categoryIds[name] = await db.into(db.categories).insert(
-        CategoriesCompanion.insert(name: name));
+    categoryIds[name] = await db
+        .into(db.categories)
+        .insert(CategoriesCompanion.insert(name: name));
   }
 
   final seedProducts = [
@@ -357,13 +426,13 @@ Future<void> _seed(AppDatabase db) async {
   // Default loyalty program (Phase 6) — earn 1 point/EGP, redeem from
   // 100 points at EGP 1 per point.
   await db.into(db.loyaltySettings).insert(
-    LoyaltySettingsCompanion.insert(
-      id: const Value(1),
-      pointsPerCurrency: const Value(1.0),
-      minimumRedeemPoints: const Value(100),
-      pointValueEGP: const Value(1.0),
-    ),
-  );
+        LoyaltySettingsCompanion.insert(
+          id: const Value(1),
+          pointsPerCurrency: const Value(1.0),
+          minimumRedeemPoints: const Value(100),
+          pointValueEGP: const Value(1.0),
+        ),
+      );
 
   await _seedAccounts(db);
   await _seedSettings(db);
@@ -375,14 +444,34 @@ Future<void> _seedAccounts(AppDatabase db) async {
   final existing = await db.select(db.accounts).get();
   if (existing.isNotEmpty) return;
   await db.batch((b) {
-    b.insert(db.accounts, AccountsCompanion.insert(
-        code: 'sales', name: 'مبيعات الألعاب', kind: 'revenue', system: const Value(true)));
-    b.insert(db.accounts, AccountsCompanion.insert(
-        code: 'cafe_sales', name: 'مبيعات الكافيه', kind: 'revenue', system: const Value(true)));
-    b.insert(db.accounts, AccountsCompanion.insert(
-        code: 'expenses', name: 'المصروفات', kind: 'expense', system: const Value(true)));
-    b.insert(db.accounts, AccountsCompanion.insert(
-        code: 'refunds', name: 'المرتجعات', kind: 'expense', system: const Value(true)));
+    b.insert(
+        db.accounts,
+        AccountsCompanion.insert(
+            code: 'sales',
+            name: 'مبيعات الألعاب',
+            kind: 'revenue',
+            system: const Value(true)));
+    b.insert(
+        db.accounts,
+        AccountsCompanion.insert(
+            code: 'cafe_sales',
+            name: 'مبيعات الكافيه',
+            kind: 'revenue',
+            system: const Value(true)));
+    b.insert(
+        db.accounts,
+        AccountsCompanion.insert(
+            code: 'expenses',
+            name: 'المصروفات',
+            kind: 'expense',
+            system: const Value(true)));
+    b.insert(
+        db.accounts,
+        AccountsCompanion.insert(
+            code: 'refunds',
+            name: 'المرتجعات',
+            kind: 'expense',
+            system: const Value(true)));
   });
 }
 
@@ -390,10 +479,10 @@ Future<void> _seedAccounts(AppDatabase db) async {
 /// should be changed from Settings → الأزرار المحمية.
 Future<void> _seedSettings(AppDatabase db) async {
   await db.into(db.appSettings).insertOnConflictUpdate(
-    AppSettingsCompanion.insert(
-      key: SettingsDao.lockedAccessPinKey,
-      value: Value(pinHashFor('0000')),
-      updatedAt: Value(DateTime.now()),
-    ),
-  );
+        AppSettingsCompanion.insert(
+          key: SettingsDao.lockedAccessPinKey,
+          value: Value(pinHashFor('0000')),
+          updatedAt: Value(DateTime.now()),
+        ),
+      );
 }

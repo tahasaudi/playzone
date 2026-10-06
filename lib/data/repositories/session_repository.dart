@@ -79,6 +79,22 @@ class SessionRepository {
   Future<void> extend(SessionBoardEntry entry, int minutes) =>
       _db.sessionDao.extend(entry, minutes);
 
+  /// The wall going dark or lit, logged against whatever session that
+  /// machine is running — if any.
+  ///
+  /// The command comes from three different places (the card's own switch,
+  /// pause/resume, the screens popup) and only two of them know a session
+  /// exists, so the lookup lives here rather than in each caller. A screen
+  /// with nothing running on it simply logs nothing; there is no session to
+  /// hang the moment from.
+  Future<void> noteScreen(int deviceId, String type) =>
+      _db.sessionDao.noteScreenEvent(deviceId, type);
+
+  /// When each thing happened inside one session — the timeline the detail
+  /// sheet draws: the pause, the screen going dark, the switch to مالتي.
+  Stream<List<SessionEventRow>> watchEvents(int sessionId) =>
+      _db.sessionDao.watchEventsForSession(sessionId);
+
   Stream<Map<int, DateTime>> watchLastFinishedByDevice() =>
       _db.sessionDao.watchLastFinishedByDevice();
 
@@ -159,6 +175,13 @@ final activeSessionsProvider = StreamProvider<List<SessionBoardEntry>>((ref) {
 final completedSessionsProvider =
     StreamProvider<List<SessionBoardEntry>>((ref) {
   return ref.watch(sessionRepositoryProvider).watchCompleted(limit: 2000);
+});
+
+/// Everything that happened inside one session, oldest first. Reads nothing
+/// until the detail sheet asks for it, then stays open while it is shown.
+final sessionEventsProvider =
+    StreamProvider.family<List<SessionEventRow>, int>((ref, sessionId) {
+  return ref.watch(sessionRepositoryProvider).watchEvents(sessionId);
 });
 
 /// Ticks once a second so widgets showing a live timer/cost rebuild —

@@ -43,11 +43,21 @@ class InvoiceLineInput {
     required this.quantity,
     required this.unitPrice,
     this.productId,
+    this.createdAt,
   });
   final String description;
   final int quantity;
   final double unitPrice;
   final int? productId;
+
+  /// When this line was actually asked for.
+  ///
+  /// Left null by ordinary callers, which means "now" — that is the truthful
+  /// answer for anything rung up at the moment of writing. The one place it is
+  /// set is the fold from a café draft onto the bill: those drinks were poured
+  /// hours ago and their time must survive the trip, or the receipt would
+  /// claim the customer ordered everything at checkout.
+  final DateTime? createdAt;
 
   double get total => unitPrice * quantity;
 }
@@ -159,6 +169,7 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
           quantity: Value(line.quantity),
           unitPrice: line.unitPrice,
           total: line.total,
+          createdAt: Value(line.createdAt ?? DateTime.now()),
         ));
 
         if (line.productId != null) {
@@ -394,6 +405,10 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
         description: line.description,
         quantity: line.quantity,
         unitPrice: line.unitPrice,
+        // The drink's own moment travels with it onto the bill. Drop it here
+        // and the receipt would answer "متى طلب المياه" with "when you paid",
+        // which is the exact fact the drafts were holding on to.
+        createdAt: line.createdAt ?? byId[r.readTable(invoices).id]!.createdAt,
       );
     }).toList();
   }

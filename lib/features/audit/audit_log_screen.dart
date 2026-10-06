@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/database/app_database.dart';
 import '../../data/repositories/audit_log_repository.dart';
@@ -47,14 +48,13 @@ class _AuditLogScreenState extends ConsumerState<AuditLogScreen> {
             decoration: InputDecoration(
               hintText: 'بحث بالعملية أو النوع أو الدور',
               hintStyle: const TextStyle(color: AppColors.textTertiary),
-              prefixIcon:
-                  const Icon(Icons.search_rounded, color: AppColors.textTertiary),
+              prefixIcon: const Icon(Icons.search_rounded,
+                  color: AppColors.textTertiary),
               filled: true,
               fillColor: AppColors.glassFill,
               border: OutlineInputBorder(
                   borderRadius: AppRadius.smallR,
-                  borderSide:
-                      const BorderSide(color: AppColors.glassBorder)),
+                  borderSide: const BorderSide(color: AppColors.glassBorder)),
             ),
           ),
         ),
@@ -123,7 +123,8 @@ class _LogRow extends StatelessWidget {
               children: [
                 Text(_actionLabel(log.action), style: AppTypography.cardTitle),
                 const SizedBox(height: 2),
-                Text('${log.entityType}${log.entityId == null ? '' : ' #${log.entityId}'}',
+                Text(
+                    '${log.entityType}${log.entityId == null ? '' : ' #${log.entityId}'}',
                     style: const TextStyle(
                         fontSize: 12, color: AppColors.textTertiary)),
               ],
@@ -185,6 +186,4 @@ class _LogRow extends StatelessWidget {
   }
 }
 
-String _fmtDateTime(DateTime d) =>
-    '${d.day}/${d.month} ${d.hour.toString().padLeft(2, '0')}:'
-    '${d.minute.toString().padLeft(2, '0')}';
+String _fmtDateTime(DateTime d) => '${shortDayOf(d)} ${clockOf(d)}';

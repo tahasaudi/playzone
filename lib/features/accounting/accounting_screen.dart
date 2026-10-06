@@ -7,10 +7,9 @@ import '../../core/widgets/app_buttons.dart';
 import '../../core/database/app_database.dart';
 import '../../core/permissions/permission_service.dart';
 import '../../data/repositories/account_repository.dart';
+import '../../core/utils/time_format.dart';
 
-String _two(int n) => n.toString().padLeft(2, '0');
-
-String _fmt(DateTime d) => '${_two(d.day)}/${_two(d.month)} ${_two(d.hour)}:${_two(d.minute)}';
+String _fmt(DateTime d) => stampOf(d);
 
 String _sourceLabel(String source) => switch (source) {
       'invoice' => 'فاتورة بيع',
@@ -64,8 +63,7 @@ class _AccountingScreenState extends ConsumerState<AccountingScreen> {
                 );
               }
               return entriesAsync.when(
-                loading: () =>
-                    const Center(child: CircularProgressIndicator()),
+                loading: () => const Center(child: CircularProgressIndicator()),
                 error: (e, _) => Center(
                     child: Text('خطأ: $e',
                         style: const TextStyle(color: AppColors.danger))),
@@ -131,8 +129,7 @@ class _AccountingScreenState extends ConsumerState<AccountingScreen> {
                                 child: _AccountBalanceCard(
                                   account: account,
                                   balance: repo.balanceOf(account, entries),
-                                  selected:
-                                      _selectedAccountId == account.id,
+                                  selected: _selectedAccountId == account.id,
                                   canRename: permissions.canEditSettings,
                                 ),
                               ),

@@ -12,6 +12,8 @@
 /// page and the `/status` endpoint without either one drifting.
 library;
 
+import '../utils/time_format.dart';
+
 /// How a wall screen is doing. Ordered from "most broken" to "healthy", so
 /// the settings page can show the worst news first.
 enum TvScreenState {
@@ -464,7 +466,9 @@ TvScreenReport judgeTvScreen({
           'الشاشة واقفة في نص تغيير ومش بتخلص، فمش هتاخد أي صورة جديدة. '
               'دوس «ابحث عن الشاشة» الأول — لو رجعت، تمام. لو مرجعتش، لازم '
               'حد يقرب منها ويوقّعها (الفياز فيها)، وبعد دقيقة هترجع لوحدها.',
-        TvScreenState.showing || TvScreenState.released || TvScreenState.dark =>
+        TvScreenState.showing ||
+        TvScreenState.released ||
+        TvScreenState.dark =>
           '',
       };
 
@@ -483,7 +487,8 @@ TvScreenReport judgeTvScreen({
     _ when !log.everReached => TvScreenState.unknown,
     _ when log.refusedAt != null && !_refusalExpired(log.refusedAt!) =>
       TvScreenState.refused,
-    _ when !log.reachable && identity.sessionRunning => TvScreenState.unreachable,
+    _ when !log.reachable && identity.sessionRunning =>
+      TvScreenState.unreachable,
     _ when !log.reachable => TvScreenState.dark,
     _ when !log.lastOk => TvScreenState.suspect,
     // It talks to us but has never said what it is showing, so every verdict
@@ -622,9 +627,5 @@ String tvAge(DateTime? at, {DateTime? now}) {
 /// that is not something to verify by waiting for a customer to find out.
 Set<String> closedScreenLedger() => <String>{};
 
-/// `14:02:28` — a wall-clock stamp for the per-screen event trail.
-String tvClock(DateTime? at) => at == null
-    ? '—'
-    : '${at.hour.toString().padLeft(2, '0')}:'
-        '${at.minute.toString().padLeft(2, '0')}:'
-        '${at.second.toString().padLeft(2, '0')}';
+/// `2:02:28 م` — a wall-clock stamp for the per-screen event trail.
+String tvClock(DateTime? at) => at == null ? '—' : clockWithSecondsOf(at);

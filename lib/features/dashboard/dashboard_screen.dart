@@ -643,11 +643,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final ip = ref.read(tvConfigProvider).screenFor(deviceId);
     if (ip == null) return;
     final power = TvPowerService.instance;
-    if (power.isScreenDark(ip)) {
+    final wasDark = power.isScreenDark(ip);
+    if (wasDark) {
       power.turnOn(ip);
     } else {
       power.turnOff(ip);
     }
+    // Logged with the direction the button actually moved in: the sheet reads
+    // these off the timeline, so it has to say what happened, not merely that
+    // something was pressed.
+    ref
+        .read(sessionRepositoryProvider)
+        .noteScreen(deviceId, wasDark ? 'screen_on' : 'screen_off');
   }
 
   /// Stopping the clock stops the machines too.
@@ -661,12 +668,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     await ref.read(sessionRepositoryProvider).pause(entry);
     final ip = ref.read(tvConfigProvider).screenFor(entry.device.id);
     if (ip != null) TvPowerService.instance.turnOff(ip);
+    await ref
+        .read(sessionRepositoryProvider)
+        .noteScreen(entry.device.id, 'screen_off');
   }
 
   Future<void> _resume(SessionBoardEntry entry) async {
     await ref.read(sessionRepositoryProvider).resume(entry);
     final ip = ref.read(tvConfigProvider).screenFor(entry.device.id);
     if (ip != null) TvPowerService.instance.turnOn(ip);
+    await ref
+        .read(sessionRepositoryProvider)
+        .noteScreen(entry.device.id, 'screen_on');
   }
 
   Future<void> _switchMode(SessionBoardEntry entry) async {

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/database/daos/reservation_dao.dart';
@@ -78,7 +79,8 @@ class ReservationsScreen extends ConsumerWidget {
                       _ReservationRow(entry: r),
                       if (r != reservations.last)
                         const Divider(
-                            color: AppColors.glassBorder, height: AppSpacing.lg),
+                            color: AppColors.glassBorder,
+                            height: AppSpacing.lg),
                     ],
                   ],
                 ),
@@ -175,7 +177,8 @@ class _ReservationRow extends ConsumerWidget {
     );
   }
 
-  Widget _actions(BuildContext context, ReservationRepository repo, String status) {
+  Widget _actions(
+      BuildContext context, ReservationRepository repo, String status) {
     final buttons = <Widget>[];
 
     if (status == 'Pending') {
@@ -197,15 +200,16 @@ class _ReservationRow extends ConsumerWidget {
           onPressed: () async {
             await repo.startSession(entry);
             if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  content: Text('تم بدء الجلسة من الحجز')));
+              ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('تم بدء الجلسة من الحجز')));
             }
           }));
     }
     if (status == 'Pending' || status == 'Confirmed') {
       buttons.add(IconButton(
         tooltip: 'إلغاء',
-        icon: const Icon(Icons.close_rounded, size: 18, color: AppColors.danger),
+        icon:
+            const Icon(Icons.close_rounded, size: 18, color: AppColors.danger),
         onPressed: () => repo.cancel(entry.reservation.id),
       ));
       buttons.add(IconButton(
@@ -234,17 +238,20 @@ class _HistoryRow extends StatelessWidget {
           Expanded(
             flex: 3,
             child: Text(entry.customer.name,
-                style: const TextStyle(color: AppColors.textPrimary, fontSize: 13)),
+                style: const TextStyle(
+                    color: AppColors.textPrimary, fontSize: 13)),
           ),
           Expanded(
             flex: 2,
             child: Text(entry.device.name,
-                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 12)),
           ),
           Expanded(
             flex: 3,
             child: Text(_fmtRange(r.startTime, r.endTime),
-                style: const TextStyle(color: AppColors.textTertiary, fontSize: 12)),
+                style: const TextStyle(
+                    color: AppColors.textTertiary, fontSize: 12)),
           ),
           _ReservationStatusChip(status: r.status),
         ],
@@ -321,7 +328,8 @@ class _NewReservationDialogState extends ConsumerState<_NewReservationDialog> {
     );
     if (time == null) return;
     setState(() {
-      _start = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+      _start =
+          DateTime(date.year, date.month, date.day, time.hour, time.minute);
     });
   }
 
@@ -345,8 +353,8 @@ class _NewReservationDialogState extends ConsumerState<_NewReservationDialog> {
           );
       if (mounted) {
         Navigator.of(context).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('تم إنشاء الحجز')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('تم إنشاء الحجز')));
       }
     } on ReservationOverlapException catch (e) {
       setState(() => _error = '$e');
@@ -382,7 +390,8 @@ class _NewReservationDialogState extends ConsumerState<_NewReservationDialog> {
             const SizedBox(height: 6),
             customersAsync.when(
               loading: () => const LinearProgressIndicator(),
-              error: (e, _) => Text('$e', style: const TextStyle(color: AppColors.danger)),
+              error: (e, _) =>
+                  Text('$e', style: const TextStyle(color: AppColors.danger)),
               data: (customers) => _dropdown<int>(
                 value: _customerId,
                 hint: 'اختر العميل',
@@ -398,7 +407,8 @@ class _NewReservationDialogState extends ConsumerState<_NewReservationDialog> {
             const SizedBox(height: 6),
             devicesAsync.when(
               loading: () => const LinearProgressIndicator(),
-              error: (e, _) => Text('$e', style: const TextStyle(color: AppColors.danger)),
+              error: (e, _) =>
+                  Text('$e', style: const TextStyle(color: AppColors.danger)),
               data: (devices) => _dropdown<int>(
                 value: _deviceId,
                 hint: 'اختر الجهاز',
@@ -457,7 +467,8 @@ class _NewReservationDialogState extends ConsumerState<_NewReservationDialog> {
             if (_error != null) ...[
               const SizedBox(height: AppSpacing.md),
               Text(_error!,
-                  style: const TextStyle(color: AppColors.danger, fontSize: 13)),
+                  style:
+                      const TextStyle(color: AppColors.danger, fontSize: 13)),
             ],
             const SizedBox(height: AppSpacing.xl),
             Row(
@@ -505,7 +516,8 @@ Widget _dropdown<T>({
         value: value,
         isExpanded: true,
         hint: Text(hint,
-            style: const TextStyle(color: AppColors.textTertiary, fontSize: 13)),
+            style:
+                const TextStyle(color: AppColors.textTertiary, fontSize: 13)),
         dropdownColor: AppColors.bgElevated,
         style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
         items: items,
@@ -518,11 +530,9 @@ Widget _dropdown<T>({
 String _fmtRange(DateTime start, DateTime end) =>
     '${_fmtTime(start)} – ${_fmtTime(end)}';
 
-String _fmtTime(DateTime d) =>
-    '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+String _fmtTime(DateTime d) => clockOf(d);
 
-String _fmtDateTime(DateTime d) =>
-    '${d.day}/${d.month} ${_fmtTime(d)}';
+String _fmtDateTime(DateTime d) => '${shortDayOf(d)} ${clockOf(d)}';
 
 String _startsInLabel(DateTime start) {
   final diff = start.difference(DateTime.now());

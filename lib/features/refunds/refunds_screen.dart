@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/database/app_database.dart';
@@ -10,14 +11,11 @@ import '../../core/permissions/permission_service.dart';
 import '../../data/repositories/refund_repository.dart';
 import '../../data/repositories/invoice_repository.dart';
 
-String _two(int n) => n.toString().padLeft(2, '0');
-
 String _fmt(DateTime d) {
   final now = DateTime.now();
-  final sameDay = d.year == now.year && d.month == now.month && d.day == now.day;
-  return sameDay
-      ? 'اليوم ${_two(d.hour)}:${_two(d.minute)}'
-      : '${_two(d.day)}/${_two(d.month)} ${_two(d.hour)}:${_two(d.minute)}';
+  final sameDay =
+      d.year == now.year && d.month == now.month && d.day == now.day;
+  return sameDay ? 'اليوم ${clockOf(d)}' : stampOf(d);
 }
 
 /// Refunds ("المرتجعات"). Every refund posts the money back to the
@@ -271,7 +269,8 @@ class _AddRefundDialogState extends ConsumerState<_AddRefundDialog> {
               controller: _amount,
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
-              decoration: const InputDecoration(labelText: 'المبلغ المسترجع (EGP)'),
+              decoration:
+                  const InputDecoration(labelText: 'المبلغ المسترجع (EGP)'),
             ),
             const SizedBox(height: AppSpacing.md),
             TextField(
@@ -282,7 +281,8 @@ class _AddRefundDialogState extends ConsumerState<_AddRefundDialog> {
             Row(
               children: [
                 const Text('إرجاع الكميات للمخزون',
-                    style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                    style: TextStyle(
+                        fontSize: 13, color: AppColors.textSecondary)),
                 const Spacer(),
                 Switch(
                   value: _restock,

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/widgets/mini_bar_chart.dart';
@@ -56,39 +57,44 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
           .read(invoiceRepositoryProvider)
           .watchItemsBetween(from: range.from, to: range.to)
           .first;
-      final employees = ref.read(activeEmployeesProvider).valueOrNull ?? const [];
+      final employees =
+          ref.read(activeEmployeesProvider).valueOrNull ?? const [];
       String empName(int? id) => id == null
           ? ''
-          : employees.where((e) => e.id == id).map((e) => e.name).firstOrNull ?? '';
+          : employees.where((e) => e.id == id).map((e) => e.name).firstOrNull ??
+              '';
 
       final allExpenses = ref.read(allExpensesProvider).valueOrNull ?? const [];
       final expenses = allExpenses
           .where((e) =>
-              !e.createdAt.isBefore(range.from) && e.createdAt.isBefore(range.to))
+              !e.createdAt.isBefore(range.from) &&
+              e.createdAt.isBefore(range.to))
           .toList();
 
       String csvCell(String s) {
         final clean = s.replaceAll('"', '""');
-        return clean.contains(',') || clean.contains('"') || clean.contains('\n')
+        return clean.contains(',') ||
+                clean.contains('"') ||
+                clean.contains('\n')
             ? '"$clean"'
             : clean;
       }
 
-      String two(int n) => n.toString().padLeft(2, '0');
-      String fmt(DateTime d) =>
-          '${two(d.day)}/${two(d.month)}/${d.year} ${two(d.hour)}:${two(d.minute)}';
+      String fmt(DateTime d) => stampOf(d);
 
       final sb = StringBuffer();
       // BOM so Excel detects UTF-8 and Arabic renders correctly.
       sb.write('\uFEFF');
-      sb.writeln('تقرير اللعبة $_activeFilter (${fmt(range.from)} - ${fmt(range.to)})');
+      sb.writeln(
+          'تقرير اللعبة $_activeFilter (${fmt(range.from)} - ${fmt(range.to)})');
       sb.writeln('');
 
       final revenue = invoices.fold<double>(0, (s, i) => s + i.total);
       final expenseTotal = expenses.fold<double>(0, (s, e) => s + e.amount);
       final count = invoices.length;
-      final gameCount =
-          invoices.where((i) => i.sessionId != null).fold<double>(0, (s, i) => s + i.total);
+      final gameCount = invoices
+          .where((i) => i.sessionId != null)
+          .fold<double>(0, (s, i) => s + i.total);
       final cafeCount = invoices
           .where((i) => i.sessionId == null)
           .fold<double>(0, (s, i) => s + i.total);
@@ -99,12 +105,12 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
       sb.writeln('إيراد الألعاب,${gameCount.toStringAsFixed(2)}');
       sb.writeln('إيراد الكافيه,${cafeCount.toStringAsFixed(2)}');
       sb.writeln('إجمالي المصروفات,${expenseTotal.toStringAsFixed(2)}');
-      sb.writeln('الربح (بعد المصروفات),${(revenue - expenseTotal).toStringAsFixed(2)}');
+      sb.writeln(
+          'الربح (بعد المصروفات),${(revenue - expenseTotal).toStringAsFixed(2)}');
       sb.writeln('');
 
       sb.writeln('فواتير');
-      sb.writeln(
-          'رقم الفاتورة,التاريخ,النوع,الإجمالي,الخصم,نقدي,كارت,الموظف');
+      sb.writeln('رقم الفاتورة,التاريخ,النوع,الإجمالي,الخصم,نقدي,كارت,الموظف');
       for (final i in invoices) {
         final type = i.sessionId != null ? 'ألعاب' : 'كافيه';
         sb.writeln(
@@ -129,8 +135,8 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
             '${fmt(e.createdAt)},${csvCell(e.category)},${csvCell(e.description ?? '')},${e.amount.toStringAsFixed(2)}');
       }
 
-      final dir = Directory(
-          '${Platform.environment['USERPROFILE'] ?? '.'}\\Documents');
+      final dir =
+          Directory('${Platform.environment['USERPROFILE'] ?? '.'}\\Documents');
       if (!dir.existsSync()) dir.createSync(recursive: true);
       final stamp = DateTime.now()
           .toIso8601String()
@@ -145,8 +151,8 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
         content: Text('تم حفظ التقرير: $path'),
         action: SnackBarAction(
           label: 'فتح الملف',
-          onPressed: () => Process.start(
-              'explorer', ['/select,', path]).ignore(),
+          onPressed: () =>
+              Process.start('explorer', ['/select,', path]).ignore(),
         ),
       ));
     } catch (e) {
@@ -244,13 +250,18 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
     final todayInvoices = ref.watch(todayInvoicesProvider).value ?? [];
     final todayExpenses = ref.watch(todayExpensesProvider).value ?? [];
     final revenue = todayInvoices.fold<double>(0, (sum, i) => sum + i.total);
-    final expenseTotal = todayExpenses.fold<double>(0, (sum, e) => sum + e.amount);
+    final expenseTotal =
+        todayExpenses.fold<double>(0, (sum, e) => sum + e.amount);
     // Profit is ALWAYS revenue minus expenses (spec: "الربح بيتحسب بعد
     // الطرح المصروفات من الايراد").
     final profit = revenue - expenseTotal;
 
     return LayoutBuilder(builder: (context, constraints) {
-      final columns = constraints.maxWidth > 1200 ? 5 : constraints.maxWidth > 700 ? 3 : 2;
+      final columns = constraints.maxWidth > 1200
+          ? 5
+          : constraints.maxWidth > 700
+              ? 3
+              : 2;
       return GridView.count(
         crossAxisCount: columns,
         shrinkWrap: true,
@@ -354,13 +365,16 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
               child: Row(
                 children: [
                   Text('${i + 1}',
-                      style: const TextStyle(color: AppColors.textTertiary, fontSize: 12)),
+                      style: const TextStyle(
+                          color: AppColors.textTertiary, fontSize: 12)),
                   const SizedBox(width: AppSpacing.sm),
                   Expanded(
                       child: Text(products[i].$1,
-                          style: const TextStyle(color: AppColors.textPrimary, fontSize: 13))),
+                          style: const TextStyle(
+                              color: AppColors.textPrimary, fontSize: 13))),
                   Text('${products[i].$2} قطعة',
-                      style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+                      style: const TextStyle(
+                          color: AppColors.textSecondary, fontSize: 12)),
                 ],
               ),
             ),
@@ -416,7 +430,8 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                   SizedBox(
                       width: 90,
                       child: Text(name,
-                          style: const TextStyle(color: AppColors.textSecondary, fontSize: 12))),
+                          style: const TextStyle(
+                              color: AppColors.textSecondary, fontSize: 12))),
                   Expanded(
                     child: ClipRRect(
                       borderRadius: AppRadius.smallR,
@@ -436,7 +451,8 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                   ),
                   const SizedBox(width: AppSpacing.sm),
                   Text('${(ratio * 100).toStringAsFixed(0)}%',
-                      style: const TextStyle(color: AppColors.textPrimary, fontSize: 12)),
+                      style: const TextStyle(
+                          color: AppColors.textPrimary, fontSize: 12)),
                 ],
               ),
             ),

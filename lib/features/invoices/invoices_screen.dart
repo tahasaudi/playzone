@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/database/app_database.dart';
 import '../../data/repositories/invoice_repository.dart';
@@ -74,8 +75,7 @@ class _InvoiceRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('فاتورة #${invoice.id}',
-                    style: AppTypography.cardTitle),
+                Text('فاتورة #${invoice.id}', style: AppTypography.cardTitle),
                 const SizedBox(height: 2),
                 Text(_formatDate(invoice.createdAt),
                     style: const TextStyle(
@@ -110,6 +110,5 @@ class _InvoiceRow extends StatelessWidget {
     );
   }
 
-  String _formatDate(DateTime d) =>
-      '${d.day}/${d.month}/${d.year} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+  String _formatDate(DateTime d) => stampOf(d);
 }

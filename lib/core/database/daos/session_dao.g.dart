@@ -10,6 +10,7 @@ mixin _$SessionDaoMixin on DatabaseAccessor<AppDatabase> {
   $EmployeesTable get employees => attachedDatabase.employees;
   $PackagesTable get packages => attachedDatabase.packages;
   $SessionsTable get sessions => attachedDatabase.sessions;
+  $SessionEventsTable get sessionEvents => attachedDatabase.sessionEvents;
   SessionDaoManager get managers => SessionDaoManager(this);
 }
 
@@ -28,4 +29,6 @@ class SessionDaoManager {
       $$PackagesTableTableManager(_db.attachedDatabase, _db.packages);
   $$SessionsTableTableManager get sessions =>
       $$SessionsTableTableManager(_db.attachedDatabase, _db.sessions);
+  $$SessionEventsTableTableManager get sessionEvents =>
+      $$SessionEventsTableTableManager(_db.attachedDatabase, _db.sessionEvents);
 }

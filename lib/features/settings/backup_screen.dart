@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/permissions/permission_service.dart';
@@ -46,7 +47,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       await action();
       await _refresh();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(success)));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(success)));
       }
     } catch (e) {
       if (mounted) {
@@ -246,6 +248,4 @@ class _BackupRow extends StatelessWidget {
   }
 }
 
-String _fmtDateTime(DateTime d) =>
-    '${d.day}/${d.month}/${d.year} ${d.hour.toString().padLeft(2, '0')}:'
-    '${d.minute.toString().padLeft(2, '0')}';
+String _fmtDateTime(DateTime d) => stampOf(d);

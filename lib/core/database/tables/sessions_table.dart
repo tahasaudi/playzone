@@ -21,18 +21,15 @@ import 'packages_table.dart';
 class Sessions extends Table {
   IntColumn get id => integer().autoIncrement()();
   IntColumn get deviceId => integer().references(Devices, #id)();
-  IntColumn get customerId =>
-      integer().nullable().references(Customers, #id)();
+  IntColumn get customerId => integer().nullable().references(Customers, #id)();
 
   /// The employee who opened/is running this session — used to
   /// attribute revenue per employee (spec: daily revenue by employee).
-  IntColumn get employeeId =>
-      integer().nullable().references(Employees, #id)();
+  IntColumn get employeeId => integer().nullable().references(Employees, #id)();
 
   DateTimeColumn get startTime => dateTime().withDefault(currentDateAndTime)();
   DateTimeColumn get pausedAt => dateTime().nullable()();
-  RealColumn get totalPausedMinutes =>
-      real().withDefault(const Constant(0))();
+  RealColumn get totalPausedMinutes => real().withDefault(const Constant(0))();
 
   // single | multi — which rate the CURRENT segment bills at.
   TextColumn get mode => text().withDefault(const Constant('single'))();
@@ -41,6 +38,16 @@ class Sessions extends Table {
   /// one). The live/final cost is always accumulatedCost + whatever the
   /// current segment has accrued so far.
   RealColumn get accumulatedCost => real().withDefault(const Constant(0))();
+
+  /// What this sitting billed at each rate, kept apart from
+  /// [accumulatedCost] so the detail sheet can say what the single play
+  /// and the multi play each cost instead of only their sum.
+  ///
+  /// Folded forward by the same freeze that stops a segment — never
+  /// recomputed from history — so the two always add to
+  /// [accumulatedCost] exactly, with no rounding to explain.
+  RealColumn get singleCost => real().withDefault(const Constant(0))();
+  RealColumn get multiCost => real().withDefault(const Constant(0))();
 
   /// When the CURRENT segment began. Null while paused (no segment is
   /// running, so nothing is accruing cost).
@@ -66,8 +73,7 @@ class Sessions extends Table {
   /// Set when the session was started "from a package" — billing then
   /// becomes the flat [fixedPrice] instead of per-second segment
   /// accrual (segmentStartAt stays null for the whole session).
-  IntColumn get packageId =>
-      integer().nullable().references(Packages, #id)();
+  IntColumn get packageId => integer().nullable().references(Packages, #id)();
   RealColumn get fixedPrice => real().nullable()();
 
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();

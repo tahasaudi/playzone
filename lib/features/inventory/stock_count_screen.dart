@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/database/app_database.dart';
@@ -9,9 +10,7 @@ import '../../core/auth/current_employee_provider.dart';
 import '../../core/permissions/permission_service.dart';
 import '../../data/repositories/stock_count_repository.dart';
 
-String _two(int n) => n.toString().padLeft(2, '0');
-
-String _fmt(DateTime d) => '${_two(d.day)}/${_two(d.month)} ${_two(d.hour)}:${_two(d.minute)}';
+String _fmt(DateTime d) => stampOf(d);
 
 /// Periodic inventory ("جرد دوري"). Start a count: every product's
 /// system quantity is snapshotted, you enter what's actually there per
@@ -37,9 +36,8 @@ class _StockCountScreenState extends ConsumerState<StockCountScreen> {
 
   Future<void> _apply() async {
     setState(() => _applying = true);
-    final applied = await ref
-        .read(stockCountRepositoryProvider)
-        .applyCount(_openCountId!);
+    final applied =
+        await ref.read(stockCountRepositoryProvider).applyCount(_openCountId!);
     setState(() {
       _applying = false;
       _openCountId = null;
@@ -212,19 +210,23 @@ class _CountEditorState extends ConsumerState<_CountEditor> {
       child: itemsAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(
-            child: Text('خطأ: $e', style: const TextStyle(color: AppColors.danger))),
+            child: Text('خطأ: $e',
+                style: const TextStyle(color: AppColors.danger))),
         data: (items) {
           // Only the rows the cashier typed a number into count as a real
           // difference; the rest still show their stored quantity.
           final counted = items.where((i) => i.counted).toList();
-          final totalDiff = counted.fold<int>(0, (sum, i) => sum + i.difference);
+          final totalDiff =
+              counted.fold<int>(0, (sum, i) => sum + i.difference);
           final hasDiff = counted.any((i) => i.difference != 0);
 
           final needle = _search.text.trim();
           final visible = needle.isEmpty
               ? items
               : items
-                  .where((i) => i.productName.toLowerCase().contains(needle.toLowerCase()))
+                  .where((i) => i.productName
+                      .toLowerCase()
+                      .contains(needle.toLowerCase()))
                   .toList();
 
           return Column(
@@ -245,8 +247,8 @@ class _CountEditorState extends ConsumerState<_CountEditor> {
                     child: TextField(
                       controller: _search,
                       onChanged: (_) => setState(() {}),
-                      style:
-                          const TextStyle(color: AppColors.textPrimary, fontSize: 13),
+                      style: const TextStyle(
+                          color: AppColors.textPrimary, fontSize: 13),
                       decoration: InputDecoration(
                         hintText: 'دوّر على صنف واحد…',
                         hintStyle: const TextStyle(
@@ -299,8 +301,8 @@ class _CountEditorState extends ConsumerState<_CountEditor> {
                         itemCount: visible.length,
                         separatorBuilder: (_, __) =>
                             const SizedBox(height: AppSpacing.sm),
-                        itemBuilder: (_, i) =>
-                            _CountRow(key: ValueKey(visible[i].id), item: visible[i]),
+                        itemBuilder: (_, i) => _CountRow(
+                            key: ValueKey(visible[i].id), item: visible[i]),
                       ),
               ),
               const SizedBox(height: AppSpacing.md),
@@ -414,8 +416,8 @@ class _CountRowState extends ConsumerState<_CountRow> {
               decoration: InputDecoration(
                 isDense: true,
                 labelText: 'الكمية الفعلية',
-                labelStyle:
-                    const TextStyle(fontSize: 11, color: AppColors.textTertiary),
+                labelStyle: const TextStyle(
+                    fontSize: 11, color: AppColors.textTertiary),
                 counterText: '',
               ),
             ),
@@ -423,8 +425,7 @@ class _CountRowState extends ConsumerState<_CountRow> {
           const SizedBox(width: AppSpacing.md),
           Container(
             width: 86,
-            padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             decoration: BoxDecoration(
               color: color.withOpacity(0.15),
               borderRadius: AppRadius.smallR,
@@ -447,8 +448,7 @@ class _CountRowState extends ConsumerState<_CountRow> {
 }
 
 /// Items of one count session, keyed by countId.
-final stockCountItemsProvider =
-    StreamProvider.autoDispose.family<List<StockCountItemRow>, int>(
-        (ref, countId) {
+final stockCountItemsProvider = StreamProvider.autoDispose
+    .family<List<StockCountItemRow>, int>((ref, countId) {
   return ref.watch(stockCountRepositoryProvider).watchItems(countId);
 });

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/database/app_database.dart';
@@ -67,8 +68,9 @@ class ShiftsScreen extends ConsumerWidget {
                 itemCount: shifts.length,
                 separatorBuilder: (_, __) =>
                     const SizedBox(height: AppSpacing.sm),
-                itemBuilder: (_, i) =>
-                    _ShiftRow(shift: shifts[i], employeeName: names[shifts[i].employeeId]),
+                itemBuilder: (_, i) => _ShiftRow(
+                    shift: shifts[i],
+                    employeeName: names[shifts[i].employeeId]),
               );
             },
           ),
@@ -152,8 +154,8 @@ class _ShiftRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(label,
-            style: const TextStyle(
-                fontSize: 11, color: AppColors.textTertiary)),
+            style:
+                const TextStyle(fontSize: 11, color: AppColors.textTertiary)),
         const SizedBox(height: 2),
         Text('EGP ${value.toStringAsFixed(0)}',
             style: const TextStyle(
@@ -165,6 +167,4 @@ class _ShiftRow extends StatelessWidget {
   }
 }
 
-String _fmtDateTime(DateTime d) =>
-    '${d.day}/${d.month}/${d.year} ${d.hour.toString().padLeft(2, '0')}:'
-    '${d.minute.toString().padLeft(2, '0')}';
+String _fmtDateTime(DateTime d) => stampOf(d);

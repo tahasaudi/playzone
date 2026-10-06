@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/utils/time_format.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/widgets/app_buttons.dart';
 import '../../core/permissions/permission_service.dart';
@@ -183,7 +184,8 @@ class _PackageCard extends ConsumerWidget {
               tooltip: 'تعديل',
               icon: const Icon(Icons.edit_rounded,
                   size: 18, color: AppColors.textSecondary),
-              onPressed: () => _showPackageDialog(context, ref, existing: entry),
+              onPressed: () =>
+                  _showPackageDialog(context, ref, existing: entry),
             ),
             IconButton(
               tooltip: 'حذف',
@@ -243,7 +245,10 @@ class _PackageDialogState extends ConsumerState<_PackageDialog> {
   Future<void> _save() async {
     final price = double.tryParse(_price.text.trim());
     final duration = int.tryParse(_duration.text.trim());
-    if (_name.text.trim().isEmpty || _typeId == null || price == null || duration == null) {
+    if (_name.text.trim().isEmpty ||
+        _typeId == null ||
+        price == null ||
+        duration == null) {
       setState(() => _error = 'اكمل كل الحقول بقيم صحيحة');
       return;
     }
@@ -284,7 +289,8 @@ class _PackageDialogState extends ConsumerState<_PackageDialog> {
         const SizedBox(height: AppSpacing.md),
         typesAsync.when(
           loading: () => const LinearProgressIndicator(),
-          error: (e, _) => Text('$e', style: const TextStyle(color: AppColors.danger)),
+          error: (e, _) =>
+              Text('$e', style: const TextStyle(color: AppColors.danger)),
           data: (types) => _dropdown<int>(
             value: _typeId,
             hint: 'نوع الجهاز',
@@ -316,8 +322,7 @@ class _OffersTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final offersAsync = ref.watch(allOffersProvider);
-    final activeNow =
-        ref.watch(currentActiveOfferProvider).valueOrNull;
+    final activeNow = ref.watch(currentActiveOfferProvider).valueOrNull;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -409,8 +414,7 @@ class _OfferCard extends ConsumerWidget {
               children: [
                 Text(offer.name, style: AppTypography.cardTitle),
                 const SizedBox(height: 2),
-                Text(
-                    'من ${_hour(offer.startHour)} إلى ${_hour(offer.endHour)}',
+                Text('من ${_hour(offer.startHour)} إلى ${_hour(offer.endHour)}',
                     style: const TextStyle(
                         fontSize: 12, color: AppColors.textTertiary)),
               ],
@@ -530,9 +534,13 @@ class _OfferDialogState extends ConsumerState<_OfferDialog> {
         const SizedBox(height: AppSpacing.md),
         Row(
           children: [
-            Expanded(child: _hourDropdown('من', _startHour, (v) => setState(() => _startHour = v))),
+            Expanded(
+                child: _hourDropdown(
+                    'من', _startHour, (v) => setState(() => _startHour = v))),
             const SizedBox(width: AppSpacing.md),
-            Expanded(child: _hourDropdown('إلى', _endHour, (v) => setState(() => _endHour = v))),
+            Expanded(
+                child: _hourDropdown(
+                    'إلى', _endHour, (v) => setState(() => _endHour = v))),
           ],
         ),
         const SizedBox(height: AppSpacing.md),
@@ -595,7 +603,8 @@ class _DialogShell extends StatelessWidget {
             if (error != null) ...[
               const SizedBox(height: AppSpacing.md),
               Text(error!,
-                  style: const TextStyle(color: AppColors.danger, fontSize: 13)),
+                  style:
+                      const TextStyle(color: AppColors.danger, fontSize: 13)),
             ],
             const SizedBox(height: AppSpacing.xl),
             Row(
@@ -669,8 +678,7 @@ Widget _textField(TextEditingController controller, String hint) {
       isDense: true,
       filled: true,
       fillColor: AppColors.glassFill,
-      contentPadding:
-          const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
       border: OutlineInputBorder(
         borderRadius: AppRadius.smallR,
         borderSide: const BorderSide(color: AppColors.glassBorder),
@@ -705,7 +713,8 @@ Widget _dropdown<T>({
         value: value,
         isExpanded: true,
         hint: Text(hint,
-            style: const TextStyle(color: AppColors.textTertiary, fontSize: 13)),
+            style:
+                const TextStyle(color: AppColors.textTertiary, fontSize: 13)),
         dropdownColor: AppColors.bgElevated,
         style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
         items: items,
@@ -715,4 +724,4 @@ Widget _dropdown<T>({
   );
 }
 
-String _hour(int hour) => '${hour.toString().padLeft(2, '0')}:00';
+String _hour(int hour) => hourOf(hour);
