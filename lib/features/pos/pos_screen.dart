@@ -49,6 +49,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
   String? _activeCategory;
   final List<CartLine> _cart = [];
   CustomerRow? _customer;
+  // الدفع الحالي: false = كاش، true = البيع كله على حساب العميل (الأجل).
+  bool _payOnAccount = false;
   final TextEditingController _searchController = TextEditingController();
   String _search = '';
 
@@ -63,7 +65,13 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       context: context,
       builder: (_) => const _CustomerPickerDialog(),
     );
-    if (chosen != null) setState(() => _customer = chosen);
+    if (chosen != null) {
+      setState(() {
+        _customer = chosen;
+        // الأجل مش متاح إلا لعميل مفعّل عليه من صفحة العملاء.
+        if (!chosen.creditEnabled) _payOnAccount = false;
+      });
+    }
   }
 
   void _addToCart(ProductWithCategory p) {
@@ -86,15 +94,34 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     });
   }
 
-  double _lineTotal(CartLine line, List<ProductWithCategory> all) {
+  /// سعر الوحدة الفعلي: السعر الخاص بتاع العميل لو موجود، وإلا سعر البيع
+  /// العادي. السعر الخاص بيتخزن في الفاتورة زيه، مش مجرد عرض.
+  double _priceFor(ProductWithCategory p, Map<int, double> specialMap) {
+    final special = specialMap[p.product.id];
+    return special ?? p.product.sellingPrice;
+  }
+
+  double _lineTotal(
+      CartLine line, List<ProductWithCategory> all, Map<int, double> specialMap) {
     // The product may have been deleted from the catalogue mid-session
     // (soft delete) — price it at 0 rather than crashing the whole POS.
     final match = all.where((p) => p.product.id == line.productId);
     if (match.isEmpty) return 0;
-    return match.first.product.sellingPrice * line.qty;
+    return _priceFor(match.first, specialMap) * line.qty;
   }
 
-  Future<void> _checkout(List<ProductWithCategory> allProducts) async {
+  Future<void> _checkout(
+      List<ProductWithCategory> allProducts, Map<int, double> specialMap) async {
+    // الأجل يحتاج عميل مفعّل عليه — لو اتساب العميل أو الأجل مغلق، نوقف
+    // قبل ما نخسّر أي حاجة.
+    if (_payOnAccount &&
+        (_customer == null || !_customer!.creditEnabled)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('فعّل الأجل للعميل الأول من صفحة العملاء')));
+      }
+      return;
+    }
     // Skip lines whose product was removed while it sat in the cart.
     final lines = <InvoiceLineInput>[];
     for (final line in _cart) {
@@ -104,7 +131,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       lines.add(InvoiceLineInput(
         description: match.product.name,
         quantity: line.qty,
-        unitPrice: match.product.sellingPrice,
+        unitPrice: _priceFor(match, specialMap),
         productId: line.productId,
       ));
     }
@@ -116,20 +143,34 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       }
       return;
     }
+    final total = lines.fold<double>(0, (sum, l) => sum + l.total);
 
-    await ref.read(invoiceRepositoryProvider).createInvoice(
-          lines: lines,
-          customerId: _customer?.id,
-          employeeId: ref.read(currentEmployeeProvider)?.id,
-        );
+    try {
+      await ref.read(invoiceRepositoryProvider).createInvoice(
+            lines: lines,
+            customerId: _customer?.id,
+            employeeId: ref.read(currentEmployeeProvider)?.id,
+            paidOnAccount: _payOnAccount ? total : 0,
+          );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+      return;
+    }
 
+    final paidOnAccount = _payOnAccount;
     if (mounted) {
       setState(() {
         _cart.clear();
         _customer = null;
+        _payOnAccount = false;
       });
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('تم إتمام البيع بنجاح')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(paidOnAccount
+              ? 'تم تسجيل البيع على حساب العميل'
+              : 'تم إتمام البيع بنجاح')));
     }
   }
 
@@ -143,6 +184,15 @@ class _PosScreenState extends ConsumerState<PosScreen> {
           child: Text('خطأ في تحميل المنتجات: $e',
               style: const TextStyle(color: AppColors.danger))),
       data: (allProducts) {
+        // الأسعار الخاصة بتاع العميل المرفوع (سعر لكل منتج) — الجريد
+        // والسلة يتحولوا ليها طول ما العميل ده مربوط.
+        final specialPricesAsync = _customer == null
+            ? null
+            : ref.watch(specialPricesForCustomerProvider(_customer!.id));
+        final specialPrices = specialPricesAsync?.value ?? const [];
+        final specialMap = {
+          for (final s in specialPrices) s.productId: s.price
+        };
         final byCategory = <String, List<ProductWithCategory>>{};
         for (final p in allProducts) {
           byCategory.putIfAbsent(p.category.name, () => []).add(p);
@@ -169,8 +219,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
           _activeCategory = categories.isEmpty ? null : categories.first;
         }
         final products = byCategory[_activeCategory] ?? const [];
-        final subtotal =
-            _cart.fold<double>(0, (sum, l) => sum + _lineTotal(l, allProducts));
+        final subtotal = _cart.fold<double>(
+            0, (sum, l) => sum + _lineTotal(l, allProducts, specialMap));
 
         return Column(
           children: [
@@ -256,8 +306,9 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                             mainAxisSpacing: AppSpacing.sm,
                             crossAxisSpacing: AppSpacing.sm,
                             childAspectRatio: 1.15,
-                            children:
-                                products.map((p) => _productCard(p)).toList(),
+                            children: products
+                                .map((p) => _productCard(p, specialMap))
+                                .toList(),
                           ),
                   ),
                   const SizedBox(width: AppSpacing.sm),
@@ -284,8 +335,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                                 : SingleChildScrollView(
                                     child: Column(
                                       children: _cart
-                                          .map((l) =>
-                                              _cartLineWidget(l, allProducts))
+                                          .map((l) => _cartLineWidget(
+                                              l, allProducts, specialMap))
                                           .toList(),
                                     ),
                                   ),
@@ -306,15 +357,26 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                               ),
                               child: Row(
                                 children: [
-                                  const Icon(Icons.person_rounded,
+                                  Icon(
+                                      _customer == null
+                                          ? Icons.person_add_alt_1_rounded
+                                          : Icons.person_rounded,
                                       size: 14,
-                                      color: AppColors.accentSecondary),
+                                      color: _customer != null &&
+                                              _customer!.creditEnabled
+                                          ? AppColors.accentPrimary
+                                          : AppColors.accentSecondary),
                                   const SizedBox(width: 6),
                                   Expanded(
                                     child: Text(
                                       _customer == null
                                           ? 'ربط بعميل'
-                                          : '${_customer!.name} · ${_customer!.loyaltyPoints}',
+                                          : _customer!.creditEnabled &&
+                                                  _customer!.creditBalance > 0
+                                              ? '${_customer!.name} · عليه ${_customer!.creditBalance.toStringAsFixed(0)} ج'
+                                              : _customer!.creditEnabled
+                                                  ? '${_customer!.name} · أجل'
+                                                  : _customer!.name,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
                                           fontSize: 11,
@@ -325,8 +387,10 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                                   ),
                                   if (_customer != null)
                                     GestureDetector(
-                                      onTap: () =>
-                                          setState(() => _customer = null),
+                                      onTap: () => setState(() {
+                                        _customer = null;
+                                        _payOnAccount = false;
+                                      }),
                                       child: const Icon(Icons.close_rounded,
                                           size: 12,
                                           color: AppColors.textTertiary),
@@ -338,13 +402,50 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                           const SizedBox(height: AppSpacing.sm),
                           _totalRow('الإجمالي', subtotal, emphasize: true),
                           const SizedBox(height: AppSpacing.sm),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: _paymentChip(
+                                  label: 'كاش',
+                                  icon: Icons.payments_rounded,
+                                  active: !_payOnAccount,
+                                  onTap: () =>
+                                      setState(() => _payOnAccount = false),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: _paymentChip(
+                                  label: 'على الحساب',
+                                  icon: Icons.account_balance_wallet_rounded,
+                                  active: _payOnAccount,
+                                  enabled: _customer != null &&
+                                      _customer!.creditEnabled,
+                                  onTap: () {
+                                    if (_customer == null ||
+                                        !_customer!.creditEnabled) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(const SnackBar(
+                                              content: Text(
+                                                  'اربط العميل الأول وفعّل له الأجل من صفحة العملاء')));
+                                      return;
+                                    }
+                                    setState(() => _payOnAccount = true);
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: AppSpacing.sm),
                           PrimaryButton(
-                            label: 'الدفع',
-                            icon: Icons.payment_rounded,
+                            label: _payOnAccount ? 'تسجيل على الحساب' : 'الدفع',
+                            icon: _payOnAccount
+                                ? Icons.account_balance_wallet_rounded
+                                : Icons.payment_rounded,
                             expand: true,
                             onPressed: _cart.isEmpty
                                 ? null
-                                : () => _checkout(allProducts),
+                                : () => _checkout(allProducts, specialMap),
                           ),
                         ],
                       ),
@@ -404,9 +505,11 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     );
   }
 
-  Widget _productCard(ProductWithCategory p) {
+  Widget _productCard(ProductWithCategory p, Map<int, double> specialMap) {
     final outOfStock = p.isOutOfStock;
     final icon = _productIcons[p.product.name] ?? Icons.local_cafe_rounded;
+    final unitPrice = _priceFor(p, specialMap);
+    final isSpecial = specialMap.containsKey(p.product.id);
     return Opacity(
       opacity: outOfStock ? 0.5 : 1,
       child: GlassCard(
@@ -419,9 +522,24 @@ class _PosScreenState extends ConsumerState<PosScreen> {
             const SizedBox(height: AppSpacing.sm),
             Text(p.product.name, style: AppTypography.cardTitle),
             const SizedBox(height: 4),
-            Text('EGP ${p.product.sellingPrice.toStringAsFixed(0)}',
-                style: const TextStyle(
-                    color: AppColors.textSecondary, fontSize: 13)),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (isSpecial) ...[
+                  const Icon(Icons.star_rounded,
+                      size: 12, color: AppColors.warning),
+                  const SizedBox(width: 3),
+                ],
+                Text('EGP ${unitPrice.toStringAsFixed(0)}',
+                    style: TextStyle(
+                        color: isSpecial
+                            ? AppColors.accentPrimary
+                            : AppColors.textSecondary,
+                        fontSize: 13,
+                        fontWeight:
+                            isSpecial ? FontWeight.w700 : FontWeight.w400)),
+              ],
+            ),
             const SizedBox(height: 2),
             Text(
               outOfStock ? 'غير متاح' : 'متوفر: ${p.product.stockQuantity}',
@@ -436,7 +554,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     );
   }
 
-  Widget _cartLineWidget(CartLine line, List<ProductWithCategory> all) {
+  Widget _cartLineWidget(
+    CartLine line, List<ProductWithCategory> all, Map<int, double> specialMap) {
     final match = all.where((p) => p.product.id == line.productId).firstOrNull;
     if (match == null) {
       return Padding(
@@ -452,6 +571,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
         ),
       );
     }
+    final unitPrice = _priceFor(match, specialMap);
+    final isSpecial = specialMap.containsKey(match.product.id);
     // The cashier should always see WHICH category the item came from and
     // what a single unit costs — not just the name and the line total.
     return Padding(
@@ -462,18 +583,34 @@ class _PosScreenState extends ConsumerState<PosScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(match.product.name,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary)),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(match.product.name,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.textPrimary)),
+                    ),
+                    if (isSpecial) ...[
+                      const SizedBox(width: 3),
+                      const Icon(Icons.star_rounded,
+                          size: 11, color: AppColors.warning),
+                    ],
+                  ],
+                ),
                 const SizedBox(height: 1),
                 Text(
-                  '${match.category.name} · EGP ${match.product.sellingPrice.toStringAsFixed(2)}',
+                  '${match.category.name} · EGP ${unitPrice.toStringAsFixed(2)}',
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 10, color: AppColors.textTertiary),
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: isSpecial
+                          ? AppColors.accentPrimary
+                          : AppColors.textTertiary,
+                      fontWeight:
+                          isSpecial ? FontWeight.w600 : FontWeight.w400),
                 ),
               ],
             ),
@@ -491,7 +628,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
           _qtyButton(Icons.add, () => _changeQty(line, 1)),
           SizedBox(
             width: 54,
-            child: Text('EGP ${_lineTotal(line, all).toStringAsFixed(0)}',
+            child: Text(
+                'EGP ${_lineTotal(line, all, specialMap).toStringAsFixed(0)}',
                 textAlign: TextAlign.end,
                 style: const TextStyle(
                     color: AppColors.textPrimary,
@@ -533,6 +671,57 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                 fontWeight: FontWeight.w700,
                 color: AppColors.textPrimary)),
       ],
+    );
+  }
+
+  /// كاش / على الحساب — اختيار طريقة الدفع جوه شاشة البيع. [enabled] بيأثر
+  /// على الشكل بس؛ الضغطة واخدة على الاختيار الغلط بتوضح السبب.
+  Widget _paymentChip({
+    required String label,
+    required IconData icon,
+    required bool active,
+    required VoidCallback onTap,
+    bool enabled = true,
+  }) {
+    final color = active
+        ? (label == 'على الحساب'
+            ? AppColors.accentPrimary
+            : AppColors.accentSecondary)
+        : AppColors.textSecondary;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+        decoration: BoxDecoration(
+          color: active
+              ? AppColors.accentPrimary.withOpacity(0.15)
+              : AppColors.glassFill,
+          borderRadius: AppRadius.smallR,
+          border: Border.all(
+              color: active
+                  ? AppColors.glassBorderPurple
+                  : AppColors.glassBorder),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon,
+                size: 13,
+                color: enabled ? color : AppColors.textTertiary),
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: enabled ? color : AppColors.textTertiary,
+                      fontWeight:
+                          active ? FontWeight.w700 : FontWeight.w400)),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

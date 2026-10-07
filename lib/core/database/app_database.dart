@@ -8,6 +8,8 @@ import 'tables/employees_table.dart';
 import 'tables/device_types_table.dart';
 import 'tables/devices_table.dart';
 import 'tables/customers_table.dart';
+import 'tables/customer_special_prices_table.dart';
+import 'tables/credit_payments_table.dart';
 import 'tables/categories_table.dart';
 import 'tables/products_table.dart';
 import 'tables/sessions_table.dart';
@@ -78,6 +80,8 @@ part 'app_database.g.dart';
     Packages,
     Offers,
     LoyaltySettings,
+    CustomerSpecialPrices,
+    CreditPayments,
     AppSettings,
     Accounts,
     AccountEntries,
@@ -112,7 +116,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 10;
+  int get schemaVersion => 11;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -195,6 +199,7 @@ class AppDatabase extends _$AppDatabase {
           // v8 → v9: fixed-duration sessions (quick 60/30/15/7 buttons),
           // per-row stock-count tracking, and the corrected device roster
           // (3 × PS4 + 3 × PS5, numbered 1..6).
+          // (3 × PS4 + 3 × PS5, numbered 1..6).
           if (from < 9) {
             await m.addColumn(sessions, sessions.plannedMinutes);
             await m.addColumn(sessions, sessions.timeUpAt);
@@ -252,6 +257,18 @@ class AppDatabase extends _$AppDatabase {
                 singleCost: Value(s.accumulatedCost),
               ));
             }
+          }
+          // v10 → v11: الأجل (الدفع على الحساب) والأسعار الخاصة.
+          // Customers carry credit flags/limit/balance; invoices carry the
+          // on-account slice of the tender; two new tables journal the
+          // collections and the per-customer special product prices.
+          if (from < 11) {
+            await m.addColumn(customers, customers.creditEnabled);
+            await m.addColumn(customers, customers.creditLimit);
+            await m.addColumn(customers, customers.creditBalance);
+            await m.addColumn(invoices, invoices.paidOnAccount);
+            await m.createTable(customerSpecialPrices);
+            await m.createTable(creditPayments);
           }
         },
       );

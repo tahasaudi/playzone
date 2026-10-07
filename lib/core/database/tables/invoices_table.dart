@@ -32,5 +32,10 @@ class Invoices extends Table {
   RealColumn get paidCash => real().withDefault(const Constant(0))();
   RealColumn get paidCard => real().withDefault(const Constant(0))();
 
+  /// المبلغ اللي اتضاف على حساب العميل (الأجل) بدل ما يتقبض كاش/كارت.
+  /// paymentMethod becomes 'credit' when the whole total is on account,
+  /// or 'mixed' when a part was handed over now and the rest deferred.
+  RealColumn get paidOnAccount => real().withDefault(const Constant(0))();
+
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
 }

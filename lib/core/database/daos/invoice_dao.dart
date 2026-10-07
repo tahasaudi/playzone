@@ -104,7 +104,13 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
   /// customer totals and loyalty points stay consistent everywhere.
   ///
   /// [paidCash]/[paidCard] split the tender — if both are zero the whole
-  /// [total] defaults to cash (legacy callers). [redeemedPoints] spends
+  /// [total] defaults to cash (legacy callers). [paidOnAccount] is the
+  /// slice added to a customer's الأجل instead of being collected now;
+  /// when it covers the whole total the invoice reads as 'credit', when it
+  /// only covers part the invoice reads as 'mixed'. Charging on account
+  /// requires a credit-enabled customer and never pushes the resulting
+  /// balance over their limit (raised any time from the customer card).
+  /// [redeemedPoints] spends
   /// the customer's points against the bill (subtracted from total via
   /// their configured point value); points are always earned on the
   /// final total when a customer is attached.
@@ -124,6 +130,7 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
     int redeemedPoints = 0,
     double paidCash = 0,
     double paidCard = 0,
+    double paidOnAccount = 0,
     bool settled = true,
   }) {
     return transaction(() async {
@@ -134,14 +141,38 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
       final effectiveCash = splitPayment ? paidCash : total;
       final effectiveCard =
           splitPayment ? (paidCard > 0 ? paidCard : 0.0) : 0.0;
-      if (settled && effectiveCash + effectiveCard + 0.001 < total) {
+
+      // Money handed over now plus whatever goes on the customer's account
+      // must cover the total — anything less is refusing to settle it.
+      if (settled &&
+          effectiveCash + effectiveCard + paidOnAccount + 0.001 < total) {
         throw Exception('مبلغ الدفع أقل من الإجمالي المطلوب');
       }
       final paymentMethod = !settled
           ? 'unpaid'
-          : effectiveCard > 0
-              ? (effectiveCash > 0 ? 'mixed' : 'card')
-              : 'cash';
+          : paidOnAccount > 0
+              ? (effectiveCash > 0 || effectiveCard > 0 ? 'mixed' : 'credit')
+              : effectiveCard > 0
+                  ? (effectiveCash > 0 ? 'mixed' : 'card')
+                  : 'cash';
+
+      // A customer can only buy on الأجل if credit is switched on, and the
+      // new balance may not break their limit (0 limit = بدون حد). Enforced
+      // here at the write path, so no future screen can bypass it.
+      if (settled && paidOnAccount > 0 && customerId != null) {
+        final prospective = await (select(customers)
+              ..where((c) => c.id.equals(customerId)))
+            .getSingle();
+        if (!prospective.creditEnabled) {
+          throw Exception('العميل ده عليه الدفع على الحساب مش متاح — فعّله من صفحة العملاء');
+        }
+        if (prospective.creditLimit > 0 &&
+            prospective.creditBalance + paidOnAccount >
+                prospective.creditLimit + 0.001) {
+          throw Exception(
+              'العميل وصل لحد الأجل (${prospective.creditLimit.toStringAsFixed(0)} ج)');
+        }
+      }
 
       final invoiceId = await into(invoices).insert(InvoicesCompanion.insert(
         sessionId: Value(sessionId),
@@ -153,6 +184,7 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
         paymentMethod: Value(paymentMethod),
         paidCash: Value(settled ? effectiveCash : 0),
         paidCard: Value(settled ? effectiveCard : 0),
+        paidOnAccount: Value(settled ? paidOnAccount : 0),
       ));
 
       // Bucket every line by where it came from — the café category for
@@ -219,6 +251,10 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
           totalSpent: Value(customer.totalSpent + total),
           loyaltyPoints:
               Value((customer.loyaltyPoints + netDelta).clamp(0, 1 << 20)),
+          // What went on the account goes on the balance — collections
+          // (سداد) subtract from it later via CustomerDao.
+          creditBalance: Value(
+              customer.creditBalance + (paidOnAccount > 0 ? paidOnAccount : 0)),
           updatedAt: Value(DateTime.now()),
         ));
       }

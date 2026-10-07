@@ -18,6 +18,16 @@ class Customers extends Table {
       text().withDefault(const Constant('Regular'))();
   BoolColumn get isVip => boolean().withDefault(const Constant(false))();
   BoolColumn get active => boolean().withDefault(const Constant(true))();
+
+  /// الأجل: whether this customer may pay on account (الدفع بالآجل).
+  /// Balance is maintained transactionally by InvoiceDao (credit sales)
+  /// and CustomerDao (collections/سداد), never typed by hand.
+  BoolColumn get creditEnabled => boolean().withDefault(const Constant(false))();
+  /// سقف الأجل — 0 means "بدون حد". Editable any time, even if the
+  /// customer has already reached it (the owner raises it when needed).
+  RealColumn get creditLimit => real().withDefault(const Constant(0))();
+  /// المتبقي على العميل — credit sales add, collections subtract.
+  RealColumn get creditBalance => real().withDefault(const Constant(0))();
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
   DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
 

@@ -96,6 +96,8 @@ class _InvoiceRow extends StatelessWidget {
     final (label, color) = switch (invoice.paymentMethod) {
       'card' => ('كارت', AppColors.accentSecondary),
       'mixed' => ('مختلط', AppColors.warning),
+      'credit' => ('أجل', AppColors.accentPrimary),
+      'unpaid' => ('معلق', AppColors.warning),
       _ => ('كاش', AppColors.success),
     };
     return Container(
