@@ -234,7 +234,60 @@ class _AppShellState extends ConsumerState<AppShell> {
       return KeyEventResult.handled;
     }
 
+    // Arrow keys — the counter mouse has no wheel, so ↓ moves the page
+    // down and ↑ up, like a remote control. Never stolen from a text box:
+    // while a field is being typed into, arrows move the caret.
+    if (event.logicalKey == LogicalKeyboardKey.arrowDown ||
+        event.logicalKey == LogicalKeyboardKey.arrowUp) {
+      final focusCtx = FocusManager.instance.primaryFocus?.context;
+      if (focusCtx != null &&
+          focusCtx.findAncestorWidgetOfExactType<EditableText>() != null) {
+        return KeyEventResult.ignored;
+      }
+      final step =
+          60.0 * (event.logicalKey == LogicalKeyboardKey.arrowDown ? 1 : -1);
+      _scrollBy(step);
+      return KeyEventResult.handled;
+    }
+
     return KeyEventResult.ignored;
+  }
+
+  /// Scrolls the panel the staff are looking at. Prefers the scrollable the
+  /// current focus sits inside; when focus is on shell chrome (top bar or
+  /// sidebar) every mounted scrollable moves — exactly one content panel is
+  /// visible at a time, so that is the panel that ends up scrolling.
+  void _scrollBy(double delta) {
+    final focusCtx = FocusManager.instance.primaryFocus?.context;
+    final focused = focusCtx == null ? null : Scrollable.maybeOf(focusCtx);
+    if (focused != null) {
+      _jumpScrollable(focused, delta);
+      return;
+    }
+    context.visitChildElements((element) => _visitScrollables(element, (s) {
+          _jumpScrollable(s, delta);
+        }));
+  }
+
+  void _visitScrollables(
+      Element element, void Function(ScrollableState scrollable) onFound) {
+    if (element.widget is Scrollable) {
+      final state = (element as StatefulElement).state;
+      if (state is ScrollableState) onFound(state);
+    }
+    element.visitChildren((child) => _visitScrollables(child, onFound));
+  }
+
+  void _jumpScrollable(ScrollableState scrollable, double delta) {
+    final position = scrollable.position;
+    final target = position.pixels + delta;
+    if (target < position.minScrollExtent) {
+      position.jumpTo(position.minScrollExtent);
+    } else if (target > position.maxScrollExtent) {
+      position.jumpTo(position.maxScrollExtent);
+    } else {
+      position.jumpTo(target);
+    }
   }
 
   @override

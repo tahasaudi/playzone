@@ -1,10 +1,24 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
 import 'core/theme/app_theme.dart';
 import 'core/tv/tv_display_service.dart';
 import 'features/shell/app_shell.dart';
+
+/// Lets a mouse (or a touchscreen) drag any scrollable panel by pressing and
+/// moving on empty space — the counter mouse has no wheel, so the staff grab
+/// the page the same way they sweep a touchscreen: press, move, it goes down.
+class _DragScrollBehavior extends MaterialScrollBehavior {
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.stylus,
+        PointerDeviceKind.trackpad,
+      };
+}
 
 void main() async {
   // Runs before the first frame, so the screens are never shown mid-release.
@@ -61,6 +75,8 @@ class _PlayZoneAppState extends State<PlayZoneApp> with WidgetsBindingObserver {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark,
       themeMode: ThemeMode.dark,
+      // Press-and-drag on empty space scrolls every panel (wheel-less mouse).
+      scrollBehavior: _DragScrollBehavior(),
       // Arabic RTL by default — flip to LTR when English is selected
       // (see spec section 38, to be wired to a locale provider later).
       locale: const Locale('ar'),
