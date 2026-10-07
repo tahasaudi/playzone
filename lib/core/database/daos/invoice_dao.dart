@@ -138,7 +138,11 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
       final total = (subtotal - discount).clamp(0, double.infinity).toDouble();
 
       final splitPayment = paidCash > 0 || paidCard > 0;
-      final effectiveCash = splitPayment ? paidCash : total;
+      // When nothing is handed over (pure الأجل), the legacy "whole total
+      // defaults to cash" fallback must NOT fire — credit money is not
+      // drawer money, and a 'credit' invoice has to read paidCash = 0.
+      final effectiveCash =
+          (splitPayment || paidOnAccount > 0) ? paidCash : total;
       final effectiveCard =
           splitPayment ? (paidCard > 0 ? paidCard : 0.0) : 0.0;
 
