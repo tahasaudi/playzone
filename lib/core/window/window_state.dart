@@ -62,7 +62,6 @@ class WindowState {
   static const _hwndNotTopmost = -2;
   static const _swpNoMove = 0x0002;
   static const _swpNoSize = 0x0001;
-  static const _swpNoZOrder = 0x0004;
   static const _swpNoOwnerZOrder = 0x0200;
   static const _swpFrameChanged = 0x0020;
   static const _swpShowWindow = 0x0040;
@@ -129,6 +128,10 @@ class WindowState {
           calloc.free(placement);
           _savedPlacement = null;
         }
+        // Leave the top of the screen too. SWP_NOZORDER must NOT be here: it
+        // would swallow the HWND_NOTOPMOST below, the window would stay on top
+        // of every other program after leaving full screen, and Alt+Tab would
+        // "switch" to programs that stay hidden underneath the POS.
         _setWindowPos(
             hwnd,
             _hwndNotTopmost,
@@ -139,7 +142,6 @@ class WindowState {
             _swpFrameChanged |
                 _swpNoMove |
                 _swpNoSize |
-                _swpNoZOrder |
                 _swpNoOwnerZOrder |
                 _swpShowWindow);
       }
