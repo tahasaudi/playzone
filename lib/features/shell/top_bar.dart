@@ -4,6 +4,7 @@ import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/auth/current_employee_provider.dart';
 import '../../core/auth/role_provider.dart';
+import '../../core/window/window_state.dart';
 import '../../data/repositories/employee_repository.dart';
 import '../../data/repositories/notification_repository.dart';
 import 'sidebar.dart';
@@ -30,6 +31,7 @@ class AppTopBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final role = ref.watch(effectiveRoleProvider);
     final employee = ref.watch(currentEmployeeProvider);
+    final fullScreen = ref.watch(windowFullScreenProvider);
 
     return SizedBox(
       height: AppSpacing.topBarHeight,
@@ -67,6 +69,20 @@ class AppTopBar extends ConsumerWidget {
             ),
             const SizedBox(width: AppSpacing.md),
           ],
+
+          // Full screen toggle — F11's mouse twin. The key shortcut only
+          // fires while the app window is focused; a coffee-stained hand on
+          // the counter needs a button it can hit blind.
+          _TopIconButton(
+            icon: fullScreen
+                ? Icons.fullscreen_exit_rounded
+                : Icons.fullscreen_rounded,
+            tooltip: fullScreen
+                ? 'رجوع من الشاشة الكاملة (F11)'
+                : 'شاشة كاملة (F11)',
+            onTap: () => ref.read(windowFullScreenProvider.notifier).toggle(),
+          ),
+          const SizedBox(width: AppSpacing.md),
 
           // Left: page title + subtitle
           Expanded(

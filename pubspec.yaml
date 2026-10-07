@@ -27,6 +27,7 @@ dependencies:
   # Fonts (Cairo/Tajawal for Arabic UI per spec section 31)
   google_fonts: ^8.2.1
   window_manager: ^0.5.2
+  ffi: ^2.2.0
 
 dev_dependencies:
   flutter_test:

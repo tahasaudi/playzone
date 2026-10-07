@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import '../window/window_state.dart';
 import 'hard_lock.dart';
 import 'tv_power_service.dart';
 import 'tv_screen_report.dart';
@@ -244,7 +245,7 @@ class TvDisplayService {
 
   /// Starts the local image server. Idempotent.
   Future<bool> startServer() async {
-if (!tvAllowed) return false;
+    if (!tvAllowed) return false;
     if (_server != null) return true;
     try {
       _server =
@@ -569,7 +570,7 @@ if (!tvAllowed) return false;
   /// TV refuses a real network power-off. One push, no loop, so it is
   /// immediate.
   Future<bool> pushBlack(String tvIp) async {
-if (!tvAllowed) return false;
+    if (!tvAllowed) return false;
     // Claimed before anything else happens, including the blank. From this
     // moment the wall is paid for and dark, and any release already in flight
     // is no longer allowed to take it back.
@@ -640,7 +641,7 @@ if (!tvAllowed) return false;
   /// moves on every TV restart and a screen that is off answers nothing on
   /// the first try. Stops once the endpoint is known.
   Future<void> warmUp({required String tvIp, bool force = false}) async {
-if (!tvAllowed) return;
+    if (!tvAllowed) return;
     _currentTvIp = tvIp;
     if (_warming.contains(tvIp)) return;
     _warming.add(tvIp);
@@ -1687,6 +1688,7 @@ if (!tvAllowed) return;
       'announced=$_announced\n'
       'pushing=${_timer != null}\n'
       'blanked=$_blanked\n'
+      'fullscreen=${WindowState.fullScreen}\n'
       'hasControlUrl=${_controlCache.isNotEmpty}\n'
       'imageBytes=$_imageBytes\n'
       'lastCaptureError=${_lastCaptureError ?? "none"}\n'
