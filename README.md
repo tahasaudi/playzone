@@ -2,25 +2,26 @@
 
 المرحلة دي ربطت المشروع بقاعدة بيانات SQLite حقيقية عن طريق Drift، بدل البيانات الوهمية.
 
-## ⚠️ خطوة إجبارية قبل التشغيل: توليد كود Drift
+## 🚀 برنامج جاهز للتشغيل (من غير أي build)
 
-Drift بيحتاج code generation عشان يشتغل. **لازم تشغّل الأمر ده قبل أي `flutter run`:**
+مش عايز تشغّل Flutter أو أوامر؟ نزّل النسخة الجاهزة:
 
-```bash
-flutter pub get
-dart run build_runner build --delete-conflicting-outputs
-```
+1. افتح مجلد `release/` في الريبو ده (أو سحبه مع ZIP المشروع كله).
+2. فك ضغط `playzone-windows.zip`.
+3. شغّل `playzone.exe` مباشرة — البرنامج كامل (الجزء التنفيذي + كل المكتبات) وجاهز.
 
-الأمر ده هيولّد الملفات دي (متوجودش في المشروع لسه، وده طبيعي):
-- `lib/core/database/app_database.g.dart`
-- `lib/core/database/daos/employee_dao.g.dart`
-- `lib/core/database/daos/device_dao.g.dart`
-- `lib/core/database/daos/customer_dao.g.dart`
-- `lib/core/database/daos/product_dao.g.dart`
+> البرنامج الجاهز بيتولّد من كود السورس نفسه. أي تحديث للميزات بعديها لازم يترفع تاني في `release/`.
 
-من غير الخطوة دي المشروع مش هيعمل build خالص (هتلاقي أخطاء "Target of URI doesn't exist" على ملفات `.g.dart`).
+## ⚠️ خطوة قبل التشغيل من السورس: توليد كود Drift (للمطوّرين بس)
 
-كل مرة تعدّل في أي جدول (table) أو DAO، لازم تعيد تشغيل الأمر ده تاني.
+ملفات `.g.dart` المولّدة **موجودة ومرتفعة في الريبو بالفعل**، فالتشغيل المباشر من السورس هيشتغل من غير أي خطوة إضافية.
+
+- لو عدّلت في أي جدول (table) أو DAO، أعيد تشغيل الأمر ده عشان الكود المولّد يبقى متزامن:
+  ```bash
+  flutter pub get
+  dart run build_runner build --delete-conflicting-outputs
+  ```
+- الملفات المولّدة (زي `lib/core/database/app_database.g.dart` و `daos/*.g.dart`) معمولة **commit** في الريبو، ففي حالة سحبها حديثًا هتلاقيها موجودة.
 
 ## إيه اللي اتغيّر في المرحلة دي
 
