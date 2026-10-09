@@ -375,6 +375,16 @@ class TvDisplayService {
   String? get localAddress => _localAddress ??= _detectLocalAddress();
   String? _localAddress;
 
+  /// True for adapter ranges no café television can ever reach.
+  ///
+  /// This laptop hands back a Wi-Fi Direct / "hosted network" adapter on
+  /// 192.168.137.x *before* the real Wi-Fi card, so "the first 192.168.*"
+  /// named an address outside the café LAN. The image URL then pointed at that
+  /// dead adapter and every wall stayed black while nothing reported a fault.
+  /// Link-local (169.254.*) is dead for the same reason.
+  static bool _isVirtualRange(String ip) =>
+      ip.startsWith('192.168.137.') || ip.startsWith('169.254.');
+
   String? _detectLocalAddress() {
     try {
       final ifaces = NetworkInterface.list(type: InternetAddressType.IPv4);
@@ -383,6 +393,7 @@ class TvDisplayService {
           for (final addr in iface.addresses) {
             if (addr.isLoopback) continue;
             final ip = addr.address;
+            if (_isVirtualRange(ip)) continue;
             if (ip.startsWith('192.168.') || ip.startsWith('10.')) {
               _localAddress ??= ip;
             } else if (RegExp(r'^172\.(1[6-9]|2\d|3[01])\.').hasMatch(ip)) {
@@ -398,7 +409,25 @@ class TvDisplayService {
   }
 
   /// Resolves the LAN address once, asynchronously, and caches it.
-  Future<String?> resolveLocalAddress() async {
+  ///
+  /// When [forHost] is a screen's address, an address on that screen's own /24
+  /// wins: this machine carries several IPv4 addresses, and only the one on
+  /// the café LAN can actually be reached by the television.
+  Future<String?> resolveLocalAddress({String? forHost}) async {
+    if (forHost != null && forHost.contains('.')) {
+      final prefix = '${forHost.split('.').take(3).join('.')}.';
+      try {
+        final list =
+            await NetworkInterface.list(type: InternetAddressType.IPv4);
+        for (final iface in list) {
+          for (final addr in iface.addresses) {
+            if (!addr.isLoopback && addr.address.startsWith(prefix)) {
+              return addr.address;
+            }
+          }
+        }
+      } catch (_) {}
+    }
     if (_localAddress != null) return _localAddress;
     try {
       final list = await NetworkInterface.list(type: InternetAddressType.IPv4);
@@ -407,6 +436,7 @@ class TvDisplayService {
         for (final addr in iface.addresses) {
           if (addr.isLoopback) continue;
           final ip = addr.address;
+          if (_isVirtualRange(ip)) continue;
           if (ip.startsWith('192.168.') || ip.startsWith('10.')) {
             _localAddress ??= ip;
           } else if (RegExp(r'^172\.(1[6-9]|2\d|3[01])\.').hasMatch(ip)) {
@@ -776,7 +806,8 @@ class TvDisplayService {
   /// HTTP 500 because it never saw this PC on the network.
   Future<void> announce() async {
     if (kHardLockWallNetwork) return;
-    final self = await resolveLocalAddress();
+    final self = await resolveLocalAddress(
+        forHost: _currentTvIp.isEmpty ? null : _currentTvIp);
     if (self == null) return;
     try {
       final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
@@ -823,7 +854,7 @@ class TvDisplayService {
     if (_pushing.contains(tvIp)) return false;
     _pushing.add(tvIp);
     try {
-      final self = await resolveLocalAddress();
+      final self = await resolveLocalAddress(forHost: tvIp);
       if (self == null) {
         _lastError = 'ما قدرتش أعرف IP الجهاز على الشبكة';
         return false;
@@ -1618,7 +1649,8 @@ class TvDisplayService {
     String inner;
     switch (action) {
       case 'Browse':
-        final self = await resolveLocalAddress();
+        final self = await resolveLocalAddress(
+            forHost: request.connectionInfo?.remoteAddress.address);
         // A browse response carries the full absolute URL. Left without the
         // scheme it reads as a file name, so a panel that browses and then plays
         // what it found has nothing to dial - and the failure surfaces later as
