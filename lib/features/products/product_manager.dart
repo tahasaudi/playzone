@@ -55,16 +55,23 @@ Future<void> confirmDeleteProduct(
   }
 }
 
-/// Deletes an empty category. The "still has products" case is rejected by
-/// the repository, so the message here is just the guard's own wording.
+/// Deletes a category together with its products (both are soft-deleted, so
+/// nothing is ever lost). The confirmation shows how many products go with it.
 Future<void> confirmDeleteCategory(
     BuildContext context, WidgetRef ref, CategoryRow category) async {
+  final count =
+      await ref.read(productRepositoryProvider).countProductsInCategory(
+            category.id,
+          );
+  if (!context.mounted) return;
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (_) => AlertDialog(
       backgroundColor: AppColors.bgElevated,
       title: const Text('حذف التصنيف'),
-      content: Text('هيتم حذف تصنيف "${category.name}". متابعة؟'),
+      content: Text(count > 0
+          ? 'هيتم حذف تصنيف "${category.name}" و$count منتج اللي جواه هيتشال من قائمة المنتجات والكاشير كمان.\nالفواتير القديمة هتفضل محفوظة. متابعة؟'
+          : 'هيتم حذف تصنيف "${category.name}". متابعة؟'),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(false),

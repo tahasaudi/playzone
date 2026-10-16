@@ -6,6 +6,8 @@ import '../../core/database/app_database.dart';
 import '../../core/database/daos/device_dao.dart';
 import '../../core/database/daos/session_dao.dart';
 import '../../core/database/database_provider.dart';
+import '../../core/tv/tv_mac_index.dart';
+import '../../core/tv/tv_power_service.dart';
 import '../../core/tv/tv_display_service.dart';
 import '../../core/tv/tv_screen_report.dart';
 import '../../data/repositories/device_repository.dart';
@@ -138,6 +140,41 @@ class TvConfig {
   /// the session buttons are concerned — which is what stops the app from
   /// quietly steering a TV nobody can identify.
   List<TvScreenSlot> get slots => [
+        TvScreenSlot(
+            index: 0, ip: _liveIp(ip), name: name, deviceId: deviceId),
+        if (hasSecond)
+          TvScreenSlot(
+            index: 1,
+            ip: _liveIp(secondIp),
+            name: secondName,
+            deviceId: secondDeviceId,
+          ),
+        for (final s in extras)
+          if (!s.isEmpty) s.copyWith(ip: _liveIp(s.ip)),
+      ];
+
+  /// The address a screen answers on right now, following the MAC it kept
+  /// rather than the lease it was handed.
+  ///
+  /// Every consumer of [slots] — the session buttons, the status page, the
+  /// startup sweep — therefore steers the screen wherever it is now, without
+  /// any of them having to know that MACs exist.
+  static String _liveIp(String ip) => TvMacIndex.instance.resolve(ip);
+
+  /// Screens as the rest of the app refers to them.
+  List<TvScreenIdentity> get identities =>
+      slots.map((s) => s.identity).toList(growable: false);
+
+  /// Every screen as the settings page sees it: the configured ones plus any
+  /// half-finished one that was added but not yet given an address.
+  ///
+  /// [slots] hides the empty ones on purpose — the rest of the app must never
+  /// try to talk to a screen with no address. The settings page has the
+  /// opposite job: a screen that was just added has to be visible, or there is
+  /// nowhere to type its address and it can never be finished. It also keeps a
+  /// screen on the page while its IP is being retyped, instead of making the
+  /// panel vanish the moment the field is cleared.
+  List<TvScreenSlot> get editSlots => [
         TvScreenSlot(index: 0, ip: ip, name: name, deviceId: deviceId),
         if (hasSecond)
           TvScreenSlot(
@@ -146,12 +183,8 @@ class TvConfig {
             name: secondName,
             deviceId: secondDeviceId,
           ),
-        ...extras.where((s) => !s.isEmpty),
+        ...extras,
       ];
-
-  /// Screens as the rest of the app refers to them.
-  List<TvScreenIdentity> get identities =>
-      slots.map((s) => s.identity).toList(growable: false);
 
   /// Whether another screen may be added.
   bool get canAddSlot => slots.length < maxSlots;
@@ -233,6 +266,63 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
       slot == 0 ? deviceKey : 'tv_device_id_${slot + 1}';
   static String nameKeyFor(int slot) =>
       slot == 0 ? nameKey : 'tv_name_${slot + 1}';
+
+  /// Where the MACs tied to a screen are remembered.
+  static String macKeyFor(int slot) => slot == 0 ? 'tv_mac' : 'tv_mac_${slot + 1}';
+
+  /// The MACs last tied to a screen, so it stays findable after the router
+  /// hands it a different address. Stored as a comma-separated set rather than
+  /// one value: a panel that moves between Wi-Fi and cable has two, and either
+  /// one is enough to recognise it.
+  Future<String> storedMacsFor(int slot) async =>
+      (await _db.settingsDao.getValue(macKeyFor(slot))) ?? '';
+
+  Future<void> setStoredMacs(int slot, String macs) =>
+      _db.settingsDao.setValue(macKeyFor(slot), macs);
+
+  /// Loads every MAC ↔ address binding the shop knows into [TvMacIndex].
+  ///
+  /// Without this the index has nothing to follow, and a screen whose lease
+  /// moved would be steered at its old address again. It is cheap: all of it is
+  /// already in memory or in the settings table.
+  Future<void> primeMacBindings() async {
+    final index = TvMacIndex.instance;
+    // The shop's own table first, so even a screen the settings have never
+    // named can be resolved by the MAC it advertises.
+    for (final entry in TvPowerService.macsByScreen.entries) {
+      index.bind(entry.key, entry.value);
+    }
+    for (final slot in state.editSlots) {
+      final ip = slot.ip.trim();
+      if (ip.isEmpty) continue;
+      final stored = (await storedMacsFor(slot.index))
+          .split(',')
+          .map((m) => m.trim())
+          .where((m) => m.isNotEmpty);
+      index.bind(ip, {...TvPowerService.knownMacsFor(ip), ...stored});
+    }
+  }
+
+  /// Re-reads the neighbour table and pulls each saved address onto wherever its
+  /// MAC answers now.
+  ///
+  /// This is what keeps the binding MAC-first in practice: the stored address is
+  /// corrected in place, so the settings page, the status blob and every later
+  /// command all agree on where the screen actually is. A screen whose MAC is
+  /// not in the table right now is simply left alone.
+  Future<void> refreshMacBindings() async {
+    if (!state.loaded) return;
+    final table = await TvPowerService.neighbourTable();
+    if (table.isNotEmpty) TvMacIndex.instance.updateTable(table);
+    for (final slot in state.editSlots) {
+      final ip = slot.ip.trim();
+      if (ip.isEmpty) continue;
+      final live = TvMacIndex.instance.resolve(ip);
+      if (live != ip) await saveSlot(slot.index, ip: live);
+    }
+    // Keep the address → MAC bindings in step with what is now saved.
+    await primeMacBindings();
+  }
 
   /// The next storage index free for a new screen.
   ///
@@ -382,6 +472,49 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     await _db.settingsDao
         .setValue(deviceKeyFor(index), updated.deviceId?.toString() ?? 'all');
     return null;
+  }
+
+  /// Puts the screen at [index] onto [deviceId], swapping with whichever screen
+  /// holds that device already.
+  ///
+  /// The device list used to refuse a device another screen followed, which
+  /// left only one route to putting a screen on its own console: unbind the
+  /// other screen first, bind this one, then bind that one again. Nobody found
+  /// that, so a screen stayed on the wrong wall and the page looked mixed up.
+  /// Moving onto an occupied device now sends that device's screen to the one
+  /// this screen is leaving — what "swap these two" actually means — and the
+  /// one-machine-one-screen rule stays true at every step.
+  Future<void> moveDevice(int index, int? deviceId) async {
+    TvScreenSlot? current;
+    for (final s in state.editSlots) {
+      if (s.index == index) {
+        current = s;
+        break;
+      }
+    }
+    final old = current?.deviceId;
+    if (old == deviceId) return;
+
+    // Only a real device can be held by someone else; "no device" is shared.
+    TvScreenSlot? other;
+    if (deviceId != null) {
+      for (final s in state.slots) {
+        if (s.index != index && s.deviceId == deviceId) {
+          other = s;
+          break;
+        }
+      }
+    }
+
+    // Let go of the current device first, so neither the device being taken nor
+    // the one being handed over looks like a clash while both are briefly held.
+    await saveSlot(index, clearDevice: true);
+    if (other != null) {
+      await saveSlot(other.index, deviceId: old, clearDevice: old == null);
+    }
+    if (deviceId != null) {
+      await saveSlot(index, deviceId: deviceId);
+    }
   }
 
   /// Adds an empty screen and returns its storage index, or null when the

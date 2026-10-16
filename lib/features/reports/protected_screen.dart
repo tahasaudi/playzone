@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/accounting/profit.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/widgets/glass_card.dart';
@@ -8,6 +9,8 @@ import '../../core/permissions/app_feature.dart';
 import '../../data/repositories/session_repository.dart';
 import '../../data/repositories/invoice_repository.dart';
 import '../../data/repositories/expense_repository.dart';
+import '../../data/repositories/product_repository.dart';
+import '../../data/repositories/refund_repository.dart';
 import '../../data/repositories/settings_repository.dart';
 import '../../data/repositories/employee_repository.dart';
 import '../../data/repositories/employee_feature_repository.dart';
@@ -183,16 +186,27 @@ class _ProtectedContent extends ConsumerWidget {
     final activeSessions = ref.watch(activeSessionsProvider).value ?? [];
     final todayInvoices = ref.watch(todayInvoicesProvider).value ?? [];
     final todayExpenses = ref.watch(todayExpensesProvider).value ?? [];
+    final todayItems = ref.watch(todayInvoiceItemsProvider).value ?? [];
+    final todayRefunds = ref.watch(todayRefundsProvider).value ?? [];
+    final costByProduct =
+        ref.watch(costByProductProvider).value ?? const <int, double>{};
 
     final gamingRevenue = activeSessions
         .fold<double>(0, (sum, s) => sum + s.liveCost);
     final activeCount =
         activeSessions.where((s) => s.session.status == 'active').length;
 
-    // طلبات الكافيه المرتبطة بالجلسات اللي لسه شغالة — محجوزة هتتحصل.
+    // الإيراد = الفواتير المسدَّدة فقط. فاتورة غير مسدَّدة (unpaid) هي كارت
+    // مفتوح لجلسة لسه شغالة: مش فلوس دخلت الدرج ولا إيراد.
+    final settledRevenue = Accounting.revenue(todayInvoices);
+
+    // طلبات الكافيه المفتوحة على الجلسات اللي لسه شغالة — محجوزة هتتحصل.
+    // بس غير المسدَّدة: أي طلب اتسدّد بالفعل داخل في الإيراد فوق، وجمعه هنا
+    // كان بيحسبه مرتين.
     final ordersOnLiveSessions = <int, double>{};
     for (final inv in todayInvoices) {
       if (inv.sessionId == null) continue;
+      if (Accounting.isSettled(inv)) continue;
       final stillOpen = activeSessions.any((s) => s.session.id == inv.sessionId);
       if (stillOpen) {
         ordersOnLiveSessions[inv.sessionId!] =
@@ -201,11 +215,18 @@ class _ProtectedContent extends ConsumerWidget {
     }
     final ordersTotal = ordersOnLiveSessions.values.fold<double>(0, (a, b) => a + b);
 
-    final todayRevenue = todayInvoices.fold<double>(0, (sum, i) => sum + i.total);
-    final todayExpenseTotal = todayExpenses.fold<double>(0, (sum, e) => sum + e.amount);
-    final todayProfit = todayRevenue - todayExpenseTotal;
-    // المتوقع تحصيله: الإيراد المحصل + اللي اتسجل من الجلسات + طلباتهم.
-    final expectedRevenue = todayRevenue + gamingRevenue + ordersTotal;
+    final todayRevenue = settledRevenue;
+    final todayExpenseTotal = Accounting.expenses(todayExpenses);
+    final todayRefundsTotal = Accounting.refunds(todayRefunds);
+    final todayCogs = Accounting.costOfGoods(todayItems, costByProduct);
+    final todayProfit = Accounting.netProfit(
+      revenue: settledRevenue,
+      costOfGoods: todayCogs,
+      expenses: todayExpenseTotal,
+      refunds: todayRefundsTotal,
+    );
+    // المتوقع = المسدَّد فعلًا + قيمة اللعب الجارية + كروت الجلسات المفتوحة.
+    final expectedRevenue = settledRevenue + gamingRevenue + ordersTotal;
 
     String egp(double v) => 'EGP ${v.toStringAsFixed(0)}';
 
@@ -240,10 +261,28 @@ class _ProtectedContent extends ConsumerWidget {
       if (visible.contains(AppFeature.viewDailyProfit))
         (
           AppFeature.viewDailyProfit,
-          'الربح (بعد المصروفات)',
+          'الربح (بعد التكلفة والمصروفات)',
           egp(todayProfit),
           Icons.savings_rounded,
           AppColors.statusAvailable,
+          'إيراد ${egp(todayRevenue)} − تكلفة ${egp(todayCogs)} − مصروفات ${egp(todayExpenseTotal)} − مرتجعات ${egp(todayRefundsTotal)}',
+        ),
+      if (visible.contains(AppFeature.viewDailyProfit))
+        (
+          AppFeature.viewDailyProfit,
+          'تكلفة البضاعة',
+          egp(todayCogs),
+          Icons.shopping_basket_rounded,
+          AppColors.warning,
+          null,
+        ),
+      if (visible.contains(AppFeature.viewDailyProfit))
+        (
+          AppFeature.viewDailyProfit,
+          'مرتجعات اليوم',
+          egp(todayRefundsTotal),
+          Icons.assignment_return_rounded,
+          AppColors.danger,
           null,
         ),
       if (visible.contains(AppFeature.viewGamingRevenue))
@@ -347,16 +386,28 @@ class _EmployeeRevenueBreakdown extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final invoicesAsync = ref.watch(todayInvoicesProvider);
     final employeesAsync = ref.watch(activeEmployeesProvider);
+    final refundsAsync = ref.watch(todayRefundsProvider);
 
     return invoicesAsync.when(
       loading: () => const SizedBox.shrink(),
       error: (_, __) => const SizedBox.shrink(),
       data: (invoices) {
         final employees = employeesAsync.value ?? [];
+        final refunds = refundsAsync.value ?? [];
         final byEmployee = <int?, double>{};
-        for (final invoice in invoices) {
+        // الإيراد المسدَّد فقط — الكارت المفتوح لجلسة لسه شغالة مش إيراد.
+        for (final invoice in Accounting.settledOnly(invoices)) {
           byEmployee[invoice.employeeId] =
               (byEmployee[invoice.employeeId] ?? 0) + invoice.total;
+        }
+        // المرتجع بيتخصم من الموظف اللي عمل الفاتورة الأصلية (صاحب البيع)،
+        // ولو الفاتورة مش من فواتير النهاردة نرجع لموظف المرتجع نفسه.
+        final ownerOf = {for (final i in invoices) i.id: i.employeeId};
+        for (final r in refunds) {
+          final owner = ownerOf.containsKey(r.invoiceId)
+              ? ownerOf[r.invoiceId]
+              : r.employeeId;
+          byEmployee[owner] = (byEmployee[owner] ?? 0) - r.amount;
         }
         if (byEmployee.isEmpty) return const SizedBox.shrink();
 

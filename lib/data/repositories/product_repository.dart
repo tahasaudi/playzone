@@ -28,6 +28,11 @@ class ProductRepository {
 
   Stream<List<ProductRow>> watchLowStock() => _db.productDao.watchLowStock();
 
+  /// Every product, active or not. تكلفة البضاعة is priced from here because a
+  /// product that has since been deleted still carries a real cost — pricing it
+  /// off the live catalog alone would report sold stock as free.
+  Future<List<ProductRow>> allProducts() => _db.productDao.allProducts();
+
   Future<List<CategoryRow>> allCategories() => _db.productDao.allCategories();
 
   Stream<List<CategoryRow>> watchAllCategories() =>
@@ -137,8 +142,21 @@ class ProductRepository {
     if (clean.length > 50) {
       throw ProductValidationException('اسم التصنيف طويل أوي (الحد 50 حرف)');
     }
-    if (await _db.productDao.categoryByName(clean) != null) {
-      throw ProductValidationException('التصنيف "$clean" موجود بالفعل');
+    final clash = await _db.productDao.categoryByName(clean);
+    if (clash != null) {
+      if (clash.active) {
+        throw ProductValidationException('التصنيف "$clean" موجود بالفعل');
+      }
+      // تصنيف مخفي بنفس الاسم (اتحذف قبل كده) — نرجّعه بدل ما نتصادم مع
+      // قيد UNIQUE(name) على الجدول.
+      await _db.productDao.setCategoryActive(clash.id, true);
+      await _auditLog.log(
+        action: 'category_added',
+        entityType: 'category',
+        entityId: clash.id,
+        newValue: clean,
+      );
+      return clash.id;
     }
     final id = await _db.productDao.insertCategory(
         CategoriesCompanion.insert(name: clean));
@@ -170,16 +188,16 @@ class ProductRepository {
     );
   }
 
-  /// Only an empty category can go — otherwise the products pointing at it
-  /// would be orphaned.
+  /// Deletes a category AND its products. Both are soft-deleted
+  /// (`active = 0`): they disappear from every list, picker and the POS,
+  /// while their rows — and the invoice history pointing at them — stay
+  /// intact. Works on any category, even one full of already-sold products.
   Future<void> deleteCategory(CategoryRow category) async {
     _permissions.require(_permissions.canChangePrice, 'حذف تصنيف');
-    final used = await _db.productDao.countProductsInCategory(category.id);
-    if (used > 0) {
-      throw ProductValidationException(
-          'مينفعش تحذف التصنيف لوجود $used منتج جواه — انقل المنتجات أو احذفها الأول');
-    }
-    await _db.productDao.deleteCategory(category.id);
+    await _db.transaction(() async {
+      await _db.productDao.deactivateCategoryProducts(category.id);
+      await _db.productDao.setCategoryActive(category.id, false);
+    });
     await _auditLog.log(
       action: 'category_deleted',
       entityType: 'category',
@@ -204,6 +222,14 @@ final productsWithCategoryProvider =
 
 final lowStockProductsProvider = StreamProvider<List<ProductRow>>((ref) {
   return ref.watch(productRepositoryProvider).watchLowStock();
+});
+
+/// Product id → cost price, for every product (including soft-deleted ones).
+/// The single lookup خصم تكلفة البضاعة uses, so Statistics, Reports, the
+/// protected screen and the partnership ledger all cost stock the same way.
+final costByProductProvider = FutureProvider<Map<int, double>>((ref) async {
+  final products = await ref.watch(productRepositoryProvider).allProducts();
+  return {for (final p in products) p.id: p.costPrice};
 });
 
 /// Live category list for pickers and the category manager row.

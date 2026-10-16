@@ -27,7 +27,9 @@ const List<NavItem> businessNavItems = [
   NavItem(Icons.inventory_2_rounded, 'المخزون', 'inventory'),
   NavItem(Icons.fact_check_rounded, 'الجرد الدوري', 'stock_counts'),
   NavItem(Icons.assignment_return_rounded, 'المرتجعات', 'refunds'),
+  NavItem(Icons.summarize_rounded, 'تقرير المرتجعات', 'refund_report'),
   NavItem(Icons.badge_rounded, 'الموظفين', 'employees'),
+  NavItem(Icons.handshake_rounded, 'الشراكة', 'partnership'),
   NavItem(Icons.schedule_rounded, 'الشيفتات', 'shifts'),
 ];
 
@@ -70,10 +72,12 @@ bool routeAllowed(String route, UserRole role) {
       return role.canViewReports;
     case 'employees':
     case 'employee_permissions':
+    case 'partnership':
       return role.canManageUsers;
     case 'accounting':
     case 'expenses':
     case 'refunds':
+    case 'refund_report':
       // Ledger, expenses and refunds share the reports audience.
       return role.canViewReports;
     case 'stock_counts':

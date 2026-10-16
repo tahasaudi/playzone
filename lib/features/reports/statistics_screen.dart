@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/accounting/profit.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/database/app_database.dart';
 import '../../data/repositories/expense_repository.dart';
 import '../../data/repositories/invoice_repository.dart';
+import '../../data/repositories/product_repository.dart';
+import '../../data/repositories/refund_repository.dart';
 import 'report_period_selector.dart';
 
 /// Statistics — the numbers-only dashboard for the selected period:
@@ -20,6 +23,8 @@ class StatisticsScreen extends ConsumerWidget {
     final invoicesAsync = ref.watch(invoicesInRangeProvider);
     final itemsAsync = ref.watch(invoiceItemsInRangeProvider);
     final expensesAsync = ref.watch(allExpensesProvider);
+    final refundsAsync = ref.watch(refundsInRangeProvider);
+    final costAsync = ref.watch(costByProductProvider);
 
     return SingleChildScrollView(
       child: Column(
@@ -44,17 +49,29 @@ class StatisticsScreen extends ConsumerWidget {
                       e.createdAt.isBefore(range.to))
                   .toList();
               final items = itemsAsync.value ?? const <InvoiceItemRow>[];
+              final refunds = refundsAsync.value ?? const <RefundRow>[];
+              final costByProduct = costAsync.value ?? const <int, double>{};
 
-              final revenue =
-                  invoices.fold<double>(0, (s, i) => s + i.total);
+              // One shared definition of the café's numbers ([Accounting]):
+              // revenue is only the settled bills, and profit subtracts the
+              // cost of the goods sold and the refunds alongside expenses.
+              final settled = Accounting.settledOnly(invoices);
+              final revenue = Accounting.revenue(invoices);
               final discounts =
-                  invoices.fold<double>(0, (s, i) => s + i.discount);
-              final cash = invoices.fold<double>(0, (s, i) => s + i.paidCash);
-              final card = invoices.fold<double>(0, (s, i) => s + i.paidCard);
+                  settled.fold<double>(0, (s, i) => s + i.discount);
+              final cash = Accounting.cash(invoices);
+              final card = Accounting.card(invoices);
               final totalExpenses =
                   expenses.fold<double>(0, (s, e) => s + e.amount);
-              final profit = revenue - totalExpenses;
-              final avg = invoices.isEmpty ? 0.0 : revenue / invoices.length;
+              final refundsTotal = Accounting.refunds(refunds);
+              final cogs = Accounting.costOfGoods(items, costByProduct);
+              final profit = Accounting.netProfit(
+                revenue: revenue,
+                costOfGoods: cogs,
+                expenses: totalExpenses,
+                refunds: refundsTotal,
+              );
+              final avg = settled.isEmpty ? 0.0 : revenue / settled.length;
 
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -84,8 +101,20 @@ class StatisticsScreen extends ConsumerWidget {
                         color: AppColors.warning,
                       ),
                       _KpiCard(
+                        label: 'تكلفة البضاعة',
+                        value: 'EGP ${cogs.toStringAsFixed(0)}',
+                        icon: Icons.shopping_basket_rounded,
+                        color: AppColors.warning,
+                      ),
+                      _KpiCard(
+                        label: 'المرتجعات',
+                        value: 'EGP ${refundsTotal.toStringAsFixed(0)}',
+                        icon: Icons.assignment_return_rounded,
+                        color: AppColors.danger,
+                      ),
+                      _KpiCard(
                         label: 'عدد الفواتير',
-                        value: '${invoices.length}',
+                        value: '${settled.length}',
                         icon: Icons.confirmation_number_rounded,
                         color: AppColors.accentPrimary,
                       ),

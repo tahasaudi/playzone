@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
+import '../../core/auth/role_provider.dart';
 import '../../core/database/app_database.dart';
 import '../../core/database/daos/device_dao.dart';
 import '../../core/database/daos/product_dao.dart';
@@ -125,6 +126,20 @@ class _GlobalSearchDialogState extends ConsumerState<_GlobalSearchDialog> {
           subtitle: 'موظف · ${e.phone}',
           route: 'employees',
         ));
+      }
+    }
+
+    if (ref.read(currentRoleProvider).canManageUsers) {
+      for (final p
+          in ref.read(partnersProvider).value ?? const <EmployeeRow>[]) {
+        if (p.name.toLowerCase().contains(needle)) {
+          results.add(_SearchResult(
+            icon: Icons.handshake_rounded,
+            title: p.name,
+            subtitle: 'شريك',
+            route: 'partnership',
+          ));
+        }
       }
     }
 

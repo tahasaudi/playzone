@@ -31,6 +31,13 @@ class CustomerDao extends DatabaseAccessor<AppDatabase>
   Future<CustomerRow?> getById(int id) =>
       (select(customers)..where((c) => c.id.equals(id))).getSingleOrNull();
 
+  /// أول عميل بنفس رقم التليفون — يُستخدم لمنع التكرار على الأرقام
+  /// المُدخَلة في طبقة الريبو (الرقم الفاضي بيتكرر عادي).
+  Future<CustomerRow?> findByPhone(String phone) => (select(customers)
+        ..where((c) => c.phone.equals(phone))
+        ..limit(1))
+      .getSingleOrNull();
+
   Future<int> insertCustomer(CustomersCompanion entry) =>
       into(customers).insert(entry);
 
@@ -98,6 +105,27 @@ class CustomerDao extends DatabaseAccessor<AppDatabase>
             ..where((p) => p.customerId.equals(customerId))
             ..orderBy([(p) => OrderingTerm.desc(p.createdAt)]))
           .watch();
+
+  /// Every collection inside [from]..[to], across all customers — the shift
+  /// drawer and the period reports need the money that actually came in.
+  Stream<List<CreditPaymentRow>> watchPaymentsBetween({
+    required DateTime from,
+    required DateTime to,
+  }) =>
+      (select(creditPayments)
+            ..where((p) =>
+                p.createdAt.isBiggerOrEqualValue(from) &
+                p.createdAt.isSmallerThanValue(to)))
+          .watch();
+
+  /// Today's collections — what the drawer took in against الأجل.
+  Stream<List<CreditPaymentRow>> watchPaymentsToday() {
+    return select(creditPayments).watch().map((rows) {
+      final now = DateTime.now();
+      final startOfDay = DateTime(now.year, now.month, now.day);
+      return rows.where((p) => !p.createdAt.isBefore(startOfDay)).toList();
+    });
+  }
 
   /// Records a collection (سداد) and lowers the customer's المتبقي in the
   /// same transaction — the balance is never left out of step with its

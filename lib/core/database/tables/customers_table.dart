@@ -7,7 +7,10 @@ import 'package:drift/drift.dart';
 class Customers extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get name => text().withLength(min: 1, max: 100)();
-  TextColumn get phone => text().withLength(min: 1, max: 20)();
+  /// رقم التليفون اختياري — بيتخزّن '' لما العميل ميدخلش رقم. منع التكرار
+  /// على الأرقام المُدخَلة بقى في طبقة الريبو (CustomerRepository) بدل قيد
+  /// UNIQUE على العمود، عشان نقدر نسمح بأكثر من عميل من غير رقم.
+  TextColumn get phone => text().withLength(max: 20)();
   TextColumn get email => text().nullable()();
   TextColumn get notes => text().nullable()();
   IntColumn get totalVisits => integer().withDefault(const Constant(0))();
@@ -30,9 +33,4 @@ class Customers extends Table {
   RealColumn get creditBalance => real().withDefault(const Constant(0))();
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
   DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
-
-  @override
-  List<Set<Column>> get uniqueKeys => [
-        {phone},
-      ];
 }

@@ -28,6 +28,7 @@ import 'tables/app_settings_table.dart';
 import 'tables/accounts_table.dart';
 import 'tables/account_entries_table.dart';
 import 'tables/refunds_table.dart';
+import 'tables/refund_items_table.dart';
 import 'tables/stock_counts_table.dart';
 import 'tables/employee_transactions_table.dart';
 import 'tables/employee_attendance_table.dart';
@@ -86,6 +87,7 @@ part 'app_database.g.dart';
     Accounts,
     AccountEntries,
     Refunds,
+    RefundItems,
     StockCounts,
     StockCountItems,
     EmployeeTransactions,
@@ -116,7 +118,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 11;
+  int get schemaVersion => 14;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -269,6 +271,22 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(invoices, invoices.paidOnAccount);
             await m.createTable(customerSpecialPrices);
             await m.createTable(creditPayments);
+          }
+          // v11 → v12: رقم تليفون العميل اختياري. إعادة بناء جدول العملاء
+          // عشان نشيل قيد UNIQUE(phone) — من غير ما نفقد أي بيانات (Drift
+          // بيعمل نسخ للصفوف ثم استبدال الجدول). منع التكرار على الأرقام
+          // المُدخَلة اتنقل لطبقة الريبو.
+          if (from < 12) {
+            await m.alterTable(TableMigration(customers));
+          }
+          if (from < 13) {
+            await m.addColumn(categories, categories.active);
+          }
+          // v13 → v14: بنود المرتجع. جدول جديد يسجّل كل بند اترجّع على
+          // حدة (المنتج والكمية)، عشان نقدر نرجّع منتج لوحده من الفاتورة
+          // وما نرجّعش نفس البند مرتين. إضافة جدول بس — مفيش فقد بيانات.
+          if (from < 14) {
+            await m.createTable(refundItems);
           }
         },
       );

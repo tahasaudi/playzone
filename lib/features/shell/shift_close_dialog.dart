@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/accounting/profit.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/widgets/app_buttons.dart';
@@ -7,6 +8,8 @@ import '../../core/auth/current_employee_provider.dart';
 import '../../data/repositories/invoice_repository.dart';
 import '../../data/repositories/expense_repository.dart';
 import '../../data/repositories/shift_repository.dart';
+import '../../data/repositories/customer_repository.dart';
+import '../../data/repositories/refund_repository.dart';
 
 /// Shift close flow — spec §27/28, simplified (no separate "open shift"
 /// step yet). Shows what the system EXPECTS in the register (today's
@@ -42,6 +45,8 @@ class _ShiftCloseDialogState extends ConsumerState<_ShiftCloseDialog> {
   Widget build(BuildContext context) {
     final invoicesAsync = ref.watch(todayInvoicesProvider);
     final expensesAsync = ref.watch(todayExpensesProvider);
+    final refundsAsync = ref.watch(todayRefundsProvider);
+    final creditAsync = ref.watch(todayCreditPaymentsProvider);
 
     return Dialog(
       backgroundColor: Colors.transparent,
@@ -59,13 +64,18 @@ class _ShiftCloseDialogState extends ConsumerState<_ShiftCloseDialog> {
           error: (e, _) => Text('خطأ: $e', style: const TextStyle(color: AppColors.danger)),
           data: (invoices) {
             final expenses = expensesAsync.value ?? const [];
+            final refunds = refundsAsync.value ?? const [];
+            final credit = creditAsync.value ?? const [];
             // Cash in the drawer is the tender actually handed over as
             // cash — for a mixed payment that's paidCash, not the total.
-            final cashRevenue =
-                invoices.fold<double>(0, (sum, i) => sum + i.paidCash);
-            final totalExpenses = expenses.fold<double>(0, (sum, e) => sum + e.amount);
+            final cashRevenue = Accounting.cash(invoices);
+            final totalExpenses = Accounting.expenses(expenses);
+            final cashRefunds = Accounting.refunds(refunds);
+            final cashCollectedOnAccount =
+                credit.where((c) => c.method != 'card').fold<double>(0, (s, c) => s + c.amount);
             final openingCash = double.tryParse(_openingCashController.text) ?? 0;
-            final expectedCash = openingCash + cashRevenue - totalExpenses;
+            final expectedCash =
+                openingCash + cashRevenue - totalExpenses - cashRefunds + cashCollectedOnAccount;
 
             return Column(
               mainAxisSize: MainAxisSize.min,
@@ -75,6 +85,8 @@ class _ShiftCloseDialogState extends ConsumerState<_ShiftCloseDialog> {
                 const SizedBox(height: AppSpacing.lg),
                 _row('الكاش الافتتاحي', openingCash),
                 _row('مبيعات كاش اليوم', cashRevenue),
+                _row('المرتجعات (كاش)', -cashRefunds),
+                _row('سداد أجل اليوم (كاش)', cashCollectedOnAccount),
                 _row('المصروفات اليوم', -totalExpenses),
                 const Divider(color: AppColors.glassBorder, height: AppSpacing.xl),
                 Row(

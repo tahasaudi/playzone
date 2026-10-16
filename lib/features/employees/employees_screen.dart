@@ -80,7 +80,29 @@ class _EmployeeRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(employee.name, style: AppTypography.cardTitle),
+                Row(
+                  children: [
+                    Text(employee.name, style: AppTypography.cardTitle),
+                    if (employee.isPartner) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: AppColors.accentSecondary.withOpacity(0.25),
+                          borderRadius: AppRadius.smallR,
+                        ),
+                        child: Text(
+                          'شريك ${EmployeeRepository.normalizedShare(employee.partnerShare).toStringAsFixed(0)}%',
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
                 const SizedBox(height: 2),
                 Text(employee.phone,
                     style: const TextStyle(

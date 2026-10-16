@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/accounting/profit.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/widgets/glass_card.dart';
 import '../../core/database/app_database.dart';
-import '../../core/database/daos/product_dao.dart';
 import '../../data/repositories/employee_repository.dart';
 import '../../data/repositories/invoice_repository.dart';
 import '../../data/repositories/expense_repository.dart';
 import '../../data/repositories/product_repository.dart';
+import '../../data/repositories/refund_repository.dart';
 import 'report_period_selector.dart';
 
 /// Employee performance — the manager's per-employee P&L. Rolls the
@@ -24,7 +25,8 @@ class EmployeePerformanceScreen extends ConsumerWidget {
     final invoicesAsync = ref.watch(invoicesInRangeProvider);
     final itemsAsync = ref.watch(invoiceItemsInRangeProvider);
     final expensesAsync = ref.watch(allExpensesProvider);
-    final productsAsync = ref.watch(productsWithCategoryProvider);
+    final refundsAsync = ref.watch(refundsInRangeProvider);
+    final costAsync = ref.watch(costByProductProvider);
     final employeesAsync = ref.watch(activeEmployeesProvider);
     final range = currentReportRange(ref.watch(reportPeriodProvider));
 
@@ -52,15 +54,13 @@ class EmployeePerformanceScreen extends ConsumerWidget {
               data: (employees) {
                 final items = itemsAsync.value ?? const <InvoiceItemRow>[];
                 final expenses = expensesAsync.value ?? const <ExpenseRow>[];
-                final productCost = <int, double>{
-                  for (final p
-                      in productsAsync.value ?? const <ProductWithCategory>[])
-                    p.product.id: p.product.costPrice,
-                };
+                final refunds = refundsAsync.value ?? [];
+                final productCost = costAsync.value ?? const <int, double>{};
                 final stats = _aggregate(
                   employees,
                   invoices,
                   items,
+                  refunds,
                   expenses.where((e) =>
                       !e.createdAt.isBefore(range.from) &&
                       e.createdAt.isBefore(range.to)),
@@ -92,6 +92,7 @@ class EmployeePerformanceScreen extends ConsumerWidget {
     List<EmployeeRow> employees,
     List<InvoiceRow> invoices,
     List<InvoiceItemRow> items,
+    List<RefundRow> refunds,
     Iterable<ExpenseRow> expenses,
     Map<int, double> productCost,
   ) {
@@ -102,6 +103,9 @@ class EmployeePerformanceScreen extends ConsumerWidget {
     final invoiceOwner = <int, int?>{};
     for (final inv in invoices) {
       invoiceOwner[inv.id] = inv.employeeId;
+      // الإيراد للموظف = الفواتير المسدَّدة بس. الكارت المفتوح لجلسة لسه
+      // شغالة مش إيراد لسه، فمش بيتحسب في أداء حد.
+      if (!Accounting.isSettled(inv)) continue;
       final stat = byEmployee[inv.employeeId] ?? _EmployeeStat(employee: null);
       stat.invoiceCount++;
       stat.revenue += inv.total;
@@ -118,13 +122,25 @@ class EmployeePerformanceScreen extends ConsumerWidget {
       stat.cogs += (productCost[item.productId] ?? 0) * item.quantity;
       byEmployee[owner] = stat;
     }
+    // المرتجع بيتخصم من الموظف اللي عمل الفاتورة الأصلية (صاحب البيع)، ولو
+    // الفاتورة مش في نفس الفترة نرجع لموظف المرتجع نفسه.
+    for (final r in refunds) {
+      final owner = invoiceOwner.containsKey(r.invoiceId)
+          ? invoiceOwner[r.invoiceId]
+          : r.employeeId;
+      final stat = byEmployee[owner] ?? _EmployeeStat(employee: null);
+      stat.refunds += r.amount;
+      byEmployee[owner] = stat;
+    }
     // Store purchases/expenses recorded by an employee reduce their net.
     for (final e in expenses) {
       final stat = byEmployee[e.employeeId] ?? _EmployeeStat(employee: null);
       stat.expenses += e.amount;
       byEmployee[e.employeeId] = stat;
     }
-    final list = byEmployee.values.where((s) => s.invoiceCount > 0).toList()
+    final list = byEmployee.values
+        .where((s) => s.invoiceCount > 0 || s.refunds > 0 || s.expenses > 0)
+        .toList()
       ..sort((a, b) => b.revenue.compareTo(a.revenue));
     return list;
   }
@@ -139,10 +155,11 @@ class _EmployeeStat {
   double card = 0;
   double cogs = 0;
   double expenses = 0;
+  double refunds = 0;
 
   String get name => employee?.name ?? 'غير محدد';
   double get average => invoiceCount == 0 ? 0 : revenue / invoiceCount;
-  double get profit => revenue - cogs - expenses;
+  double get profit => revenue - cogs - expenses - refunds;
 }
 
 class _EmployeeRow extends StatelessWidget {
@@ -199,6 +216,9 @@ class _EmployeeRow extends StatelessWidget {
               const SizedBox(width: AppSpacing.lg),
               _metric(Icons.storefront_rounded,
                   'مشتريات المحل EGP ${stat.expenses.toStringAsFixed(0)}'),
+              const SizedBox(width: AppSpacing.lg),
+              _metric(Icons.assignment_return_rounded,
+                  'مرتجعات EGP ${stat.refunds.toStringAsFixed(0)}'),
               const SizedBox(width: AppSpacing.lg),
               _metric(Icons.payments_rounded,
                   'كاش EGP ${stat.cash.toStringAsFixed(0)}'),

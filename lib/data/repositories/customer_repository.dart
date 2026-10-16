@@ -3,6 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/database/app_database.dart';
 import '../../core/database/database_provider.dart';
 
+/// يُرمى لما تحاول تضيف/تعدّل عميل برقم تليفون مستخدم بالفعل عند عميل تاني.
+class DuplicatePhoneException implements Exception {
+  const DuplicatePhoneException();
+  @override
+  String toString() => 'رقم التليفون ده مسجّل بالفعل';
+}
+
 class CustomerRepository {
   CustomerRepository(this._db);
   final AppDatabase _db;
@@ -16,17 +23,24 @@ class CustomerRepository {
 
   Future<CustomerRow?> getById(int id) => _db.customerDao.getById(id);
 
+  /// يضيف عميل جديد. رقم التليفون اختياري — الفاضي بيتخزّن ''، والمُدخَل
+  /// بيرمي [DuplicatePhoneException] لو مستخدم قبل كده.
   Future<int> addCustomer({
     required String name,
-    required String phone,
+    String phone = '',
     String? email,
     String? notes,
     bool creditEnabled = false,
     double creditLimit = 0,
-  }) {
+  }) async {
+    final trimmedPhone = phone.trim();
+    if (trimmedPhone.isNotEmpty) {
+      final existing = await _db.customerDao.findByPhone(trimmedPhone);
+      if (existing != null) throw const DuplicatePhoneException();
+    }
     return _db.customerDao.insertCustomer(CustomersCompanion.insert(
       name: name,
-      phone: phone,
+      phone: trimmedPhone,
       email: Value(email),
       notes: Value(notes),
       creditEnabled: Value(creditEnabled),
@@ -34,8 +48,16 @@ class CustomerRepository {
     ));
   }
 
-  Future<void> updateCustomer(CustomerRow customer) {
-    return _db.customerDao.updateCustomer(customer.toCompanion(true).copyWith(
+  Future<void> updateCustomer(CustomerRow customer) async {
+    final trimmedPhone = customer.phone.trim();
+    if (trimmedPhone.isNotEmpty) {
+      final existing = await _db.customerDao.findByPhone(trimmedPhone);
+      if (existing != null && existing.id != customer.id) {
+        throw const DuplicatePhoneException();
+      }
+    }
+    await _db.customerDao.updateCustomer(customer.toCompanion(true).copyWith(
+          phone: Value(trimmedPhone),
           updatedAt: Value(DateTime.now()),
         ));
   }
@@ -74,6 +96,15 @@ class CustomerRepository {
 
   Stream<List<CreditPaymentRow>> watchCreditPayments(int customerId) =>
       _db.customerDao.watchCreditPayments(customerId);
+
+  Stream<List<CreditPaymentRow>> watchPaymentsToday() =>
+      _db.customerDao.watchPaymentsToday();
+
+  Stream<List<CreditPaymentRow>> watchPaymentsBetween({
+    required DateTime from,
+    required DateTime to,
+  }) =>
+      _db.customerDao.watchPaymentsBetween(from: from, to: to);
 
   Future<void> collectCreditPayment({
     required int customerId,
@@ -127,4 +158,11 @@ final specialPricesForCustomerProvider =
 final creditPaymentsProvider =
     StreamProvider.family<List<CreditPaymentRow>, int>((ref, id) {
   return ref.watch(customerRepositoryProvider).watchCreditPayments(id);
+});
+
+/// Every collection made against الأجل today, across all customers — the
+/// shift drawer adds what actually came in over the counter.
+final todayCreditPaymentsProvider =
+    StreamProvider<List<CreditPaymentRow>>((ref) {
+  return ref.watch(customerRepositoryProvider).watchPaymentsToday();
 });

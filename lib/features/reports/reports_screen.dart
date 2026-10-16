@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/accounting/profit.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/utils/time_format.dart';
@@ -10,6 +11,8 @@ import '../../core/widgets/mini_bar_chart.dart';
 import '../../data/repositories/invoice_repository.dart';
 import '../../data/repositories/expense_repository.dart';
 import '../../data/repositories/employee_repository.dart';
+import '../../data/repositories/product_repository.dart';
+import '../../data/repositories/refund_repository.dart';
 import '../dashboard/hero_and_kpi.dart';
 
 const _filters = ['اليوم', 'أمس', 'الأسبوع', 'الشهر', 'مخصص'];
@@ -57,6 +60,14 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
           .read(invoiceRepositoryProvider)
           .watchItemsBetween(from: range.from, to: range.to)
           .first;
+      final refunds = await ref
+          .read(refundRepositoryProvider)
+          .watchBetween(from: range.from, to: range.to)
+          .first;
+      final costByProduct = {
+        for (final p in await ref.read(productRepositoryProvider).allProducts())
+          p.id: p.costPrice,
+      };
       final employees =
           ref.read(activeEmployeesProvider).valueOrNull ?? const [];
       String empName(int? id) => id == null
@@ -89,34 +100,55 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
           'تقرير اللعبة $_activeFilter (${fmt(range.from)} - ${fmt(range.to)})');
       sb.writeln('');
 
-      final revenue = invoices.fold<double>(0, (s, i) => s + i.total);
-      final expenseTotal = expenses.fold<double>(0, (s, e) => s + e.amount);
-      final count = invoices.length;
-      final gameCount = invoices
+      final settled = Accounting.settledOnly(invoices);
+      final revenue = Accounting.revenue(invoices);
+      final expenseTotal = Accounting.expenses(expenses);
+      final refundsTotal = Accounting.refunds(refunds);
+      final cogs = Accounting.costOfGoods(items, costByProduct);
+      final profit = Accounting.netProfit(
+        revenue: revenue,
+        costOfGoods: cogs,
+        expenses: expenseTotal,
+        refunds: refundsTotal,
+      );
+      final count = settled.length;
+      final gameCount = settled
           .where((i) => i.sessionId != null)
           .fold<double>(0, (s, i) => s + i.total);
-      final cafeCount = invoices
+      final cafeCount = settled
           .where((i) => i.sessionId == null)
           .fold<double>(0, (s, i) => s + i.total);
 
       sb.writeln('ملخص,القيمة');
-      sb.writeln('عدد الفواتير,$count');
-      sb.writeln('إجمالي الإيرادات,${revenue.toStringAsFixed(2)}');
-      sb.writeln('إيراد الألعاب,${gameCount.toStringAsFixed(2)}');
-      sb.writeln('إيراد الكافيه,${cafeCount.toStringAsFixed(2)}');
+      sb.writeln('عدد الفواتير المسدَّدة,$count');
+      sb.writeln('إجمالي الإيرادات (المسدَّد),${revenue.toStringAsFixed(2)}');
+      sb.writeln('إيراد الألعاب (مسدَّد),${gameCount.toStringAsFixed(2)}');
+      sb.writeln('إيراد الكافيه (مسدَّد),${cafeCount.toStringAsFixed(2)}');
+      sb.writeln('تكلفة البضاعة,${cogs.toStringAsFixed(2)}');
       sb.writeln('إجمالي المصروفات,${expenseTotal.toStringAsFixed(2)}');
-      sb.writeln(
-          'الربح (بعد المصروفات),${(revenue - expenseTotal).toStringAsFixed(2)}');
+      sb.writeln('المرتجعات,${refundsTotal.toStringAsFixed(2)}');
+      sb.writeln('صافي الربح,${profit.toStringAsFixed(2)}');
       sb.writeln('');
 
       sb.writeln('فواتير');
-      sb.writeln('رقم الفاتورة,التاريخ,النوع,الإجمالي,الخصم,نقدي,كارت,الموظف');
+      sb.writeln('رقم الفاتورة,التاريخ,النوع,الحالة,الإجمالي,الخصم,نقدي,كارت,الموظف');
       for (final i in invoices) {
         final type = i.sessionId != null ? 'ألعاب' : 'كافيه';
+        final state = Accounting.isSettled(i) ? 'مسدَّد' : 'أجل/غير مسدَّد';
         sb.writeln(
-            '${i.id},${fmt(i.createdAt)},$type,${i.total.toStringAsFixed(2)},${i.discount.toStringAsFixed(2)},${i.paidCash.toStringAsFixed(2)},${i.paidCard.toStringAsFixed(2)},${csvCell(empName(i.employeeId))}');
+            '${i.id},${fmt(i.createdAt)},$type,$state,${i.total.toStringAsFixed(2)},${i.discount.toStringAsFixed(2)},${i.paidCash.toStringAsFixed(2)},${i.paidCard.toStringAsFixed(2)},${csvCell(empName(i.employeeId))}');
       }
       sb.writeln('');
+
+      if (refunds.isNotEmpty) {
+        sb.writeln('مرتجعات');
+        sb.writeln('رقم المرتجع,رقم الفاتورة,التاريخ,المبلغ,السبب,الموظف');
+        for (final r in refunds) {
+          sb.writeln(
+              '${r.id},${r.invoiceId},${fmt(r.createdAt)},${r.amount.toStringAsFixed(2)},${csvCell(r.reason ?? '')},${csvCell(empName(r.employeeId))}');
+        }
+        sb.writeln('');
+      }
 
       if (items.isNotEmpty) {
         sb.writeln('بنود الفواتير');
@@ -249,12 +281,20 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
   Widget _kpiRow() {
     final todayInvoices = ref.watch(todayInvoicesProvider).value ?? [];
     final todayExpenses = ref.watch(todayExpensesProvider).value ?? [];
-    final revenue = todayInvoices.fold<double>(0, (sum, i) => sum + i.total);
-    final expenseTotal =
-        todayExpenses.fold<double>(0, (sum, e) => sum + e.amount);
-    // Profit is ALWAYS revenue minus expenses (spec: "الربح بيتحسب بعد
-    // الطرح المصروفات من الايراد").
-    final profit = revenue - expenseTotal;
+    final todayItems = ref.watch(todayInvoiceItemsProvider).value ?? [];
+    final todayRefunds = ref.watch(todayRefundsProvider).value ?? [];
+    final costByProduct =
+        ref.watch(costByProductProvider).value ?? const <int, double>{};
+    final revenue = Accounting.revenue(todayInvoices);
+    final expenseTotal = Accounting.expenses(todayExpenses);
+    final cogs = Accounting.costOfGoods(todayItems, costByProduct);
+    final refundsTotal = Accounting.refunds(todayRefunds);
+    final profit = Accounting.netProfit(
+      revenue: revenue,
+      costOfGoods: cogs,
+      expenses: expenseTotal,
+      refunds: refundsTotal,
+    );
 
     return LayoutBuilder(builder: (context, constraints) {
       final columns = constraints.maxWidth > 1200
@@ -272,12 +312,12 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
         children: [
           StatCard(
               icon: Icons.payments_rounded,
-              label: 'الإيرادات (اليوم)',
+              label: 'الإيرادات (اليوم - مسدَّد)',
               value: 'EGP ${revenue.toStringAsFixed(0)}',
               iconColor: AppColors.accentSecondary),
           StatCard(
               icon: Icons.savings_rounded,
-              label: 'الربح (بعد المصروفات)',
+              label: 'الربح (بعد التكلفة والمصروفات)',
               value: 'EGP ${profit.toStringAsFixed(0)}',
               iconColor: AppColors.statusAvailable),
           const StatCard(

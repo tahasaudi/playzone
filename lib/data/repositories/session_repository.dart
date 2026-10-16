@@ -132,31 +132,40 @@ class SessionRepository {
     // the bill can never disagree with what was actually ordered.
     final orderLines = await invoiceDao.draftLinesForSession(entry.session.id);
 
-    await _db.sessionDao
-        .complete(entry, overrideFinalCost: timePart + ordersTotal);
-    await invoiceDao.createInvoice(
-      sessionId: entry.session.id,
-      customerId: entry.session.customerId,
-      employeeId: entry.session.employeeId,
-      discount: discount,
-      redeemedPoints: redeemedPoints,
-      paidCash: paidCash,
-      paidCard: paidCard,
-      lines: [
-        InvoiceLineInput(
-          description: '${entry.type.name} — ${entry.device.name} (وقت اللعب)',
-          quantity: 1,
-          unitPrice: timePart,
-        ),
-        for (final line in orderLines) line,
-      ],
-    );
+    // One atomic close: freeze the session, write the real bill, and fold the
+    // draft orders away inside a single transaction. A crash between completing
+    // the session and writing its bill used to leave a closed session with no
+    // invoice — or a bill with the drafts still standing and every drink
+    // counted twice. Drift's nested transactions reuse this one, so
+    // createInvoice/removeSessionOrders join it instead of starting their own.
+    await _db.transaction(() async {
+      await _db.sessionDao
+          .complete(entry, overrideFinalCost: timePart + ordersTotal);
+      await invoiceDao.createInvoice(
+        sessionId: entry.session.id,
+        customerId: entry.session.customerId,
+        employeeId: entry.session.employeeId,
+        discount: discount,
+        redeemedPoints: redeemedPoints,
+        paidCash: paidCash,
+        paidCard: paidCard,
+        lines: [
+          InvoiceLineInput(
+            description:
+                '${entry.type.name} — ${entry.device.name} (وقت اللعب)',
+            quantity: 1,
+            unitPrice: timePart,
+          ),
+          for (final line in orderLines) line,
+        ],
+      );
 
-    // Only now, with the money recorded on the real bill, are the drafts
-    // cleared. Left standing they would count every drink a second time in the
-    // day's revenue — once as the order, and once inside the bill that already
-    // includes it.
-    await invoiceDao.removeSessionOrders(entry.session.id);
+      // Only now, with the money recorded on the real bill, are the drafts
+      // cleared. Left standing they would count every drink a second time in
+      // the day's revenue — once as the order, and once inside the bill that
+      // already includes it.
+      await invoiceDao.removeSessionOrders(entry.session.id);
+    });
   }
 }
 

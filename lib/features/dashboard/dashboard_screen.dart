@@ -42,43 +42,6 @@ class DashboardScreen extends ConsumerStatefulWidget {
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   SessionBoardEntry? _selectedEntry;
 
-  /// Sessions already auto-darkened at their deadline — so the moment a
-  /// session flips to "timeup" the matching screen is put out exactly
-  /// once, and nobody has to touch anything.
-  final Set<int> _timeUpHandledSessionIds = {};
-  bool _seenInitialTimeUp = false;
-
-  /// Watches the live session board for the instant a fixed-duration
-  /// session runs out, and blanks that device's screen on its own —
-  /// fire-and-forget, silent, through the same TV/IR gates the rest of
-  /// the app uses (on this machine those gates are off: no bytes leave).
-  void _onSessionsChanged(List<SessionBoardEntry> sessions) {
-    final nowTimeUp =
-        sessions.where((s) => s.session.status == 'timeup').toList();
-    // On first load, sessions that were ALREADY time-up are left alone —
-    // their screens are already dark, re-firing could toggle one back on.
-    if (!_seenInitialTimeUp) {
-      _seenInitialTimeUp = true;
-      _timeUpHandledSessionIds.addAll(nowTimeUp.map((s) => s.session.id));
-      return;
-    }
-    for (final s in nowTimeUp) {
-      if (!_timeUpHandledSessionIds.add(s.session.id)) continue;
-      _autoDarkenScreen(s.device.id);
-    }
-  }
-
-  /// "وقت انتهى → الشاشة تطفي" — same owner-gate as checkout: only a
-  /// screen bound to this machine is steered (TvPowerService), plus a
-  /// linked IR box if any. Silent by design, no snackbar, fire & forget.
-  void _autoDarkenScreen(int deviceId) {
-    final ip = ref.read(tvConfigProvider).screenFor(deviceId);
-    if (ip != null) TvPowerService.instance.turnOff(ip);
-    final links = ref.read(irBoxLinksProvider);
-    final box = ref.read(irBoxRepositoryProvider).boxFor(deviceId, links);
-    if (box != null) box.send('power'); // ignore result on purpose
-  }
-
   /// The machines' order on the board, and on the screens page: straight by the
   /// number they are numbered with in the room. One function for both, so the
   /// two pages cannot end up describing the same café differently.
@@ -119,24 +82,34 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   /// while looking longer than it is. Quantity is folded into the label and
   /// the money is summed, so the panel shows what was ordered rather than how
   /// many times the cashier touched the screen.
-  List<String> _orderLinesFor(SessionBoardEntry entry) {
+  List<OrderLineUi> _orderLinesFor(SessionBoardEntry entry) {
     final rows =
         ref.watch(sessionOrderLinesProvider(entry.session.id)).valueOrNull ??
             const <InvoiceItemRow>[];
     final qty = <String, int>{};
     final money = <String, double>{};
+    final productId = <String, int?>{};
     final order = <String>[];
     for (final r in rows) {
       final key = r.description.trim();
       if (key.isEmpty) continue;
-      if (!qty.containsKey(key)) order.add(key);
+      if (!qty.containsKey(key)) {
+        order.add(key);
+        productId[key] = r.productId;
+      } else if (productId[key] == null && r.productId != null) {
+        productId[key] = r.productId;
+      }
       qty[key] = (qty[key] ?? 0) + r.quantity;
       money[key] = (money[key] ?? 0) + r.total;
     }
     return [
       for (final key in order)
-        '${qty[key]! > 1 ? '${qty[key]}× ' : ''}$key — '
-            '${(money[key] ?? 0).toStringAsFixed(2)}',
+        OrderLineUi(
+          productId: productId[key],
+          label: key,
+          quantity: qty[key]!,
+          total: money[key] ?? 0,
+        ),
     ];
   }
 
@@ -146,16 +119,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final sessionsAsync = ref.watch(activeSessionsProvider);
     // Force a rebuild every second so the live timer/cost stay current.
     ref.watch(oneSecondTickerProvider);
-    // Background watchdog: flips timed sessions to 'timeup' by themselves
-    // the moment their minutes run out, releasing the device.
-    ref.watch(timeUpWatcherProvider);
-    // When a session's clock hits zero, darken its screen without anyone
-    // touching a button.
-    ref.listen<AsyncValue<List<SessionBoardEntry>>>(activeSessionsProvider,
-        (_, next) {
-      final list = next.valueOrNull;
-      if (list != null) _onSessionsChanged(list);
-    });
     // Device id → when its last session finished (FIFO for the waiting row).
     final lastFinished = ref.watch(lastFinishedByDeviceProvider).valueOrNull ??
         const <int, DateTime>{};
@@ -201,6 +164,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             onCheckout: () => _checkout(_selectedEntry!),
             onSwitchMode: () => _switchMode(_selectedEntry!),
             onOrder: () => _openOrderModal(_selectedEntry!),
+            onReturnOne: (productId) => _returnOne(_selectedEntry!, productId),
           ),
         Positioned(
           left: AppSpacing.md,
@@ -466,6 +430,26 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     );
   }
 
+  /// Quick "إرجاع واحد" from the session panel: hands one of [productId] back
+  /// to stock without opening the full order screen.
+  Future<void> _returnOne(SessionBoardEntry entry, int productId) async {
+    try {
+      final name = await ref
+          .read(invoiceRepositoryProvider)
+          .returnOneFromSession(entry.session.id, productId: productId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(name == null
+            ? 'مفيش حاجة على الكارت ترجع'
+            : 'اترجع $name ×1 ورجع للمخزون'),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('تعذّر الإرجاع: $e')));
+    }
+  }
+
   /// Starts a session using the duration picked ON THAT DEVICE (falling
   /// back to the top bar's default of 60).
   ///
@@ -563,7 +547,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     );
     if (minutes == null || minutes <= 0) return;
     await ref.read(sessionRepositoryProvider).extend(entry, minutes);
-    _timeUpHandledSessionIds.remove(entry.session.id);
     // If it came in from a time-up card the screen must come back on;
     // a running session leaves its screen alone either way.
     if (entry.session.status == 'timeup') {
@@ -775,7 +758,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     DeviceTypeRow type,
     SessionBoardEntry? session,
     Map<int, double> ordersBySession, {
-    List<String> orderLines = const <String>[],
+    List<OrderLineUi> orderLines = const <OrderLineUi>[],
   }) {
     final ordersTotal =
         session == null ? 0.0 : (ordersBySession[session.session.id] ?? 0.0);

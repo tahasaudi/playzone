@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/auth/current_employee_provider.dart';
+import '../../core/auth/role_provider.dart';
 import '../../core/utils/esc_handler_provider.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../pos/pos_screen.dart';
@@ -30,7 +31,9 @@ import '../settings/names_manager_screen.dart';
 import '../accounting/accounting_screen.dart';
 import '../expenses/expenses_screen.dart';
 import '../refunds/refunds_screen.dart';
+import '../refunds/refund_report_screen.dart';
 import '../inventory/stock_count_screen.dart';
+import '../partnership/partnership_screen.dart';
 import '../reports/protected_screen.dart';
 import '../search/global_search_dialog.dart';
 import '../tv/tv_broadcaster.dart';
@@ -41,7 +44,9 @@ import '../../core/database/daos/session_dao.dart';
 
 import '../../core/window/window_state.dart';
 import '../../core/tv/tv_display_service.dart';
+import '../../core/tv/tv_power_service.dart';
 import '../../core/tv/tv_screen_report.dart';
+import '../../core/ir/ir_box_repository.dart';
 import '../../data/repositories/device_repository.dart';
 import '../../data/repositories/session_repository.dart';
 import 'sidebar.dart';
@@ -77,6 +82,7 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   void dispose() {
+    _macTimer?.cancel();
     _shortcutsFocusNode.dispose();
     super.dispose();
   }
@@ -86,8 +92,77 @@ class _AppShellState extends ConsumerState<AppShell> {
   /// Set once the startup sweep of the walls has been asked for.
   bool _wallsReconciled = false;
 
+  /// Set once the opening TV kick has been scheduled. `build()` runs about once
+  /// a second, and re-queueing the warm-up search on every one of those meant a
+  /// port sweep was almost always running in the background — which is most of
+  /// why the whole app felt heavy.
+  bool _tvKicked = false;
+
+  /// The card-pusher setting the TV layer is currently running with, so it is
+  /// started or stopped only when it actually changes instead of on every
+  /// rebuild.
+  bool? _pushingCards;
+
+  /// Keeps the MAC → address bindings fresh. One light `arp -a` every few
+  /// seconds, and only a database write when a screen has actually moved.
+  Timer? _macTimer;
+
   /// Screens already handed back this launch, so a screen is not told twice.
   final Set<String> _wallsReleased = {};
+
+  /// Sessions whose screen has already been put out at their deadline, so the
+  /// moment a timed session runs out the matching wall goes dark exactly once.
+  ///
+  /// This lives here in the shell rather than on the board on purpose: the board
+  /// is disposed the moment the cashier navigates to another page, and with it
+  /// went the watchdog — so a session could run out on the POS or the invoices
+  /// page and leave its screen lit. A session that is extended comes out of this
+  /// set (it is running again), so the next time it runs out its screen is
+  /// darkened again.
+  final Set<int> _timeUpHandledSessionIds = {};
+
+  /// The shell has seen its first batch of sessions. Ones already past their
+  /// deadline before the app was even open are noted, not re-commanded — their
+  /// screens are already dark and re-firing an IR power toggle would relight one.
+  bool _seenInitialTimeUp = false;
+
+  /// Watches the live session board for the instant a fixed-duration session
+  /// runs out, and blanks that device's screen on its own — from the shell, so
+  /// it keeps working while the cashier is on the POS, the invoices page, or
+  /// anywhere else. Fire-and-forget and silent, through the same TV/IR gates the
+  /// rest of the app uses (on a machine with the gates off, no bytes leave).
+  void _onSessionsChanged(List<SessionBoardEntry> sessions) {
+    final nowTimeUp = <int>{
+      for (final s in sessions)
+        if (s.session.status == 'timeup') s.session.id,
+    };
+    // A session that is running again (extended) or has finished must be able to
+    // darken again the next time it runs out, so anything no longer past its
+    // deadline is dropped from the handled set.
+    _timeUpHandledSessionIds.retainWhere(nowTimeUp.contains);
+    // On the first batch, sessions that were ALREADY time-up are left alone.
+    if (!_seenInitialTimeUp) {
+      _seenInitialTimeUp = true;
+      _timeUpHandledSessionIds.addAll(nowTimeUp);
+      return;
+    }
+    for (final s in sessions) {
+      if (s.session.status != 'timeup') continue;
+      if (!_timeUpHandledSessionIds.add(s.session.id)) continue;
+      _autoDarkenScreen(s.device.id);
+    }
+  }
+
+  /// "وقت انتهى → الشاشة تطفي" — only a screen bound to this machine is steered
+  /// (TvPowerService), plus a linked IR box if any. Silent by design, no
+  /// snackbar, fire & forget.
+  void _autoDarkenScreen(int deviceId) {
+    final ip = ref.read(tvConfigProvider).screenFor(deviceId);
+    if (ip != null) TvPowerService.instance.turnOff(ip);
+    final links = ref.read(irBoxLinksProvider);
+    final box = ref.read(irBoxRepositoryProvider).boxFor(deviceId, links);
+    if (box != null) box.send('power'); // ignore result on purpose
+  }
 
   /// Hands any wall back to the console on startup, so a crash cannot leave a
   /// black screen behind with nobody able to clear it.
@@ -305,6 +380,19 @@ class _AppShellState extends ConsumerState<AppShell> {
     // background — we only discover the renderers while the app is idle so
     // the first session of the day does not pay for a port scan.
     final tvConfig = ref.watch(tvConfigProvider);
+
+    // Timeout watchdog — kept here, in the shell that is always mounted, so it
+    // keeps running wherever the cashier navigates. It flips timed sessions to
+    // 'timeup' the moment their minutes run out, and blanks each freed screen
+    // right away, whether the board is open or not.
+    ref.watch(timeUpWatcherProvider);
+    ref.listen<AsyncValue<List<SessionBoardEntry>>>(
+      activeSessionsProvider,
+      (_, next) {
+        final list = next.valueOrNull;
+        if (list != null) _onSessionsChanged(list);
+      },
+    );
     // An unbound screen prints as UNBOUND, never "all". It used to print
     // "all", which reads as "follows every machine" when it in fact means
     // "follows nothing" — and that misreading is what left a wall screen
@@ -355,38 +443,63 @@ class _AppShellState extends ConsumerState<AppShell> {
         tvConfig.enabled &&
         tvConfig.addresses.isNotEmpty) {
       final tv = TvDisplayService.instance;
+      // Cheap and idempotent: only binds the port when the server is down.
       if (!tv.isRunning) tv.startServer();
-      if (tvConfig.showCards) {
-        tv.startPushing(tvIp: tvConfig.ip);
-      } else {
-        for (final ip in tvConfig.addresses) {
-          if (!tv.hasControlUrlFor(ip)) tv.warmUp(tvIp: ip);
+      // Start/stop the card pusher only when the setting changes. Doing it on
+      // every rebuild restarted the periodic timer roughly once a second, so
+      // the timer itself never fired and the app paid for a new timer forever.
+      if (tvConfig.showCards != _pushingCards) {
+        _pushingCards = tvConfig.showCards;
+        if (tvConfig.showCards) {
+          // `slots` resolves each address through its MAC first, so the pusher
+          // follows the screen rather than the lease it used to hold.
+          tv.startPushing(tvIp: tvConfig.slots.first.ip);
+        } else {
+          tv.stopPushing();
         }
       }
-      _reconcileWalls(tvConfig);
-      // Ask each screen once after startup, so the screens page can answer with a
-      // fact instead of "we don't know yet". Two small requests, off the
-      // critical path — and without them every screen reads as unproven for
-      // the whole shift, which is the one answer a status panel must never
-      // make someone settle for. Asked twice because a panel that is on but
-      // still finishing its boot has no renderer to answer yet, and reporting
-      // it as unproven would be wrong in the other direction.
-      for (final wait in const [
-        Duration(seconds: 3),
-        Duration(seconds: 20),
-        // A third pass, because the first two both land before the renderer
-        // ports have been found: a probe that finds no endpoint records
-        // nothing, so those two are really only one sample. "Is this wall
-        // showing our picture or the console" is answered by comparing two
-        // successful reads, and without a third pass that question stays
-        // unanswerable on a program that has been sitting open all evening
-        // with nobody on the screens page to keep re-asking it.
-        Duration(seconds: 45),
-      ]) {
-        unawaited(Future<void>.delayed(wait, () {
+      // The opening kick: run once, after the settings have actually loaded —
+      // not on every one-second rebuild.
+      if (!_tvKicked && tvConfig.loaded) {
+        _tvKicked = true;
+        if (!tvConfig.showCards) {
+          for (final ip in tvConfig.addresses) {
+            if (!tv.hasControlUrlFor(ip)) tv.warmUp(tvIp: ip);
+          }
+        }
+        _reconcileWalls(tvConfig);
+        // Screens are steered by the MAC they kept, so their addresses have to
+        // follow the router without anyone pressing a button. Prime the index
+        // once, then keep it warm from the neighbour table.
+        unawaited(ref.read(tvConfigProvider.notifier).primeMacBindings());
+        _macTimer ??= Timer.periodic(const Duration(seconds: 10), (_) {
           if (!mounted) return;
-          TvDisplayService.instance.probeAll(tvConfig.addresses.toList());
-        }));
+          unawaited(ref.read(tvConfigProvider.notifier).refreshMacBindings());
+        });
+        // Ask each screen once after startup, so the screens page can answer with a
+        // fact instead of "we don't know yet". Two small requests, off the
+        // critical path — and without them every screen reads as unproven for
+        // the whole shift, which is the one answer a status panel must never
+        // make someone settle for. Asked twice because a panel that is on but
+        // still finishing its boot has no renderer to answer yet, and reporting
+        // it as unproven would be wrong in the other direction.
+        for (final wait in const [
+          Duration(seconds: 3),
+          Duration(seconds: 20),
+          // A third pass, because the first two both land before the renderer
+          // ports have been found: a probe that finds no endpoint records
+          // nothing, so those two are really only one sample. "Is this wall
+          // showing our picture or the console" is answered by comparing two
+          // successful reads, and without a third pass that question stays
+          // unanswerable on a program that has been sitting open all evening
+          // with nobody on the screens page to keep re-asking it.
+          Duration(seconds: 45),
+        ]) {
+          unawaited(Future<void>.delayed(wait, () {
+            if (!mounted) return;
+            TvDisplayService.instance.probeAll(tvConfig.addresses.toList());
+          }));
+        }
       }
     }
     if (!routeAllowed(activeRoute, role) && activeRoute != 'dashboard') {
@@ -506,10 +619,22 @@ class _AppShellState extends ConsumerState<AppShell> {
         return const ExpensesScreen();
       case 'refunds':
         return const RefundsScreen();
+      case 'refund_report':
+        return const RefundReportScreen();
       case 'stock_counts':
         return const StockCountScreen();
       case 'names_manager':
         return const NamesManagerScreen();
+      case 'partnership':
+        // الشراكة فيها أرقام الربح والمسحوبات — للمدير بس، وممنوع أي
+        // طريق تاني (زي البحث السريع) يوصّلها من غير الصلاحية.
+        if (!ref.watch(currentRoleProvider).canManageUsers) {
+          return const Center(
+            child: Text('مش عندك صلاحية تفتح شاشة الشراكة',
+                style: TextStyle(color: AppColors.danger)),
+          );
+        }
+        return const PartnershipScreen();
       case 'protected':
         return const ProtectedScreen();
       case 'backup':
@@ -566,10 +691,14 @@ class _AppShellState extends ConsumerState<AppShell> {
         return 'المصروفات';
       case 'refunds':
         return 'المرتجعات';
+      case 'refund_report':
+        return 'تقرير المرتجعات';
       case 'stock_counts':
         return 'الجرد الدوري';
       case 'names_manager':
         return 'إدارة الأسماء';
+      case 'partnership':
+        return 'إدارة الشراكة وحسابات الشركاء';
       case 'protected':
         return 'الشاشة المحمية';
       case 'backup':
@@ -623,10 +752,14 @@ class _AppShellState extends ConsumerState<AppShell> {
         return 'تسجيل المصروفات ومتابعة سجل العمليات';
       case 'refunds':
         return 'استرجاع دفعات العملاء ومرتجع البضاعة';
+      case 'refund_report':
+        return 'كل المرتجعات المسجّلة وبنودها وإجمالي المبالغ';
       case 'stock_counts':
         return 'حصيلة جرد الأصناف وضبط المخزون';
       case 'names_manager':
         return 'تعديل الأسماء في كل الكتالوج من مكان واحد';
+      case 'partnership':
+        return 'قسمة صافي الربح بين الشركاء ومسحوباتهم وسدادهم';
       case 'protected':
         return 'الإيرادات والأرباح والإيراد المتوقع — برقم سري';
       case 'backup':

@@ -140,7 +140,8 @@ class CustomersScreen extends ConsumerWidget {
                     ],
                   ),
                   const SizedBox(height: 2),
-                  Text(c.phone, style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+                  Text(c.phone.trim().isEmpty ? 'بدون رقم' : c.phone,
+                      style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
                 ],
               ),
             ),
@@ -208,7 +209,6 @@ class CustomersScreen extends ConsumerWidget {
   void _showAddCustomerDialog(BuildContext context, WidgetRef ref) {
     final nameController = TextEditingController();
     final phoneController = TextEditingController();
-    final emailController = TextEditingController();
     final limitController = TextEditingController();
     bool creditEnabled = false;
     String? errorText;
@@ -234,9 +234,8 @@ class CustomersScreen extends ConsumerWidget {
                 const SizedBox(height: AppSpacing.lg),
                 _dialogField(nameController, 'الاسم *'),
                 const SizedBox(height: AppSpacing.sm),
-                _dialogField(phoneController, 'رقم التليفون *', keyboardType: TextInputType.phone),
-                const SizedBox(height: AppSpacing.sm),
-                _dialogField(emailController, 'الإيميل (اختياري)', keyboardType: TextInputType.emailAddress),
+                _dialogField(phoneController, 'رقم التليفون (اختياري)',
+                    keyboardType: TextInputType.phone),
                 const SizedBox(height: AppSpacing.sm),
                 _creditToggle(
                   title: 'الدفع بالآجل (على الحساب)',
@@ -268,8 +267,8 @@ class CustomersScreen extends ConsumerWidget {
                         onPressed: () async {
                           final name = nameController.text.trim();
                           final phone = phoneController.text.trim();
-                          if (name.isEmpty || phone.isEmpty) {
-                            setState(() => errorText = 'الاسم ورقم التليفون مطلوبين');
+                          if (name.isEmpty) {
+                            setState(() => errorText = 'الاسم مطلوب');
                             return;
                           }
                           final limit = double.tryParse(limitController.text.trim().replaceAll(',', '')) ?? 0;
@@ -277,9 +276,6 @@ class CustomersScreen extends ConsumerWidget {
                             await ref.read(customerRepositoryProvider).addCustomer(
                                   name: name,
                                   phone: phone,
-                                  email: emailController.text.trim().isEmpty
-                                      ? null
-                                      : emailController.text.trim(),
                                   creditEnabled: creditEnabled,
                                   creditLimit: creditEnabled ? (limit < 0 ? 0 : limit) : 0,
                                 );
@@ -426,7 +422,10 @@ class _CustomerDetailDialogState extends ConsumerState<_CustomerDetailDialog> {
                           ],
                         ],
                       ),
-                      Text('${customer.phone} · ${customer.customerLevel}',
+                      Text(
+                          customer.phone.trim().isEmpty
+                              ? customer.customerLevel
+                              : '${customer.phone} · ${customer.customerLevel}',
                           style: const TextStyle(
                               color: AppColors.textSecondary, fontSize: 12)),
                     ],
@@ -656,7 +655,7 @@ class _EditCustomerDialogState extends ConsumerState<_EditCustomerDialog> {
                 controller: _phone,
                 keyboardType: TextInputType.phone,
                 style: const TextStyle(color: AppColors.textPrimary),
-                decoration: _dec('رقم التليفون *')),
+                decoration: _dec('رقم التليفون (اختياري)')),
             const SizedBox(height: AppSpacing.sm),
             TextField(
                 controller: _email,
@@ -723,8 +722,8 @@ class _EditCustomerDialogState extends ConsumerState<_EditCustomerDialog> {
                     onPressed: () async {
                       final name = _name.text.trim();
                       final phone = _phone.text.trim();
-                      if (name.isEmpty || phone.isEmpty) {
-                        setState(() => _error = 'الاسم ورقم التليفون مطلوبين');
+                      if (name.isEmpty) {
+                        setState(() => _error = 'الاسم مطلوب');
                         return;
                       }
                       final limit = double.tryParse(

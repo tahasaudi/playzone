@@ -15,6 +15,7 @@ mixin _$RefundDaoMixin on DatabaseAccessor<AppDatabase> {
   $CategoriesTable get categories => attachedDatabase.categories;
   $ProductsTable get products => attachedDatabase.products;
   $InvoiceItemsTable get invoiceItems => attachedDatabase.invoiceItems;
+  $RefundItemsTable get refundItems => attachedDatabase.refundItems;
   $AccountsTable get accounts => attachedDatabase.accounts;
   $AccountEntriesTable get accountEntries => attachedDatabase.accountEntries;
   RefundDaoManager get managers => RefundDaoManager(this);
@@ -45,6 +46,8 @@ class RefundDaoManager {
       $$ProductsTableTableManager(_db.attachedDatabase, _db.products);
   $$InvoiceItemsTableTableManager get invoiceItems =>
       $$InvoiceItemsTableTableManager(_db.attachedDatabase, _db.invoiceItems);
+  $$RefundItemsTableTableManager get refundItems =>
+      $$RefundItemsTableTableManager(_db.attachedDatabase, _db.refundItems);
   $$AccountsTableTableManager get accounts =>
       $$AccountsTableTableManager(_db.attachedDatabase, _db.accounts);
   $$AccountEntriesTableTableManager get accountEntries =>

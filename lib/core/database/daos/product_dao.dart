@@ -13,7 +13,7 @@ class ProductDao extends DatabaseAccessor<AppDatabase> with _$ProductDaoMixin {
     final query = select(products).join([
       innerJoin(categories, categories.id.equalsExp(products.categoryId)),
     ])
-      ..where(products.active.equals(true));
+      ..where(products.active.equals(true) & categories.active.equals(true));
 
     return query.watch().map((rows) => rows
         .map((row) => ProductWithCategory(
@@ -38,6 +38,11 @@ class ProductDao extends DatabaseAccessor<AppDatabase> with _$ProductDaoMixin {
   Future<int> insertProduct(ProductsCompanion entry) =>
       into(products).insert(entry);
 
+  /// Every product, active or not — the partnership ledger prices cost of
+  /// goods off this, because a soft-deleted product sold months ago still
+  /// carries its cost and must not read as free.
+  Future<List<ProductRow>> allProducts() => select(products).get();
+
   Future<bool> updateProduct(ProductsCompanion entry) =>
       update(products).replace(entry);
 
@@ -54,24 +59,30 @@ class ProductDao extends DatabaseAccessor<AppDatabase> with _$ProductDaoMixin {
             updatedAt: Value(DateTime.now())),
       );
 
-  Future<List<CategoryRow>> allCategories() => select(categories).get();
+  /// Live categories only — a deleted (soft-deleted) category is hidden
+  /// from every picker, list and the category strip.
+  Future<List<CategoryRow>> allCategories() =>
+      (select(categories)..where((c) => c.active.equals(true))).get();
 
   /// Live category list — a Stream so the product form's category picker
   /// refreshes the moment a category is added/renamed/deleted, with no
   /// manual invalidation anywhere in the app.
-  Stream<List<CategoryRow>> watchAllCategories() =>
-      (select(categories)..orderBy([(c) => OrderingTerm.asc(c.name)])).watch();
+  Stream<List<CategoryRow>> watchAllCategories() => (select(categories)
+        ..where((c) => c.active.equals(true))
+        ..orderBy([(c) => OrderingTerm.asc(c.name)]))
+      .watch();
 
   Future<CategoryRow?> categoryByName(String name) =>
       (select(categories)..where((c) => c.name.equals(name)))
           .getSingleOrNull();
 
-  /// How many products live under a category — the delete guard, so a
-  /// category is never removed while products still point at it.
+  /// How many live (visible) products sit under a category — used by the
+  /// delete-category confirmation so the cashier sees how many will go.
   Future<int> countProductsInCategory(int categoryId) async {
     final query = selectOnly(products)
       ..addColumns([products.id.count()])
-      ..where(products.categoryId.equals(categoryId));
+      ..where(products.categoryId.equals(categoryId) &
+          products.active.equals(true));
     final row = await query.getSingle();
     return row.read(products.id.count()) ?? 0;
   }
@@ -88,8 +99,19 @@ class ProductDao extends DatabaseAccessor<AppDatabase> with _$ProductDaoMixin {
             active: Value(active), updatedAt: Value(DateTime.now())),
       );
 
-  Future<void> deleteCategory(int id) =>
-      (delete(categories)..where((c) => c.id.equals(id))).go();
+  /// Soft-deletes a category (`active = 0`). The row stays so the products
+  /// inside it — and the invoice history that points at those products —
+  /// keep a live category to reference.
+  Future<void> setCategoryActive(int id, bool active) =>
+      (update(categories)..where((c) => c.id.equals(id)))
+          .write(CategoriesCompanion(active: Value(active)));
+
+  /// Hides (soft-deletes) every product in [categoryId]. Called when the
+  /// category itself is deleted, so its products leave the catalog / POS /
+  /// inventory immediately without their rows (and invoice lines) vanishing.
+  Future<void> deactivateCategoryProducts(int categoryId) =>
+      (update(products)..where((p) => p.categoryId.equals(categoryId)))
+          .write(const ProductsCompanion(active: Value(false)));
 
   Future<void> renameProduct(int id, String name) =>
       (update(products)..where((p) => p.id.equals(id))).write(

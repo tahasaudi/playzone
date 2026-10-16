@@ -95,6 +95,13 @@ class _TvBroadcasterState extends ConsumerState<TvBroadcaster> {
   @override
   Widget build(BuildContext context) {
     final config = ref.watch(tvConfigProvider);
+    // Cards mode is off: the wall shows the console on HDMI and there is
+    // nothing to preview or capture. Bailing here, before subscribing to the
+    // one-second tick, drops the rebuild entirely instead of doing one a second
+    // all evening for a preview that is not on screen.
+    if (!config.enabled || config.ip.isEmpty || !config.showCards) {
+      return const SizedBox.shrink();
+    }
     // One-second tick: the wall clock has to move, and it also keeps a
     // frame flowing so the capture below can run.
     ref.watch(oneSecondTickerProvider);
@@ -103,9 +110,6 @@ class _TvBroadcasterState extends ConsumerState<TvBroadcaster> {
 
     // The capture boundary only needs to exist in cards mode; without it
     // there is nothing to photograph and the preview would be dead weight.
-    if (!config.enabled || config.ip.isEmpty || !config.showCards) {
-      return const SizedBox.shrink();
-    }
 
     final bound = config.deviceId;
     final shown = bound == null

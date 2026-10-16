@@ -15,6 +15,7 @@ class SessionDetailsPanel extends StatelessWidget {
     this.onCheckout,
     this.onOrder,
     this.onSwitchMode,
+    this.onReturnOne,
   });
 
   final DeviceUiModel device;
@@ -22,6 +23,10 @@ class SessionDetailsPanel extends StatelessWidget {
   final VoidCallback? onCheckout;
   final VoidCallback? onOrder;
   final VoidCallback? onSwitchMode;
+
+  /// Takes one unit of the given product off the session's tab and back to
+  /// stock — the quick "إرجاع" on each ordered line. Null disables it.
+  final ValueChanged<int>? onReturnOne;
 
   static double _parseEgp(String? s) =>
       double.tryParse((s ?? '').replaceFirst('EGP ', '').trim()) ?? 0;
@@ -135,14 +140,16 @@ class SessionDetailsPanel extends StatelessWidget {
     );
   }
 
-  /// What was ordered, line by line, under the "الطلبات" sum.
+  /// What was ordered, line by line, under the "الطلبات" sum — each with a
+  /// quick "إرجاع" that takes one unit off the tab and puts it back on the
+  /// shelf.
   ///
   /// Sits in the panel rather than on the card because it is an answer to a
   /// question, not a figure: nobody reads a list off a card six tiles across,
   /// but "what did he order" is exactly what gets asked at the moment the
   /// panel is open. Kept to one line per product so a session with a long
   /// order scrolls instead of pushing the total off the panel.
-  List<Widget> _orderedItems(List<String> lines) {
+  List<Widget> _orderedItems(List<OrderLineUi> lines) {
     return [
       const Padding(
         padding: EdgeInsets.only(top: 2, bottom: 2),
@@ -158,17 +165,58 @@ class SessionDetailsPanel extends StatelessWidget {
           child: Row(
             children: [
               Expanded(
-                child: Text(line,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 12, color: AppColors.textSecondary)),
+                child: Text(
+                  line.quantity > 1 ? '${line.quantity}× ${line.label}' : line.label,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 12, color: AppColors.textSecondary),
+                ),
               ),
-              Icon(Icons.check_rounded,
-                  size: 12, color: AppColors.textTertiary),
+              Text('EGP ${line.total.toStringAsFixed(2)}',
+                  style: const TextStyle(
+                      fontSize: 12, color: AppColors.textTertiary)),
+              if (line.productId != null && onReturnOne != null) ...[
+                const SizedBox(width: 6),
+                _returnChip(line.productId!),
+              ],
             ],
           ),
         ),
     ];
+  }
+
+  /// The one-tap "إرجاع": hand one of this item back and let it return to
+  /// stock, without opening the full order screen.
+  Widget _returnChip(int productId) {
+    return Tooltip(
+      message: 'إرجاع واحدة للمخزون',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => onReturnOne?.call(productId),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: AppColors.danger.withOpacity(0.14),
+              borderRadius: AppRadius.smallR,
+              border: Border.all(color: AppColors.danger.withOpacity(0.4)),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.undo_rounded, size: 12, color: AppColors.danger),
+                SizedBox(width: 3),
+                Text('إرجاع',
+                    style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.danger)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _row(String label, String value, {bool emphasize = false}) {

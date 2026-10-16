@@ -625,6 +625,92 @@ class TvDisplayService {
     return ok;
   }
 
+  /// Shows a one-off "this is me" label on one screen.
+  ///
+  /// The room's screens are addressed by IP, and a wall that is just showing
+  /// its console says nothing about which address it is. Pressing this paints
+  /// that screen's own name and address across the television, so a person can
+  /// stand in front of it and rename exactly the right entry instead of
+  /// guessing. It takes itself down, so nobody has to remember to.
+  Future<bool> identify(
+    String tvIp, {
+    required String name,
+    String? mac,
+  }) async {
+    if (!tvAllowed) return false;
+    final previous = _image;
+    final png = await _buildIdentifyFrame(name, tvIp, mac);
+    // The picture server hands every screen the same bytes, so this is set
+    // only long enough to send it to this one screen, and put back on the way
+    // out below.
+    _image = png;
+    _imageBytes = png.length;
+    _blanked = false;
+    _tvFetched = false;
+    final ok = await _pushOnce(tvIp);
+    _identifyTimers[tvIp]?.cancel();
+    _identifyTimers[tvIp] = Timer(const Duration(seconds: 12), () {
+      unawaited(_endIdentify(tvIp, previous ?? _black));
+    });
+    return ok;
+  }
+
+  final Map<String, Timer> _identifyTimers = {};
+
+  /// Puts a screen back the way `identify` found it.
+  Future<void> _endIdentify(String tvIp, Uint8List? restore) async {
+    _identifyTimers.remove(tvIp)?.cancel();
+    _image = restore ?? _black;
+    _imageBytes = _image?.length ?? 0;
+    // A screen that is paid for stays dark; anything else goes back to its
+    // console, which is what the normal flow would leave it doing.
+    if (_closedScreens.contains(tvIp)) {
+      await blank();
+      await _pushOnce(tvIp);
+    } else {
+      await releaseToInput(tvIp);
+    }
+  }
+
+  /// A 1280×720 frame naming one screen, for the "عرّفني" button.
+  static Future<Uint8List> _buildIdentifyFrame(
+      String name, String ip, String? mac) async {
+    const double w = 1280, h = 720;
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder, const ui.Rect.fromLTWH(0, 0, w, h));
+    // A colour no wall normally shows, so it reads as "somebody asked for
+    // this" rather than as a broken or swapped screen.
+    canvas.drawRect(const ui.Rect.fromLTWH(0, 0, w, h),
+        ui.Paint()..color = const ui.Color(0xFF130B33));
+
+    void line(String text, double y, double size, ui.Color color) {
+      final builder = ui.ParagraphBuilder(ui.ParagraphStyle(
+        textAlign: ui.TextAlign.center,
+        fontSize: size,
+        fontWeight: ui.FontWeight.w700,
+      ))
+        ..pushStyle(ui.TextStyle(
+            color: color, fontSize: size, fontWeight: ui.FontWeight.w700))
+        ..addText(text);
+      final paragraph = builder.build()
+        ..layout(const ui.ParagraphConstraints(width: w));
+      canvas.drawParagraph(paragraph, ui.Offset(0, y));
+    }
+
+    line(name, 120, 82, const ui.Color(0xFFFFFFFF));
+    line('أنت الشاشة دي', 250, 34, const ui.Color(0xFFB9AEE8));
+    line(ip, 360, 64, const ui.Color(0xFF6FE3B0));
+    if (mac != null && mac.isNotEmpty) {
+      line('MAC:  $mac', 480, 40, const ui.Color(0xFFCFC6F2));
+    }
+    line('PlayZone', 600, 28, const ui.Color(0xFF8A82B0));
+
+    final image = await recorder.endRecording().toImage(w.toInt(), h.toInt());
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    return data!.buffer.asUint8List();
+  }
+
   /// A single SOAP push, for callers that manage their own timing.
   Future<bool> pushOnceNow() async {
     if (kHardLockWallNetwork) return false;
@@ -695,7 +781,7 @@ class TvDisplayService {
           return;
         }
         if (refusesDlna(tvIp)) return;
-        await Future<void>.delayed(const Duration(seconds: 8));
+        await Future<void>.delayed(const Duration(seconds: 2));
       }
       // Nothing yet — the screen is probably off. Come back a few times on a
       // slow, self-scheduled rhythm instead of hammering it, so a screen that
@@ -757,6 +843,26 @@ class TvDisplayService {
       log.note('طلبنا بحث جديد عن الشاشة');
     }
     unawaited(warmUp(tvIp: tvIp, force: true));
+  }
+
+  /// Looks for this screen once, right now, and reports whether it answered.
+  ///
+  /// The per-screen "ابحث عن الشاشة" button used to fire the background
+  /// warm-up and then announce "خلصنا البحث" on a fixed timer, so it always
+  /// looked like it had worked. Now the button's answer is the real result.
+  Future<bool> searchNow(String tvIp) async {
+    if (!tvAllowed) return false;
+    _currentTvIp = tvIp;
+    _lastDiscoveryAt.remove(tvIp);
+    _controlCache.remove(tvIp);
+    _dlnaRefused.remove(tvIp);
+    _suspect.remove(tvIp);
+    _targetHost = tvIp;
+    final found = await _findControlUrl(tvIp);
+    // Off right now? Keep the slow background retries going, so it still comes
+    // good by itself when the panel wakes up.
+    if (found == null) unawaited(warmUp(tvIp: tvIp));
+    return found != null;
   }
 
   final Set<String> _warming = {};
@@ -1095,20 +1201,26 @@ class TvDisplayService {
   /// SSDP and parse the LOCATION it hands back. The old fixed port list is
   /// only a fallback.
   Future<String?> _findControlUrl(String tvIp) async {
-    // Re-use the endpoint we already found. The TV only renumbers its port
-    // on reboot, and a command that fails is what tells us to look again.
+    // Re-use the endpoint we already found — unless a command against it has
+    // already failed. A suspect address must be re-checked, never handed back:
+    // returning it here is what kept a screen whose port had moved failing for
+    // the full thirty minutes of the cache, one slow timeout at a time, while
+    // the re-discovery meant to fix it kept "succeeding" by finding the very
+    // entry that was dead.
     final cached = _controlCache[tvIp];
-    final fresh = cached != null &&
+    final usable = cached != null && !_suspect.contains(tvIp);
+    final fresh = usable &&
         DateTime.now().difference(cached.$2) < const Duration(minutes: 30);
     if (fresh) return cached.$1;
     // The cooldown is PER TV. A single shared timestamp would let the first
     // screen's discovery throttle the second one's, leaving it unreachable
     // for as long as the app ran.
     final last = _lastDiscoveryAt[tvIp];
-    if (!fresh &&
-        last != null &&
+    if (last != null &&
         DateTime.now().difference(last) < const Duration(seconds: 30)) {
-      return cached?.$1;
+      // Still cooling down: hand back the last known address only when it is
+      // not the one that just failed.
+      return usable ? cached.$1 : null;
     }
     _lastDiscoveryAt[tvIp] = DateTime.now();
 
@@ -1138,10 +1250,11 @@ class TvDisplayService {
     // is tried alongside it, but a reply we filter out must not stop the
     // scan, which used to leave the screen unreachable all day.
     _targetHost = tvIp;
-    final found = await _scanLocations(tvIp);
-    if (found.isNotEmpty) return _firstControlUrl(tvIp, found);
-    found.addAll(await _ssdpSearch(tvIp));
-
+    final scanned = await _scanLocations(tvIp);
+    if (scanned != null) return scanned;
+    // SSDP is the fallback, not the first move: it is the slower of the two and
+    // the one a filtered reply can quietly defeat.
+    final found = await _ssdpSearch(tvIp);
     return _firstControlUrl(tvIp, found);
   }
 
@@ -1164,6 +1277,9 @@ class TvDisplayService {
   /// been reachable all along and one that needs looking at.
   void _rememberEndpoint(String tvIp, String control) {
     _controlCache[tvIp] = (control, DateTime.now());
+    // A freshly found endpoint is proof the screen is answering again, so drop
+    // any "needs another look" verdict from the attempt that failed before it.
+    _suspect.remove(tvIp);
     final log = _log(tvIp);
     if (log.controlUrl != control) {
       log.controlUrl = control;
@@ -1195,30 +1311,41 @@ class TvDisplayService {
   String _lastSsdpSample = '';
   String _lastLocations = '';
 
-  /// Sweeps the port range LG uses for its DLNA services and reads each
-  /// device description, looking for the one that carries an AVTransport
-  /// endpoint.
+  /// Sweeps the port range LG uses for its DLNA services and returns the first
+  /// AVTransport endpoint it finds, or null when the screen answers nothing.
   ///
-  /// This is the method that actually works. The TV picks a fresh renderer
-  /// port on every boot, so a cached list is always behind; the sweep is
-  /// what keeps a screen reachable after it has been restarted. Batched and
-  /// short-timeout, it costs about ten seconds — which is why it runs in the
-  /// background and never on the path a session start waits for.
-  Future<List<String>> _scanLocations(String tvIp) async {
+  /// This is the method that actually works: the TV picks a fresh renderer
+  /// port on every boot, so a cached list is always behind. Two things keep it
+  /// fast now —
+  ///  * a wide batch (512 sockets in flight instead of 96), because the OS
+  ///    multiplexes them and a closed port on a reachable host rejects at
+  ///    once; and
+  ///  * it stops the moment one of the open ports answers with an AVTransport
+  ///    endpoint, instead of testing all 2,100 ports first and only then
+  ///    reading them.
+  /// What used to be "about ten seconds" is now usually under two, and often
+  /// well under one when the screen is live.
+  Future<String?> _scanLocations(String tvIp) async {
+    const batch = 512;
+    const total = 2101; // ports 1000..3100 inclusive
+    var scanned = 0;
     final found = <String>[];
-    const batch = 96;
-    final candidates = <int>[
-      for (var p = 1000; p <= 2200; p++) p,
-      for (var p = 2201; p <= 3100; p++) p,
-    ];
-
     try {
-      for (var i = 0; i < candidates.length; i += batch) {
-        final slice =
-            candidates.sublist(i, (i + batch).clamp(0, candidates.length));
-        final results = await Future.wait(slice.map(_isPortOpen));
-        for (var j = 0; j < slice.length; j++) {
-          if (results[j] == true) found.add('http://$tvIp:${slice[j]}/');
+      for (var start = 1000; start <= 3100; start += batch) {
+        final ports = [
+          for (var p = start; p <= 3100 && p < start + batch; p++) p,
+        ];
+        final results = await Future.wait(ports.map(_isPortOpen));
+        scanned += ports.length;
+        final open = <String>[
+          for (var j = 0; j < ports.length; j++)
+            if (results[j] == true) 'http://$tvIp:${ports[j]}/',
+        ];
+        found.addAll(open);
+        _lastLocations = 'scanned $scanned/$total, open: ${found.length}';
+        if (open.isNotEmpty) {
+          final control = await _firstControlUrl(tvIp, open);
+          if (control != null) return control;
         }
       }
     } catch (e) {
@@ -1226,9 +1353,9 @@ class TvDisplayService {
       // beats none, and the renderer's port could well be in it.
       _lastError = 'فحص المنافذ: $e';
     }
-    _lastLocations = 'scanned ${candidates.length}, open: ${found.length}'
+    _lastLocations = 'scanned $scanned/$total, open: ${found.length}'
         '${found.isEmpty ? '' : ' -> ${found.map((u) => Uri.parse(u).port).join(',')}'}';
-    return found;
+    return null;
   }
 
   /// Whether something is listening on [port] of the TV.
@@ -1244,7 +1371,7 @@ class TvDisplayService {
       socket = await Socket.connect(
         _targetHost,
         port,
-        timeout: const Duration(milliseconds: 400),
+        timeout: const Duration(milliseconds: 300),
       );
       return true;
     } catch (_) {
@@ -1275,7 +1402,9 @@ class TvDisplayService {
         // never falling back to a port scan of the real TV.
         if (datagram.address.address != tvIp) return;
         final text = utf8.decode(datagram.data, allowMalformed: true);
-        final match = RegExp(r'(?im)^LOCATION:\s*(\S+)').firstMatch(text);
+        final match = RegExp(r'^LOCATION:\s*(\S+)',
+                multiLine: true, caseSensitive: false)
+            .firstMatch(text);
         if (match != null) {
           locations.add(match.group(1)!.trim());
         } else if (_ssdpDatagrams <= 3) {
@@ -1296,9 +1425,9 @@ class TvDisplayService {
           InternetAddress('239.255.255.250'),
           1900,
         );
-        await Future<void>.delayed(const Duration(milliseconds: 400));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
       }
-      await Future<void>.delayed(const Duration(milliseconds: 1600));
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
     } catch (e) {
       _lastError = 'SSDP search: $e';
     } finally {
@@ -1313,7 +1442,7 @@ class TvDisplayService {
   Future<String?> _controlUrlFrom(String location) async {
     HttpClient? client;
     try {
-      client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+      client = HttpClient()..connectionTimeout = const Duration(milliseconds: 1200);
       final req = await client.getUrl(Uri.parse(location));
       final res = await req.close();
       if (res.statusCode != 200) return null;

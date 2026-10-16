@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'hard_lock.dart';
 import 'tv_display_service.dart';
+import 'tv_mac_index.dart';
 
 /// Controls the LG TV's wall screen, so a session can switch it on and off.
 ///
@@ -39,6 +40,12 @@ class TvPowerService {
     '192.168.1.22': ['A8:A2:37:41:98:7E', '7C:64:6C:05:B5:82'],
     // 65UP7500PVG — PS5 corner
     '192.168.1.31': ['4C:BA:D7:4A:25:26', 'AC:5A:F0:99:24:11'],
+    // 55UP7550PVG
+    '192.168.1.38': ['C4:E5:32:17:6A:50', '74:E6:B8:30:36:F1'],
+    // 65UQ80006LD
+    '192.168.1.13': ['B8:16:5F:DE:CA:9A', '7C:64:6C:E4:4E:CC'],
+    // UR78006LL
+    '192.168.1.11': ['D8:E3:5E:67:9F:28', '64:E4:A5:4A:D7:EF'],
   };
 
   /// Used when a screen's address is not one we know yet.
@@ -47,11 +54,229 @@ class TvPowerService {
     '7C:64:6C:05:B5:82',
     '4C:BA:D7:4A:25:26',
     'AC:5A:F0:99:24:11',
+    'C4:E5:32:17:6A:50',
+    '74:E6:B8:30:36:F1',
+    'B8:16:5F:DE:CA:9A',
+    '7C:64:6C:E4:4E:CC',
+    'D8:E3:5E:67:9F:28',
+    '64:E4:A5:4A:D7:EF',
   ];
 
   /// The MACs to poke for [tvIp], falling back to every known one.
   static List<String> macsFor(String tvIp) =>
       macsByScreen[tvIp] ?? fallbackMacs;
+
+  /// The address the panel shows so staff can match a screen by its label.
+  static String? primaryMacFor(String tvIp) {
+    final list = macsByScreen[tvIp];
+    return (list == null || list.isEmpty) ? null : list.first;
+  }
+
+  /// MACs learned for addresses the fixed table does not know, so a screen
+  /// that is moved to a new address still reports the right label. A cached
+  /// `null` means "we asked and it did not answer" — kept so a screen that is
+  /// off does not get pinged again on every rebuild of the page.
+  static final Map<String, String?> _learned = {};
+
+  /// The MAC behind [tvIp]:
+  ///  - the fixed table if this is one of the shop's screens, otherwise
+  ///  - a lookup in this machine's own neighbour table, so typing a different
+  ///    address brings that address's MAC without anyone having to look it up.
+  ///
+  /// The MAC is the part that stays put when a screen's address changes, so it
+  /// is the label the rest of the app recognises a screen by.
+  static Future<String?> resolveMac(String tvIp) async {
+    final known = primaryMacFor(tvIp);
+    if (known != null) return known;
+    if (_learned.containsKey(tvIp)) return _learned[tvIp];
+    try {
+      // One nudge so the entry exists, then read it. `arp -a <ip>` limits the
+      // output to that one address.
+      await Process.run('ping', ['-n', '1', '-w', '700', tvIp]);
+      final res = await Process.run('arp', ['-a', tvIp]);
+      final match = RegExp(r'([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}')
+          .firstMatch(res.stdout.toString());
+      final mac = match?.group(0)?.replaceAll('-', ':').toUpperCase();
+      _learned[tvIp] = mac;
+      return mac;
+    } catch (_) {
+      _learned[tvIp] = null;
+      return null;
+    }
+  }
+
+  /// The MACs the shop's own table lists for [tvIp] — empty for anything the
+  /// table does not know, which is the caller's cue to look it up instead.
+  static List<String> knownMacsFor(String tvIp) =>
+      macsByScreen[tvIp.trim()] ?? const <String>[];
+
+  /// Every neighbour this machine can see right now, as IP → MAC.
+  ///
+  /// This is the one direction that answers "the screen moved, where is it
+  /// now?": a screen keeps its MAC when the router hands it a different
+  /// address, so the MAC is what we follow and the address is what we find.
+  ///
+  /// The table it reads is a cache, and it only holds the neighbours this
+  /// machine has actually spoken to. So we speak to the whole subnet first —
+  /// one tiny UDP datagram per address is enough to make the operating system
+  /// resolve it — and only then read the table back.
+  /// Every neighbour this machine can see right now, as IP → MAC.
+  ///
+  /// [targets] are the MACs actually being looked for. When every one of them
+  /// has answered, the sweep stops instead of waiting out its budget — which is
+  /// what makes it feel instant when the screens are right there, instead of
+  /// pausing a fixed second "just in case".
+  static Future<Map<String, String>> discoverNeighbours({
+    Set<String> targets = const <String>{},
+  }) async {
+    final wanted = targets.map((m) => m.toUpperCase()).toSet();
+
+    // The table may already hold what we want — a screen we spoke to a minute
+    // ago is still a neighbour. Reading it is nearly free, so try it first and
+    // skip the sweep entirely when the screens are already in it.
+    var table = await _readNeighbourTable();
+    if (_foundAll(wanted, table)) return table;
+
+    await _pokeLocalSubnet();
+
+    // Poll rather than sleep a fixed second: answers trickle in over a few
+    // hundred milliseconds, so stopping the moment the last one lands is what
+    // makes this feel immediate instead of "why is it waiting".
+    for (final wait in const [80, 110, 140, 170, 200, 230, 260]) {
+      await Future<void>.delayed(Duration(milliseconds: wait));
+      table = await _readNeighbourTable();
+      if (_foundAll(wanted, table)) break;
+    }
+    return table;
+  }
+
+  static bool _foundAll(Set<String> wanted, Map<String, String> table) {
+    if (wanted.isEmpty) return false;
+    for (final mac in wanted) {
+      if (!table.containsKey(mac)) return false;
+    }
+    return true;
+  }
+
+  static Map<String, String>? _cachedTable;
+  static DateTime? _cachedTableAt;
+
+  /// The operating system's neighbour table, read without any sweep.
+  ///
+  /// This is the cheap half of [discoverNeighbours]: it reports only what the
+  /// machine already knows, which is exactly what a command path wants — a
+  /// MAC → address lookup that costs one `arp -a` at worst and nothing at all
+  /// while the last read is still fresh. Waking a screen, or steering one whose
+  /// lease moved, must never wait on a /24 sweep first.
+  static Future<Map<String, String>> neighbourTable({
+    Duration maxAge = const Duration(seconds: 4),
+  }) async {
+    final at = _cachedTableAt;
+    if (_cachedTable != null &&
+        at != null &&
+        DateTime.now().difference(at) < maxAge) {
+      return _cachedTable!;
+    }
+    final table = await _readNeighbourTable();
+    _cachedTable = table;
+    _cachedTableAt = DateTime.now();
+    return table;
+  }
+
+  /// Pokes every host on every /24 this machine is on, plus the /24 the shop's
+  /// own screens live on.
+  ///
+  /// All of them, not just one: a counter PC often carries several IPv4
+  /// addresses at once — Wi-Fi, cable, and the shared-connection adapter
+  /// Windows invents — and picking the wrong one would sweep an empty network
+  /// while the screens sit on the other.
+  static Future<void> _pokeLocalSubnet() async {
+    final prefixes = <String>{};
+    for (final ip in await _localIPv4s()) {
+      final prefix = _subnetOf(ip);
+      if (prefix != null) prefixes.add(prefix);
+    }
+    for (final ip in macsByScreen.keys) {
+      final prefix = _subnetOf(ip);
+      if (prefix != null) prefixes.add(prefix);
+    }
+
+    final hosts = <String>{
+      for (final prefix in prefixes)
+        for (var i = 1; i <= 254; i++) '$prefix.$i',
+    };
+
+    RawDatagramSocket? socket;
+    try {
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.broadcastEnabled = true;
+      // Two ports, because some stacks skip the send entirely when the port is
+      // filtered before the ARP lookup happens.
+      for (final host in hosts) {
+        for (final port in const [9, 1]) {
+          try {
+            socket.send(const [0], InternetAddress(host), port);
+          } catch (_) {
+            // An unroutable address is not fatal — the rest still resolve.
+          }
+        }
+      }
+    } catch (_) {
+      // A failed poke only means a shorter table; the read still happens.
+    } finally {
+      socket?.close();
+    }
+  }
+
+  static String? _subnetOf(String ip) {
+    final parts = ip.split('.');
+    if (parts.length != 4) return null;
+    return '${parts[0]}.${parts[1]}.${parts[2]}';
+  }
+
+  /// Every usable IPv4 address on this machine, ignoring loopback and the
+  /// self-assigned 169.254.x addresses a cable with no network produces.
+  static Future<List<String>> _localIPv4s() async {
+    final found = <String>[];
+    try {
+      final interfaces = await NetworkInterface.list(
+          type: InternetAddressType.IPv4, includeLoopback: false);
+      for (final interface in interfaces) {
+        for (final address in interface.addresses) {
+          final ip = address.address;
+          if (ip.startsWith('169.254.')) continue;
+          found.add(ip);
+        }
+      }
+    } catch (_) {}
+    return found;
+  }
+
+  /// Reads `arp -a` into IP → MAC, dropping multicast and broadcast rows that
+  /// are never a screen.
+  static Future<Map<String, String>> _readNeighbourTable() async {
+    final table = <String, String>{};
+    try {
+      final res = await Process.run('arp', ['-a']);
+      final row = RegExp(
+          r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9A-Fa-f]{2}(?:[-:][0-9A-Fa-f]{2}){5})\b');
+      for (final line in res.stdout.toString().split('\n')) {
+        final match = row.firstMatch(line);
+        if (match == null) continue;
+        final ip = match.group(1)!;
+        if (ip == '255.255.255.255') continue;
+        final mac = match.group(2)!.replaceAll('-', ':').toUpperCase();
+        // The least-significant bit of the first octet marks a multicast
+        // address; those (and the all-FF broadcast) are never a TV.
+        final firstByte = int.tryParse(mac.substring(0, 2), radix: 16) ?? 0;
+        if (firstByte & 1 == 1) continue;
+        table.putIfAbsent(mac, () => ip);
+      }
+    } catch (_) {
+      // No arp command means no table; the caller shows a plain "not found".
+    }
+    return table;
+  }
 
   bool _paired = false;
   bool get isPaired => _paired;
@@ -91,6 +316,9 @@ class TvPowerService {
   /// feel like the whole app had frozen.
   bool turnOn(String tvIp) {
     if (kHardLockWallNetwork) return true;
+    // Anchor on the MAC, not the lease: steer the screen wherever it answers
+    // now, so a router move never sends this command into an empty address.
+    tvIp = TvMacIndex.instance.resolve(tvIp);
     _lastCommandAt = DateTime.now();
     _beginTiming();
     _tvHost = tvIp;
@@ -194,6 +422,9 @@ class TvPowerService {
 
   bool turnOff(String tvIp) {
     if (kHardLockWallNetwork) return true;
+    // Same MAC-first anchor as [turnOn]: a screen that moved is still the same
+    // screen, and this command belongs on its new address.
+    tvIp = TvMacIndex.instance.resolve(tvIp);
     _lastCommandAt = DateTime.now();
     _beginTiming();
     _tvHost = tvIp;
@@ -272,7 +503,7 @@ class TvPowerService {
       try {
         socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
         socket.broadcastEnabled = true;
-        for (final target in const ['255.255.255.255', '192.168.1.255']) {
+        for (final target in await _broadcastTargets()) {
           socket.send(bytes, InternetAddress(target), 9);
         }
         await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -282,6 +513,22 @@ class TvPowerService {
         socket?.close();
       }
     }
+  }
+
+  /// Every broadcast a magic packet should go out on: the global one plus the
+  /// directed broadcast of each subnet this machine is really on.
+  ///
+  /// A counter PC often sits on Wi-Fi and cable at once, and the screens may
+  /// live on either. Waking them used to depend on a single hard-coded
+  /// `192.168.1.255`, so on any other subnet the packet went nowhere and
+  /// "افتح الشاشة" quietly did nothing.
+  Future<List<String>> _broadcastTargets() async {
+    final targets = <String>{'255.255.255.255'};
+    for (final ip in await _localIPv4s()) {
+      final prefix = _subnetOf(ip);
+      if (prefix != null) targets.add('$prefix.255');
+    }
+    return targets.toList();
   }
 
   List<int> _magicPacket(String mac) {

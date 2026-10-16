@@ -62,6 +62,16 @@ class InvoiceLineInput {
   double get total => unitPrice * quantity;
 }
 
+/// An invoice plus the customer attached to it, if any.
+///
+/// The refunds screen lists/searches this so the cashier can find a bill by
+/// customer name or phone instead of having to remember its number.
+class InvoiceWithCustomer {
+  InvoiceWithCustomer({required this.invoice, this.customer});
+  final InvoiceRow invoice;
+  final CustomerRow? customer;
+}
+
 @DriftAccessor(tables: [
   Invoices,
   InvoiceItems,
@@ -79,6 +89,28 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
         ..orderBy([(i) => OrderingTerm.desc(i.createdAt)])
         ..limit(limit))
       .watch();
+
+  /// Recent invoices joined with their customer (if any), newest first.
+  ///
+  /// A wider window than [watchRecent] because this backs the refunds search
+  /// box: you should be able to find "آخر الفاتورة" without knowing its code.
+  Stream<List<InvoiceWithCustomer>> watchSearchable({int limit = 200}) {
+    final query = select(invoices).join([
+      leftOuterJoin(customers, customers.id.equalsExp(invoices.customerId)),
+    ])
+      // A live session's open café tab is not a bill: it has been rung up but
+      // not paid for, and offering it in the refunds search would let staff
+      // "return" drinks that were never charged.
+      ..where(invoices.paymentMethod.isNotValue('unpaid'))
+      ..orderBy([OrderingTerm.desc(invoices.createdAt)])
+      ..limit(limit);
+    return query.watch().map((rows) => rows
+        .map((r) => InvoiceWithCustomer(
+              invoice: r.readTable(invoices),
+              customer: r.readTableOrNull(customers),
+            ))
+        .toList());
+  }
 
   /// Today's invoices — used for the Dashboard's daily revenue KPI and
   /// the per-employee breakdown (grouping happens in the repository,
@@ -151,6 +183,11 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
       if (settled &&
           effectiveCash + effectiveCard + paidOnAccount + 0.001 < total) {
         throw Exception('مبلغ الدفع أقل من الإجمالي المطلوب');
+      }
+      // الأجل is a debt against a named person: without a customer nobody owes
+      // it, so the money would leave the drawer with no balance behind it.
+      if (settled && paidOnAccount > 0 && customerId == null) {
+        throw Exception('الدفع على الحساب محتاج عميل مسجّل');
       }
       final paymentMethod = !settled
           ? 'unpaid'
@@ -340,10 +377,144 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
     for (final id in ids) {
       // Unsettled drafts post no ledger entry, but clearing any that exist
       // keeps this safe to run against a database written by an older build.
-      await (delete(accountEntries)..where((e) => e.sourceId.equals(id))).go();
+      // Scoped to source == 'invoice' so a stray expense/refund that happens
+      // to share the id is never touched.
+      await (delete(accountEntries)
+            ..where((e) =>
+                e.source.equals('invoice') & e.sourceId.equals(id)))
+          .go();
       await (delete(invoiceItems)..where((l) => l.invoiceId.equals(id))).go();
     }
     await (delete(invoices)..where((i) => i.id.isIn(ids))).go();
+  }
+
+  /// Rewrites a live session's open café tab to exactly [lines].
+  ///
+  /// The cashier takes an order, then the customer changes their mind — "خلّيني
+  /// آخد واحدة بس" — and the tab has to follow. Every drink on the tab is an
+  /// unpaid draft, never money in hand, so the honest move is to replace the
+  /// drafts with the corrected set rather than to keep the mistake and refund
+  /// it later.
+  ///
+  /// Stock is adjusted by the *difference*, not re-applied wholesale: adding two
+  /// and then dropping one leaves exactly one off the shelf, and emptying the
+  /// tab puts everything back. Only [paymentMethod] == 'unpaid' drafts are in
+  /// scope, so a paid café order is never touched (that one is corrected
+  /// through المرتجعات).
+  ///
+  /// Returns the id of the freshly-written draft, or null when the tab is now
+  /// empty and every draft was cleared.
+  Future<int?> syncSessionDraft({
+    required int sessionId,
+    required List<InvoiceLineInput> lines,
+    int? customerId,
+    int? employeeId,
+  }) {
+    return transaction(() async {
+      final drafts = await (select(invoices)
+            ..where((i) =>
+                i.sessionId.equals(sessionId) &
+                i.paymentMethod.equals('unpaid')))
+          .get();
+
+      // Keep whatever the tab already pointed at when the caller does not say —
+      // a quick "إرجاع واحد" rewrites the tab without re-asking who it belongs
+      // to, and the draft must not lose its customer on the way through.
+      final prevCustomerId =
+          drafts.isNotEmpty ? drafts.first.customerId : null;
+      final prevEmployeeId =
+          drafts.isNotEmpty ? drafts.first.employeeId : null;
+
+      // What is on the tab right now, per product, plus the earliest moment
+      // each was asked for so the corrected tab keeps the original time.
+      final existingQty = <int, int>{};
+      final existingAt = <int, DateTime>{};
+      if (drafts.isNotEmpty) {
+        final ids = drafts.map((d) => d.id).toList();
+        final rows = await (select(invoiceItems)
+              ..where((l) => l.invoiceId.isIn(ids)))
+            .get();
+        for (final row in rows) {
+          final pid = row.productId;
+          if (pid == null) continue;
+          existingQty[pid] = (existingQty[pid] ?? 0) + row.quantity;
+          final at = row.createdAt;
+          if (at != null) {
+            final prev = existingAt[pid];
+            if (prev == null || at.isBefore(prev)) existingAt[pid] = at;
+          }
+        }
+      }
+
+      final desiredQty = <int, int>{};
+      for (final l in lines) {
+        final pid = l.productId;
+        if (pid == null) continue;
+        desiredQty[pid] = (desiredQty[pid] ?? 0) + l.quantity;
+      }
+
+      // Move stock by the net change: a drink taken back returns to the shelf.
+      for (final pid in {...existingQty.keys, ...desiredQty.keys}) {
+        final delta = (desiredQty[pid] ?? 0) - (existingQty[pid] ?? 0);
+        if (delta == 0) continue;
+        final product = await (select(products)
+              ..where((p) => p.id.equals(pid)))
+            .getSingleOrNull();
+        if (product == null) continue;
+        await (update(products)..where((p) => p.id.equals(pid)))
+            .write(ProductsCompanion(
+          stockQuantity: Value(product.stockQuantity - delta),
+          updatedAt: Value(DateTime.now()),
+        ));
+      }
+
+      // Fold the old drafts away — they carried no money and no ledger entry.
+      if (drafts.isNotEmpty) {
+        final ids = drafts.map((d) => d.id).toList();
+        for (final id in ids) {
+          // source-scoped, so this can never reach an expense or refund entry
+          // that happens to carry the same numeric id.
+          await (delete(accountEntries)
+                ..where((e) =>
+                    e.source.equals('invoice') & e.sourceId.equals(id)))
+              .go();
+        }
+        await (delete(invoiceItems)..where((l) => l.invoiceId.isIn(ids))).go();
+        await (delete(invoices)..where((i) => i.id.isIn(ids))).go();
+      }
+
+      final kept = lines
+          .where((l) => l.productId != null && l.quantity > 0)
+          .toList();
+      if (kept.isEmpty) return null;
+
+      final subtotal = kept.fold<double>(0, (sum, l) => sum + l.total);
+      final invoiceId = await into(invoices).insert(InvoicesCompanion.insert(
+        sessionId: Value(sessionId),
+        customerId: Value(customerId ?? prevCustomerId),
+        employeeId: Value(employeeId ?? prevEmployeeId),
+        subtotal: Value(subtotal),
+        total: Value(subtotal),
+        paymentMethod: const Value('unpaid'),
+        paidCash: const Value(0),
+        paidCard: const Value(0),
+        paidOnAccount: const Value(0),
+      ));
+      for (final l in kept) {
+        await into(invoiceItems).insert(InvoiceItemsCompanion.insert(
+          invoiceId: invoiceId,
+          productId: Value(l.productId),
+          description: l.description,
+          quantity: Value(l.quantity),
+          unitPrice: l.unitPrice,
+          total: l.total,
+          createdAt: Value(existingAt[l.productId!] ??
+              l.createdAt ??
+              DateTime.now()),
+        ));
+      }
+      return invoiceId;
+    });
   }
 
   /// Invoices created inside [from]..[to] — feeds the per-employee
@@ -359,9 +530,12 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
   }
 
   /// Every invoice line whose parent invoice falls inside [from]..[to] —
-  /// feeds the Statistics screen's top-products ranking. Joined so the
-  /// date filter travels with each line, then filtered in Dart to match
-  /// the rest of the ranged reads.
+  /// feeds the Statistics screen's top-products ranking and the cost-of-goods
+  /// side of the profit math. Joined so the date filter travels with each
+  /// line, then filtered in Dart to match the rest of the ranged reads.
+  ///
+  /// Only settled bills count: an unsettled draft moved stock but no money, so
+  /// its lines must not appear as a sale (nor add to cost of goods).
   Stream<List<InvoiceItemRow>> watchItemsBetween({
     required DateTime from,
     required DateTime to,
@@ -372,11 +546,31 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
     return query.watch().map((rows) => rows
         .where((r) {
           final invoice = r.readTable(invoices);
-          return !invoice.createdAt.isBefore(from) &&
+          return invoice.paymentMethod != 'unpaid' &&
+              !invoice.createdAt.isBefore(from) &&
               invoice.createdAt.isBefore(to);
         })
         .map((r) => r.readTable(invoiceItems))
         .toList());
+  }
+
+  /// Today's settled invoice lines — the protected screen's real cost of goods.
+  Stream<List<InvoiceItemRow>> watchItemsToday() {
+    final query = select(invoiceItems).join([
+      innerJoin(invoices, invoices.id.equalsExp(invoiceItems.invoiceId)),
+    ]);
+    return query.watch().map((rows) {
+      final now = DateTime.now();
+      final startOfDay = DateTime(now.year, now.month, now.day);
+      return rows
+          .where((r) {
+            final invoice = r.readTable(invoices);
+            return invoice.paymentMethod != 'unpaid' &&
+                !invoice.createdAt.isBefore(startOfDay);
+          })
+          .map((r) => r.readTable(invoiceItems))
+          .toList();
+    });
   }
 
   /// Invoices already linked to a live session — café orders placed
@@ -462,6 +656,28 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
     final rows = await select(invoices).get();
     return rows
         .where((r) => !r.createdAt.isBefore(from) && r.createdAt.isBefore(to))
+        .toList();
+  }
+
+  /// Every line of every settled bill in [from]..[to] — the one-shot twin of
+  /// [watchItemsBetween], used by the partnership ledger to price cost of
+  /// goods sold over the period in one read.
+  Future<List<InvoiceItemRow>> getItemsBetween({
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final query = select(invoiceItems).join([
+      innerJoin(invoices, invoices.id.equalsExp(invoiceItems.invoiceId)),
+    ]);
+    final rows = await query.get();
+    return rows
+        .where((r) {
+          final invoice = r.readTable(invoices);
+          return invoice.paymentMethod != 'unpaid' &&
+              !invoice.createdAt.isBefore(from) &&
+              invoice.createdAt.isBefore(to);
+        })
+        .map((r) => r.readTable(invoiceItems))
         .toList();
   }
 

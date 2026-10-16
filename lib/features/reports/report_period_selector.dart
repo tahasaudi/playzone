@@ -7,12 +7,19 @@ import '../../data/repositories/invoice_repository.dart';
 /// Shared report-window switcher (today / 7 days / month) driven by
 /// [reportPeriodProvider] — used by every analytics screen so the
 /// selected period is consistent when moving between them.
+///
+/// Pass [provider] to drive a screen's own window instead (e.g. the
+/// partnership ledger keeps its period separate from the shift reports).
 class ReportPeriodSelector extends ConsumerWidget {
-  const ReportPeriodSelector({super.key});
+  const ReportPeriodSelector({super.key, this.provider});
+
+  /// The window to switch; defaults to the shared [reportPeriodProvider].
+  final StateProvider<ReportPeriod>? provider;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final selected = ref.watch(reportPeriodProvider);
+    final window = provider ?? reportPeriodProvider;
+    final selected = ref.watch(window);
     const labels = {
       ReportPeriod.today: 'النهاردة',
       ReportPeriod.week: 'آخر 7 أيام',
@@ -22,8 +29,7 @@ class ReportPeriodSelector extends ConsumerWidget {
       children: [
         for (final entry in labels.entries) ...[
           GestureDetector(
-            onTap: () =>
-                ref.read(reportPeriodProvider.notifier).state = entry.key,
+            onTap: () => ref.read(window.notifier).state = entry.key,
             child: Container(
               padding:
                   const EdgeInsets.symmetric(horizontal: 16, vertical: 8),

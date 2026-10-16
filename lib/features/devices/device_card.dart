@@ -9,6 +9,22 @@ import '../../core/widgets/app_buttons.dart';
 
 enum DeviceType { ps4, ps5, billiards, vip }
 
+/// One café line on a live session's card/panel, kept structured (rather than
+/// pre-formatted) so the session panel can offer "إرجاع واحد" against the exact
+/// product it belongs to.
+class OrderLineUi {
+  const OrderLineUi({
+    required this.productId,
+    required this.label,
+    required this.quantity,
+    required this.total,
+  });
+  final int? productId;
+  final String label;
+  final int quantity;
+  final double total;
+}
+
 extension DeviceTypeX on DeviceType {
   String get labelAr {
     switch (this) {
@@ -50,7 +66,7 @@ class DeviceUiModel {
     this.isMultiMode = false,
     this.timeCost,
     this.ordersCost,
-    this.orderLines = const <String>[],
+    this.orderLines = const <OrderLineUi>[],
     this.wallScreenDark = false,
   });
 
@@ -76,7 +92,7 @@ class DeviceUiModel {
   /// while they are charging. It does not answer "ordered what", which is the
   /// question they ask when the customer says they did not, and that is the
   /// one worth being able to answer without opening the till.
-  final List<String> orderLines;
+  final List<OrderLineUi> orderLines;
 
   /// Whether this machine's wall screen is currently showing our black frame.
   ///

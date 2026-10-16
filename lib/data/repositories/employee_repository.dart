@@ -1,10 +1,12 @@
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/accounting/profit.dart';
 import '../../core/database/app_database.dart';
 import '../../core/database/database_provider.dart';
 import '../../core/permissions/pin_hasher.dart';
 import '../../core/permissions/permission_service.dart';
 import 'audit_log_repository.dart';
+import 'invoice_repository.dart';
 
 /// UI/business layer for employees. Widgets never touch EmployeeDao or
 /// AppDatabase directly — spec §4 (Business Logic Separation). Writes
@@ -59,20 +61,44 @@ class EmployeeRepository {
 
   /// Marks an employee as a business partner (شريك) and sets their
   /// profit-share percent (شركاء بنص → 50).
+  ///
+  /// The partners' shares must never add up to more than 100% — two names
+  /// claiming 60% each would divide out more profit than the shop made. The
+  /// check lives here so no screen can set a set of shares that cannot pay.
   Future<void> setPartner(int id, {required bool isPartner, double? share}) async {
     _permissions.require(_permissions.canManageUsers, 'تعديل فريق الشراكة');
+    if (isPartner) {
+      final percent = _normalizedShare(share);
+      final others = await _db.employeeDao.getPartners();
+      final committed = others
+          .where((p) => p.id != id)
+          .fold<double>(0, (s, p) => s + _normalizedShare(p.partnerShare));
+      if (committed + percent > 100.001) {
+        throw Exception(
+            'مجموع نسب الشركاء هيعدّي 100% (المتاح ${(100 - committed).toStringAsFixed(0)}%)');
+      }
+    }
     await _db.employeeDao.setPartner(
       id,
       isPartner: isPartner,
-      share: isPartner ? share : null,
+      share: isPartner ? _normalizedShare(share) : null,
     );
     await _auditLog.log(
       action: isPartner ? 'employee_marked_partner' : 'employee_unmarked_partner',
       entityType: 'employee',
       entityId: id,
-      newValue: isPartner ? 'شريك ${(share ?? 0).toStringAsFixed(0)}%' : 'مش شريك',
+      newValue: isPartner ? 'شريك ${_normalizedShare(share).toStringAsFixed(0)}%' : 'مش شريك',
     );
   }
+
+  /// A partner's share, clamped to a sane 0–100. A missing/blank value reads
+  /// as the café's default of an equal split (50), never as "no share".
+  static double normalizedShare(double? raw) {
+    if (raw == null || raw.isNaN) return 50;
+    return raw.clamp(0, 100).toDouble();
+  }
+
+  static double _normalizedShare(double? raw) => normalizedShare(raw);
 
   Future<void> resetPin(EmployeeRow employee, String newPin) async {
     _permissions.require(_permissions.canManageUsers, 'إعادة تعيين رمز الموظف');
@@ -169,33 +195,43 @@ class EmployeeRepository {
     );
   }
 
-  /// Partnership ledger snapshot for a period. Profit = revenue
-  /// − expenses − refunds; each partner's share = profit × share%, then
-  /// their net = share − withdrawals + repayments.
+  /// Partnership ledger snapshot for a period.
+  ///
+  /// The split is over **صافي الربح** — not revenue — and that profit follows
+  /// the one definition the whole app shares ([Accounting]):
+  ///
+  ///   الإيراد (المسدَّد فقط) − تكلفة البضاعة − المصروفات − المرتجعات
+  ///
+  /// Each partner's share is `profit × share%`, and their net due is that
+  /// share minus their withdrawals plus their repayments (مسحوبات/سداد).
   Future<PartnersSnapshot> partnersSnapshot({
     required DateTime from,
     required DateTime to,
   }) async {
-    final invoices =
-        await _db.invoiceDao.getBetween(from: from, to: to);
-    final expenses =
-        await _db.expenseDao.getBetween(from: from, to: to);
-    final refunds =
-        await _db.refundDao.getBetween(from: from, to: to);
+    final invoices = await _db.invoiceDao.getBetween(from: from, to: to);
+    final items = await _db.invoiceDao.getItemsBetween(from: from, to: to);
+    final expenses = await _db.expenseDao.getBetween(from: from, to: to);
+    final refunds = await _db.refundDao.getBetween(from: from, to: to);
     final transactions =
         await _db.employeeDao.getTransactionsBetween(from: from, to: to);
+    final products = await _db.productDao.allProducts();
 
-    final revenue =
-        invoices.fold<double>(0, (s, i) => s + i.total);
-    final expenseTotal =
-        expenses.fold<double>(0, (s, e) => s + e.amount);
-    final refundsTotal =
-        refunds.fold<double>(0, (s, r) => s + r.amount);
-    final profit = revenue - expenseTotal - refundsTotal;
+    final costByProduct = {for (final p in products) p.id: p.costPrice};
+
+    final breakdown = Accounting.revenueBreakdown(invoices: invoices, items: items);
+    final cogs = Accounting.costOfGoods(items, costByProduct);
+    final expenseTotal = Accounting.expenses(expenses);
+    final refundsTotal = Accounting.refunds(refunds);
+    final profit = Accounting.netProfit(
+      revenue: breakdown.revenue,
+      costOfGoods: cogs,
+      expenses: expenseTotal,
+      refunds: refundsTotal,
+    );
 
     final partners = await _db.employeeDao.getPartners();
     final entries = partners.map((p) {
-      final sharePercent = p.partnerShare ?? 50;
+      final sharePercent = _normalizedShare(p.partnerShare);
       final share = profit * (sharePercent / 100);
       final withdrawals = transactions
           .where((t) => t.employeeId == p.id && t.kind == 'withdraw')
@@ -214,11 +250,22 @@ class EmployeeRepository {
       ..sort((a, b) => b.share.compareTo(a.share));
 
     return PartnersSnapshot(
-      revenue: revenue,
+      revenue: breakdown.revenue,
+      gamingRevenue: breakdown.gaming,
+      cafeRevenue: breakdown.cafe,
+      discounts: breakdown.discounts,
+      costOfGoods: cogs,
       expenses: expenseTotal,
       refunds: refundsTotal,
       profit: profit,
       partners: entries,
+      invoices: Accounting.settledOnly(invoices),
+      items: items,
+      expenseRows: expenses,
+      refundRows: refunds,
+      transactions: transactions,
+      productsById: {for (final p in products) p.id: p},
+      costByProduct: costByProduct,
     );
   }
 
@@ -268,19 +315,84 @@ class PartnerLedgerEntry {
 }
 
 /// The partnership math for a period — shared by all partners.
+///
+/// It carries not just the totals but the raw rows behind them, so every
+/// "تفصيل" button opens the exact movements the numbers on the row were summed
+/// from — no second query that could disagree with the figure above it.
 class PartnersSnapshot {
   PartnersSnapshot({
     required this.revenue,
+    required this.gamingRevenue,
+    required this.cafeRevenue,
+    required this.discounts,
+    required this.costOfGoods,
     required this.expenses,
     required this.refunds,
     required this.profit,
     required this.partners,
+    required this.invoices,
+    required this.items,
+    required this.expenseRows,
+    required this.refundRows,
+    required this.transactions,
+    required this.productsById,
+    required this.costByProduct,
   });
+
+  /// الإيراد (المسدَّد). The gross three lines below always add back up to it:
+  /// `gamingRevenue + cafeRevenue − discounts == revenue`.
   final double revenue;
+
+  /// The PlayStation side — settled «وقت اللعب» lines.
+  final double gamingRevenue;
+
+  /// Everything the café sold on the settled bills.
+  final double cafeRevenue;
+
+  /// What was knocked off the bills, so the split reconciles to the total.
+  final double discounts;
+
+  final double costOfGoods;
   final double expenses;
   final double refunds;
   final double profit;
   final List<PartnerLedgerEntry> partners;
+
+  /// The settled bills of the period — the revenue detail's source.
+  final List<InvoiceRow> invoices;
+
+  /// Every settled bill line — the gaming/café/cost-of-goods detail's source.
+  final List<InvoiceItemRow> items;
+
+  final List<ExpenseRow> expenseRows;
+  final List<RefundRow> refundRows;
+
+  /// Every withdrawal/repayment movement in the period (all employees).
+  final List<EmployeeTransactionRow> transactions;
+
+  /// Product id → product, for naming the cost-of-goods detail (includes
+  /// soft-deleted products, which historical bills still reference).
+  final Map<int, ProductRow> productsById;
+
+  final Map<int, double> costByProduct;
+
+  /// The share percent actually committed across all partners. Over 100 means
+  /// the shares would pay out more than the shop earned; the UI warns on it.
+  double get totalSharePercent =>
+      partners.fold(0.0, (s, p) => s + p.sharePercent);
+
+  /// المجموع الكلي لنصيب الشركاء من الربح.
+  double get totalShares => partners.fold(0.0, (s, p) => s + p.share);
+
+  /// إجمالي المسحوبات على كل الشركاء في الفترة.
+  double get totalWithdrawals =>
+      partners.fold(0.0, (s, p) => s + p.withdrawals);
+
+  /// إجمالي السداد اللي رجع للدرج من الشركاء.
+  double get totalRepayments => partners.fold(0.0, (s, p) => s + p.repayments);
+
+  /// اللي يتبقّى للمحل بعد نصيب الشركاء (لو النسب أقل من 100%).
+  double get keptByShop => profit - totalShares;
 }
 
 final employeeRepositoryProvider = Provider<EmployeeRepository>((ref) {
@@ -297,6 +409,25 @@ final activeEmployeesProvider = StreamProvider<List<EmployeeRow>>((ref) {
 
 final partnersProvider = StreamProvider<List<EmployeeRow>>((ref) {
   return ref.watch(employeeRepositoryProvider).watchPartners();
+});
+
+/// The partnership window. Deliberately its own switch rather than the shared
+/// [reportPeriodProvider]: "how did the partners do this month" is a different
+/// question from "how did today's shift go", and nudging one must not silently
+/// move the other screen's numbers.
+final partnershipPeriodProvider =
+    StateProvider<ReportPeriod>((ref) => ReportPeriod.today);
+
+/// The partnership ledger for the currently-selected partnership window. A
+/// Future (not a Stream) because it is a one-shot aggregation across four
+/// tables; any write to shares/withdrawals refreshes it by invalidating this
+/// provider.
+final partnershipSnapshotProvider =
+    FutureProvider.autoDispose<PartnersSnapshot>((ref) {
+  final range = currentReportRange(ref.watch(partnershipPeriodProvider));
+  return ref
+      .watch(employeeRepositoryProvider)
+      .partnersSnapshot(from: range.from, to: range.to);
 });
 
 /// Every withdrawal/repayment movement, newest first.
