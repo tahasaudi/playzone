@@ -21,16 +21,17 @@ class Esp32IrCommandBox implements IrCommandBox {
 
   static const _timeout = Duration(seconds: 3);
 
+  /// One client for the lifetime of this box, so consecutive IR commands reuse
+  /// the connection instead of paying a fresh TCP handshake per press.
+  static final HttpClient _http = HttpClient()
+    ..connectionTimeout = _timeout
+    ..idleTimeout = const Duration(seconds: 30);
+
   Future<HttpClientResponse> _get(String path,
       [Map<String, String>? qs]) async {
-    final client = HttpClient()..connectionTimeout = _timeout;
-    try {
-      final uri = Uri.parse('$_base$path').replace(queryParameters: qs);
-      final req = await client.getUrl(uri);
-      return await req.close().timeout(_timeout);
-    } finally {
-      client.close(force: true);
-    }
+    final uri = Uri.parse('$_base$path').replace(queryParameters: qs);
+    final req = await _http.getUrl(uri);
+    return await req.close().timeout(_timeout);
   }
 
   @override

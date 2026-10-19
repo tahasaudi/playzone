@@ -472,7 +472,13 @@ class _AppShellState extends ConsumerState<AppShell> {
         // follow the router without anyone pressing a button. Prime the index
         // once, then keep it warm from the neighbour table.
         unawaited(ref.read(tvConfigProvider.notifier).primeMacBindings());
-        _macTimer ??= Timer.periodic(const Duration(seconds: 10), (_) {
+        // Ten seconds was needlessly chatty: this re-reads the ARP table
+        // (a subprocess), rewrites the MAC index and can write a slot back to
+        // the settings table, all to follow a lease that a router changes
+        // rarely. A minute is still four times faster than any DHCP lease
+        // this café sees, and it takes the busiest recurring background job
+        // down to a sixth of its old cost.
+        _macTimer ??= Timer.periodic(const Duration(seconds: 60), (_) {
           if (!mounted) return;
           unawaited(ref.read(tvConfigProvider.notifier).refreshMacBindings());
         });

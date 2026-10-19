@@ -210,15 +210,16 @@ class TvPowerService {
     try {
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       socket.broadcastEnabled = true;
-      // Two ports, because some stacks skip the send entirely when the port is
-      // filtered before the ARP lookup happens.
+      // A single port is enough now: the point is to make the operating
+      // system resolve each address so it lands in its neighbour table, and
+      // one datagram per host does that. Sending a second one to a port that
+      // some stacks filter before the ARP lookup just doubled the burst for
+      // nothing.
       for (final host in hosts) {
-        for (final port in const [9, 1]) {
-          try {
-            socket.send(const [0], InternetAddress(host), port);
-          } catch (_) {
-            // An unroutable address is not fatal — the rest still resolve.
-          }
+        try {
+          socket.send(const [0], InternetAddress(host), 9);
+        } catch (_) {
+          // An unroutable address is not fatal — the rest still resolve.
         }
       }
     } catch (_) {
@@ -497,21 +498,25 @@ class TvPowerService {
   }
 
   Future<void> _sendMagicPacketOnce(List<String> macs) async {
-    for (final mac in macs) {
-      final bytes = _magicPacket(mac);
-      RawDatagramSocket? socket;
-      try {
-        socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-        socket.broadcastEnabled = true;
-        for (final target in await _broadcastTargets()) {
+    RawDatagramSocket? socket;
+    try {
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.broadcastEnabled = true;
+      final targets = await _broadcastTargets();
+      // One socket for the whole round. A socket per MAC meant a burst of
+      // binds (the fallback list is ten addresses) for a message that only
+      // ever needed to leave the machine once per MAC per target.
+      for (final mac in macs) {
+        final bytes = _magicPacket(mac);
+        for (final target in targets) {
           socket.send(bytes, InternetAddress(target), 9);
         }
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-      } catch (_) {
-        // A failed magic packet is not fatal — the TV may already be on.
-      } finally {
-        socket?.close();
       }
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    } catch (_) {
+      // A failed magic packet is not fatal — the TV may already be on.
+    } finally {
+      socket?.close();
     }
   }
 

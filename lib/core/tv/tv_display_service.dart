@@ -94,11 +94,12 @@ class TvDisplayService {
   /// app re-offers the URL on every push, so a token from a previous run is
   /// never one a screen can be holding.
   String _tokenFor(String tvIp) => _tokens.putIfAbsent(tvIp.trim(), () {
-        final t =
-            Random().nextInt(0x7fffffff).toRadixString(16).padLeft(7, '0');
+        final t = _random.nextInt(0x7fffffff).toRadixString(16).padLeft(7, '0');
         _tokenOwner[t] = tvIp.trim();
         return t;
       });
+
+  static final Random _random = Random();
 
   /// The screen a picture request belongs to, from the token in its URL.
   ///
@@ -262,6 +263,10 @@ class TvDisplayService {
         _image = _black;
         _imageBytes = _black!.length;
       }
+      // Resolve our own LAN address here, where we can await it, so the
+      // settings footer can name the address the screens must dial from the
+      // first time it is shown rather than "…".
+      await resolveLocalAddress();
       return true;
     } catch (e) {
       // Two copies of this program are the one fault that used to show up as
@@ -354,7 +359,7 @@ class TvDisplayService {
           'fetched=$fetched (total ${log.imagesServed})\n'
           'black=${fetched > 0 ? "yes" : "no"}\n'
           'lastResult=${log.lastResult ?? "none"}\n'
-          'lastPushedUri=${log.lastPushedUri ?? "none"}\n');
+          'lastPushedUri=${log.lastPushedUri.isEmpty ? "none" : log.lastPushedUri}\n');
     } catch (e) {
       res.statusCode = HttpStatus.internalServerError;
       res.write('$e\n');
@@ -372,7 +377,12 @@ class TvDisplayService {
   }
 
   /// This machine's LAN address (what the TV must dial).
-  String? get localAddress => _localAddress ??= _detectLocalAddress();
+  ///
+  /// Synchronous, and honest about it: it can only ever return an address that
+  /// [resolveLocalAddress] or [_detectLocalAddress] has already cached. On the
+  /// very first call — before either has run — it returns null, and callers
+  /// that can await should use [resolveLocalAddress] instead.
+  String? get localAddress => _localAddress;
   String? _localAddress;
 
   /// True for adapter ranges no café television can ever reach.
@@ -385,24 +395,33 @@ class TvDisplayService {
   static bool _isVirtualRange(String ip) =>
       ip.startsWith('192.168.137.') || ip.startsWith('169.254.');
 
-  String? _detectLocalAddress() {
+  /// Resolves and caches this machine's LAN address.
+  ///
+  /// It used to fire `NetworkInterface.list()` and return before the answer
+  /// arrived, so the first caller always got null and the cache filled in on
+  /// some later, unrelated call — a race that made "we could not find our own
+  /// address" a coin flip at startup. Awaiting the list fixes that, and the
+  /// 10.* / 192.168.* preference with the 172.16-31 fallback is unchanged.
+  Future<String?> _detectLocalAddress() async {
     try {
-      final ifaces = NetworkInterface.list(type: InternetAddressType.IPv4);
-      ifaces.then((list) {
-        for (final iface in list) {
-          for (final addr in iface.addresses) {
-            if (addr.isLoopback) continue;
-            final ip = addr.address;
-            if (_isVirtualRange(ip)) continue;
-            if (ip.startsWith('192.168.') || ip.startsWith('10.')) {
-              _localAddress ??= ip;
-            } else if (RegExp(r'^172\.(1[6-9]|2\d|3[01])\.').hasMatch(ip)) {
-              _fallback ??= ip;
-            }
+      final ifaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
+      String? tenDot;
+      for (final iface in ifaces) {
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback) continue;
+          final ip = addr.address;
+          if (_isVirtualRange(ip)) continue;
+          if (ip.startsWith('192.168.') || ip.startsWith('10.')) {
+            _localAddress ??= ip;
+          } else if (RegExp(r'^172\.(1[6-9]|2\d|3[01])\.').hasMatch(ip)) {
+            tenDot ??= ip;
           }
         }
-      });
-      return _localAddress;
+      }
+      // tenDot is returned rather than cached: it is a 172.16-31 address, the
+      // one range that is *sometimes* the café LAN and sometimes not, so it is
+      // offered as an answer without claiming to be the one we settled on.
+      return _localAddress ?? tenDot;
     } catch (_) {
       return null;
     }
@@ -429,28 +448,8 @@ class TvDisplayService {
       } catch (_) {}
     }
     if (_localAddress != null) return _localAddress;
-    try {
-      final list = await NetworkInterface.list(type: InternetAddressType.IPv4);
-      String? tenDot;
-      for (final iface in list) {
-        for (final addr in iface.addresses) {
-          if (addr.isLoopback) continue;
-          final ip = addr.address;
-          if (_isVirtualRange(ip)) continue;
-          if (ip.startsWith('192.168.') || ip.startsWith('10.')) {
-            _localAddress ??= ip;
-          } else if (RegExp(r'^172\.(1[6-9]|2\d|3[01])\.').hasMatch(ip)) {
-            tenDot ??= ip;
-          }
-        }
-      }
-      return _localAddress ?? tenDot;
-    } catch (_) {
-      return null;
-    }
+    return _detectLocalAddress();
   }
-
-  String? _fallback;
 
   /// Replaces the image being displayed and (re)tries the push.
   Future<void> publish(Uint8List pngBytes) async {
@@ -1017,29 +1016,23 @@ class TvDisplayService {
       // was taken and the picture fetched, while `Stop` then `Set`+`Play` was
       // not. A screen part-way through a change is the only case that still
       // needs the stop, and that is what the retry is for.
-      Future<bool> pass(bool stopFirst) async {
-        if (stopFirst) {
-          await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-          await _settle(ctl, tvIp, 1200);
-        }
-        await _soap(
-            ctl,
-            'SetAVTransportURI',
-            '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
-                '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-        await _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
-        return _awaitFetch(tvIp, before, 900);
-      }
-
-      // Whether this worked is settled by the screen pulling the frame, not
-      // by the status the SOAP call returned. The fetch is proof, and it is
-      // the only proof that survives a firmware that reports an error while
-      // doing the work correctly.
-      final log = _log(tvIp);
-      if (await pass(false)) {
+      //
+      // `Play` is sent on the same flight as `Set` rather than after a fixed
+      // 200 ms pause: the panel queues both, and the pause was only ever
+      // there to let the set settle. `_awaitFetch` below is what actually
+      // decides whether the picture landed, so the pause bought nothing an
+      // already-guaranteed ordering did not.
+      final setFuture = _soap(
+          ctl,
+          'SetAVTransportURI',
+          '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
+              '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
+      final playFuture = _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
+      await Future.wait([setFuture, playFuture]);
+      if (await _awaitFetch(tvIp, before, 900)) {
         _lastPushAt = DateTime.now();
         markReached(tvIp);
+        final log = _log(tvIp);
         log.refusedAt = null;
         _dlnaRefused.remove(tvIp);
         log.lastOk = true;
@@ -1056,9 +1049,18 @@ class TvDisplayService {
       // also the only situation where the stop is worth its risk, because by
       // now the first attempt has already failed — so the worst the stop can do
       // is leave the screen as it already found it.
-      if (await pass(true)) {
+      await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
+      await _settle(ctl, tvIp, 1200);
+      await _soap(
+          ctl,
+          'SetAVTransportURI',
+          '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
+              '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
+      await _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
+      if (await _awaitFetch(tvIp, before, 900)) {
         _lastPushAt = DateTime.now();
         markReached(tvIp);
+        final log = _log(tvIp);
         log.refusedAt = null;
         _dlnaRefused.remove(tvIp);
         log.lastOk = true;
@@ -1068,6 +1070,7 @@ class TvDisplayService {
         return true;
       }
 
+      final log = _log(tvIp);
       log.lastOk = false;
       log.lastCommandAt = DateTime.now();
       log.lastCommand = 'عرض الصورة';
@@ -1310,6 +1313,7 @@ class TvDisplayService {
   int _ssdpDatagrams = 0;
   String _lastSsdpSample = '';
   String _lastLocations = '';
+  bool _sweeping = false;
 
   /// Sweeps the port range LG uses for its DLNA services and returns the first
   /// AVTransport endpoint it finds, or null when the screen answers nothing.
@@ -1325,7 +1329,34 @@ class TvDisplayService {
   ///    reading them.
   /// What used to be "about ten seconds" is now usually under two, and often
   /// well under one when the screen is live.
+  ///
+  /// Only one sweep may run at a time across the whole process. Two or three
+  /// screens each firing 512 sockets at once is the single heaviest thing this
+  /// program does to the café network, and it lands exactly when several
+  /// panels are asleep — which is also when every other command is waiting on
+  /// that same network. A screen that finds the sweep busy waits for the one
+  /// in flight (and is then served its answer, if any) rather than piling on.
   Future<String?> _scanLocations(String tvIp) async {
+    if (_sweeping) {
+      // Another screen is already sweeping. Wait for it to finish, then do a
+      // cheap cached lookup instead of starting a second full scan — by then
+      // a fresh endpoint very likely exists for this screen too.
+      for (var i = 0; i < 40 && _sweeping; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+      final cached = _controlCache[tvIp];
+      if (cached != null && !_suspect.contains(tvIp)) return cached.$1;
+      return null;
+    }
+    _sweeping = true;
+    try {
+      return await _sweepPorts(tvIp);
+    } finally {
+      _sweeping = false;
+    }
+  }
+
+  Future<String?> _sweepPorts(String tvIp) async {
     const batch = 512;
     const total = 2101; // ports 1000..3100 inclusive
     var scanned = 0;
@@ -1439,14 +1470,19 @@ class TvDisplayService {
 
   /// Fetches one device description and extracts its AVTransport
   /// controlURL (absolute, resolved against the description's base).
+  ///
+  /// Uses the shared [HttpClient] for the same reason the SOAP path does, and
+  /// bounds the body read as well as the connect: a panel that starts
+  /// answering and then stalls mid-body used to hang this call with no
+  /// timeout on the read at all, which is a screen that looks unreachable
+  /// while it is merely slow.
   Future<String?> _controlUrlFrom(String location) async {
-    HttpClient? client;
     try {
-      client = HttpClient()..connectionTimeout = const Duration(milliseconds: 1200);
-      final req = await client.getUrl(Uri.parse(location));
+      final req = await _http.getUrl(Uri.parse(location));
       final res = await req.close();
       if (res.statusCode != 200) return null;
-      final body = await res.transform(utf8.decoder).join();
+      final body =
+          await res.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
       // Any AVTransport block followed by its own controlURL.
       final match = RegExp(
               r'<serviceType>\s*urn:schemas-upnp-org:service:AVTransport:1\s*</serviceType>(?:(?!</service>).)*?<controlURL>\s*([^<]+?)\s*</controlURL>',
@@ -1460,8 +1496,6 @@ class TvDisplayService {
       return resolved.toString();
     } catch (_) {
       return null;
-    } finally {
-      client?.close();
     }
   }
 
@@ -1479,6 +1513,23 @@ class TvDisplayService {
     return desc == null || desc.isEmpty ? m.group(1) : '${m.group(1)} $desc';
   }
 
+  /// One HTTP client for the whole program, kept alive across commands.
+  ///
+  /// Every push, release and status read used to build its own [HttpClient]
+  /// and tear it down (`close(force: true)`) when it was done. That throws
+  /// away the TCP connection to the panel with it, so the next command paid
+  /// for a fresh handshake — and a fresh handshake is exactly the kind of
+  /// fixed cost that turns "instant" into "a noticeable beat" when a cashier
+  /// is pressing a button. One long-lived client reuses the connection, so
+  /// the second command onward lands on an already-open socket.
+  ///
+  /// The connection timeout is deliberately short: a screen that has gone
+  /// away must fail fast rather than hold the button.
+  static final HttpClient _http = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 2)
+    ..idleTimeout = const Duration(seconds: 30)
+    ..maxConnectionsPerHost = 6;
+
   /// Fires one SOAP action and hands back the panel's HTTP status and body.
   ///
   /// A null status means the call never completed — the TV holds a SOAP call
@@ -1491,10 +1542,8 @@ class TvDisplayService {
     const service = 'urn:schemas-upnp-org:service:AVTransport:1';
     final xml = _soapEnvelope.replaceAll('%BODY%',
         '<u:$action xmlns:u="$service"><InstanceID>0</InstanceID>$body</u:$action>');
-    HttpClient? client;
     try {
-      client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
-      final req = await client.postUrl(Uri.parse(controlUrl));
+      final req = await _http.postUrl(Uri.parse(controlUrl));
       req.headers
           .set(HttpHeaders.contentTypeHeader, 'text/xml; charset="utf-8"');
       req.headers.set('SOAPACTION', '"$service#$action"');
@@ -1512,8 +1561,6 @@ class TvDisplayService {
       return (null, '', true);
     } catch (_) {
       return (null, '', false);
-    } finally {
-      client?.close(force: true);
     }
   }
 
@@ -1522,11 +1569,16 @@ class TvDisplayService {
     final host = Uri.tryParse(controlUrl)?.host ?? '';
     if (reached && host.isNotEmpty) markReached(host);
     if (status == null) {
-      // The TV holds the call while it loads the image — treat as fine. But
-      // an endpoint we could not even reach is almost always a panel that
-      // moved or went away, so flag it for a re-check instead of silently
-      // waiting for a command to time out again.
-      if (!reached) _noteSuspect(controlUrl);
+      // The TV holds the call while it loads the image — treat as fine. But an
+      // endpoint we could not even reach is almost always a panel that moved
+      // or went away, so that is a failure and is flagged for a re-check rather
+      // than silently reported as a success that never happened. `reached`
+      // separates "the panel said nothing" (fine) from "we never got a socket
+      // to it" (not fine).
+      if (!reached) {
+        _noteSuspect(controlUrl);
+        return false;
+      }
       return true;
     }
     if (status >= 400) {
