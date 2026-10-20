@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:math';
+
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/accounting/profit.dart';
@@ -95,6 +98,76 @@ class EmployeeRepository {
     );
   }
 
+  /// Creates a partner (شريك) as a brand-new record.
+  ///
+  /// A partner is not staff: they do not serve on the till and never log in,
+  /// so there is no PIN for them. The row still needs a `pinHash` because the
+  /// column is not nullable, so one is generated from random bytes — a value
+  /// no PIN can ever hash to, which is exactly the intent (this account cannot
+  /// authenticate). The phone is likewise optional: when left blank a
+  /// placeholder is stored so the unique-phone rule holds, and the partner
+  /// simply never appears in any login flow.
+  ///
+  /// The ≤100% rule is enforced here as well as in [setPartner], so a new name
+  /// cannot be added once the shares are already fully spoken for.
+  Future<int> addPartner({
+    required String name,
+    required double share,
+    String? phone,
+  }) async {
+    _permissions.require(_permissions.canManageUsers, 'إضافة شريك');
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) throw ArgumentError('اسم الشريك مطلوب');
+
+    final percent = _normalizedShare(share);
+    final others = await _db.employeeDao.getPartners();
+    final committed = others.fold<double>(
+        0, (s, p) => s + _normalizedShare(p.partnerShare));
+    if (committed + percent > 100.001) {
+      throw Exception(
+          'مجموع نسب الشركاء هيعدّي 100% (المتاح ${(100 - committed).toStringAsFixed(0)}%)');
+    }
+
+    final storedPhone = (phone == null || phone.trim().isEmpty)
+        ? _placeholderPhone()
+        : phone.trim();
+    final clash = await _db.employeeDao.getByPhone(storedPhone);
+    if (clash != null) throw Exception('الرقم ده مسجّل بالفعل');
+
+    final id = await _db.employeeDao.insertEmployee(EmployeesCompanion.insert(
+      name: trimmed,
+      phone: storedPhone,
+      // 'admin' on purpose: a partner owns the shop, so if this account ever
+      // were used it would carry the owner's baseline. The PIN hash below is
+      // unguessable, so in practice it cannot be logged into at all.
+      role: 'admin',
+      pinHash: _unusablePinHash(),
+      isPartner: const Value(true),
+      partnerShare: Value(percent),
+    ));
+    await _auditLog.log(
+      action: 'partner_added',
+      entityType: 'employee',
+      entityId: id,
+      newValue: '$trimmed — شريك ${percent.toStringAsFixed(0)}%',
+    );
+    return id;
+  }
+
+  /// A PIN hash nothing can produce, so a partner account cannot sign in.
+  static String _unusablePinHash() {
+    final rnd = Random.secure();
+    final bytes = List<int>.generate(32, (_) => rnd.nextInt(256));
+    return 'partner:${base64Url.encode(bytes)}';
+  }
+
+  /// A stand-in phone for a partner who has none. Prefixed so it can never
+  /// collide with a real Egyptian number, and dated so two partners added on
+  /// different days do not clash.
+  static String _placeholderPhone() =>
+      '0-partner-${DateTime.now().microsecondsSinceEpoch}';
+
+
   /// A partner's share, clamped to a sane 0–100. A missing/blank value reads
   /// as the café's default of an equal split (50), never as "no share".
   static double normalizedShare(double? raw) {
@@ -103,6 +176,51 @@ class EmployeeRepository {
   }
 
   static double _normalizedShare(double? raw) => normalizedShare(raw);
+
+  /// Renames a partner and/or changes their share of the profit.
+  ///
+  /// Same ≤100% rule as [setPartner], but checked against the *other* partners
+  /// only — editing one partner must not count their own old share against
+  /// their new one. Null fields are left untouched, so a rename does not have
+  /// to resend a share it is not changing.
+  Future<void> updatePartner(
+    int id, {
+    String? name,
+    double? share,
+  }) async {
+    _permissions.require(_permissions.canManageUsers, 'تعديل بيانات شريك');
+    if (share != null) {
+      final percent = _normalizedShare(share);
+      final others = await _db.employeeDao.getPartners();
+      final committed = others
+          .where((p) => p.id != id)
+          .fold<double>(0, (s, p) => s + _normalizedShare(p.partnerShare));
+      if (committed + percent > 100.001) {
+        throw Exception(
+            'مجموع نسب الشركاء هيعدّي 100% (المتاح ${(100 - committed).toStringAsFixed(0)}%)');
+      }
+    }
+    final trimmed = name?.trim();
+    if (trimmed != null && trimmed.isEmpty) {
+      throw ArgumentError('اسم الشريك مطلوب');
+    }
+    await _db.employeeDao.updateEmployee(EmployeesCompanion(
+      id: Value(id),
+      name: trimmed != null ? Value(trimmed) : const Value.absent(),
+      partnerShare:
+          share != null ? Value(_normalizedShare(share)) : const Value.absent(),
+      updatedAt: Value(DateTime.now()),
+    ));
+    await _auditLog.log(
+      action: 'partner_updated',
+      entityType: 'employee',
+      entityId: id,
+      newValue: [
+        if (trimmed != null) 'الاسم: $trimmed',
+        if (share != null) 'النسبة: ${_normalizedShare(share).toStringAsFixed(0)}%',
+      ].join(' · '),
+    );
+  }
 
   Future<void> resetPin(EmployeeRow employee, String newPin) async {
     _permissions.require(_permissions.canManageUsers, 'إعادة تعيين رمز الموظف');

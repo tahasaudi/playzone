@@ -29,10 +29,65 @@ class AccountDao extends DatabaseAccessor<AppDatabase>
           .map((rows) => rows.toList()
             ..sort((a, b) => b.createdAt.compareTo(a.createdAt)));
 
+  /// Movements posted in the [from, to) window, newest first.
+  ///
+  /// The whole ledger grows without bound — every sale, expense and refund the
+  /// shop has ever made — so the screen must not try to render all of it. The
+  /// window is filtered in SQL rather than in Dart so the app never pulls the
+  /// entire history over the wire to throw most of it away.
+  Stream<List<AccountEntryRow>> watchEntriesBetween({
+    required DateTime from,
+    required DateTime to,
+  }) =>
+      (select(accountEntries)
+            ..where((e) =>
+                e.createdAt.isBiggerOrEqualValue(from) &
+                e.createdAt.isSmallerThanValue(to)))
+          .watch()
+          .map((rows) => rows.toList()
+            ..sort((a, b) => b.createdAt.compareTo(a.createdAt)));
+
   Future<int?> accountIdForCode(String code) async {
     final row = await (select(accounts)..where((a) => a.code.equals(code)))
         .getSingleOrNull();
     return row?.id;
+  }
+
+  /// Adds a new ledger category. The code is derived from a slug of the name so
+  /// the chart of accounts stays addressable by a stable key, the same way the
+  /// seeded books are ('sales', 'expenses', ...). Collisions get a numeric
+  /// suffix rather than failing, so two categories may share a display name
+  /// without one silently overwriting the other's postings.
+  Future<int> createAccount({
+    required String name,
+    required String kind,
+  }) async {
+    final base = _slug(name);
+    var code = base;
+    var n = 2;
+    while (await (select(accounts)..where((a) => a.code.equals(code)))
+            .getSingleOrNull() !=
+        null) {
+      code = '$base$n';
+      n++;
+    }
+    return into(accounts).insert(AccountsCompanion.insert(
+      code: code,
+      name: name,
+      kind: kind,
+    ));
+  }
+
+  /// A URL-safe key from an Arabic or Latin name. Arabic letters are kept as
+  /// themselves (SQLite stores UTF-8 happily and the code is only ever compared
+  /// for equality), so 'مصاريف نقل' yields a stable, readable code.
+  static String _slug(String name) {
+    final cleaned = name.trim().toLowerCase().replaceAll(
+          RegExp(r'[^\w\u0600-\u06FF]+'),
+          '_',
+        );
+    final trimmed = cleaned.replaceAll(RegExp(r'^_+|_+$'), '');
+    return trimmed.isEmpty ? 'account' : trimmed;
   }
 
   Future<void> updateName(int accountId, String name) =>

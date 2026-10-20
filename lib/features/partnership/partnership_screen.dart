@@ -46,10 +46,10 @@ class PartnershipScreen extends ConsumerWidget {
             TextButton.icon(
               onPressed: () => showDialog<void>(
                 context: context,
-                builder: (_) => const _ManagePartnersDialog(),
+                builder: (_) => const _AddPartnerDialog(),
               ),
-              icon: const Icon(Icons.group_add_rounded, size: 18),
-              label: const Text('إدارة الشركاء'),
+              icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
+              label: const Text('إضافة شريك'),
               style: TextButton.styleFrom(
                 foregroundColor: AppColors.accentSecondary,
               ),
@@ -212,7 +212,7 @@ class _FinancialBreakdown extends StatelessWidget {
                 SizedBox(width: AppSpacing.sm),
                 Expanded(
                   child: Text(
-                    'مجموع نِسب الشركاء أكتر من 100% — ده معناه إن القسمة بتدفع أكتر من اللي المحل كسبه. راجع النسب من "إدارة الشركاء".',
+                    'مجموع نِسب الشركاء أكتر من 100% — ده معناه إن القسمة بتدفع أكتر من اللي المحل كسبه. راجع النسب من "إضافة شريك".',
                     style: TextStyle(color: AppColors.danger, fontSize: 12),
                   ),
                 ),
@@ -343,7 +343,7 @@ class _PartnersSection extends StatelessWidget {
             Text('الشركاء', style: AppTypography.cardTitle),
             SizedBox(height: AppSpacing.sm),
             Text(
-              'مافيش شركاء مسجّلين. اضغط "إدارة الشركاء" وحدّد مين شريك (زي طه ونادر) واكتب نسبة كل واحد من صافي الربح.',
+              'مافيش شركاء مسجّلين. اضغط "إضافة شريك" واكتب اسم الشريك (زي طه ونادر) ونسبته من صافي الربح.',
               style: TextStyle(color: AppColors.textTertiary, fontSize: 13),
             ),
           ],
@@ -363,7 +363,7 @@ class _PartnersSection extends StatelessWidget {
               SizedBox(width: AppSpacing.sm),
               Expanded(
                 child: Text(
-                  'النسب المسجّلة بتغطّي أقل من 100% من الربح — الباقي بيتحسب للمحل. لو فيه شريك تاني (زي صاحب المحل) مش مسجّل، ضيفه من "إدارة الشركاء".',
+                  'النسب المسجّلة بتغطّي أقل من 100% من الربح — الباقي بيتحسب للمحل. لو فيه شريك تاني (زي صاحب المحل) مش مسجّل، ضيفه من "إضافة شريك".',
                   style:
                       TextStyle(fontSize: 12, color: AppColors.textTertiary),
                 ),
@@ -939,188 +939,300 @@ class _TransactionDialogState extends State<_TransactionDialog> {
   }
 }
 
-/// Admin dialog: mark employees as partners and set each one's share of the
-/// profit. The ≤100% total rule is enforced here as well as in the repository,
-/// so the owner sees the problem before saving rather than after.
-class _ManagePartnersDialog extends ConsumerStatefulWidget {
-  const _ManagePartnersDialog();
+/// The one place partnerships are administered.
+///
+/// A partner (شريك) is not an employee, so this dialog works **only** on
+/// records already marked as partners — it never lists the staff. That is the
+/// point of it: the old "إدارة الشركاء" dialog showed every employee and made
+/// you pick which ones were partners, which is exactly how طه ونادر ended up
+/// as rows in a staff list they do not belong to.
+///
+/// It does all three things the shop needs in one place:
+///  * add a new partner — name and share, phone optional;
+///  * change an existing partner's name or share;
+///  * remove a partner (unmark, so their history is kept but they stop
+///    counting in the split).
+class _AddPartnerDialog extends ConsumerStatefulWidget {
+  const _AddPartnerDialog();
 
   @override
-  ConsumerState<_ManagePartnersDialog> createState() =>
-      _ManagePartnersDialogState();
+  ConsumerState<_AddPartnerDialog> createState() => _AddPartnerDialogState();
 }
 
-class _ManagePartnersDialogState extends ConsumerState<_ManagePartnersDialog> {
-  final Map<int, bool> _isPartner = {};
-  final Map<int, TextEditingController> _share = {};
-  bool _initialized = false;
+class _AddPartnerDialogState extends ConsumerState<_AddPartnerDialog> {
+  final _name = TextEditingController();
+  final _phone = TextEditingController();
+  final _share = TextEditingController(text: '50');
+  String? _error;
   bool _saving = false;
 
   @override
   void dispose() {
-    for (final c in _share.values) {
-      c.dispose();
-    }
+    _name.dispose();
+    _phone.dispose();
+    _share.dispose();
     super.dispose();
   }
 
-  void _init(List<EmployeeRow> employees) {
-    if (_initialized) return;
-    _initialized = true;
-    for (final e in employees) {
-      _isPartner[e.id] = e.isPartner;
-      _share[e.id] = TextEditingController(
-        text: EmployeeRepository.normalizedShare(e.partnerShare)
-            .toStringAsFixed(0),
-      );
-    }
-  }
-
-  double _totalPercent() {
-    double total = 0;
-    for (final entry in _isPartner.entries) {
-      if (!entry.value) continue;
-      total += double.tryParse(_share[entry.key]?.text.trim() ?? '') ?? 0;
-    }
-    return total;
-  }
-
-  Future<void> _save(List<EmployeeRow> employees) async {
-    final total = _totalPercent();
-    if (total > 100) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('مجموع النسب أكتر من 100% — عدّل النسب قبل الحفظ'),
-      ));
+  Future<void> _save() async {
+    final name = _name.text.trim();
+    final share = double.tryParse(_share.text.trim());
+    if (name.isEmpty) {
+      setState(() => _error = 'اكتب اسم الشريك');
       return;
     }
-    setState(() => _saving = true);
-    final repo = ref.read(employeeRepositoryProvider);
+    if (share == null || share <= 0 || share > 100) {
+      setState(() => _error = 'النسبة لازم تكون رقم من 1 لـ100');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
     try {
-      for (final e in employees) {
-        final wasPartner = e.isPartner;
-        final nowPartner = _isPartner[e.id] ?? false;
-        final oldShare = EmployeeRepository.normalizedShare(e.partnerShare);
-        final newShare =
-            double.tryParse(_share[e.id]?.text.trim() ?? '') ?? oldShare;
-        final changed = wasPartner != nowPartner ||
-            (nowPartner && (newShare - oldShare).abs() > 0.001);
-        if (!changed) continue;
-        await repo.setPartner(e.id,
-            isPartner: nowPartner, share: nowPartner ? newShare : null);
-      }
+      await ref.read(employeeRepositoryProvider).addPartner(
+            name: name,
+            share: share,
+            phone: _phone.text.trim(),
+          );
       if (!mounted) return;
       ref.invalidate(partnershipSnapshotProvider);
-      Navigator.of(context).pop();
-    } catch (err) {
-      if (!mounted) return;
-      setState(() => _saving = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('تعذّر الحفظ: $err')));
+      _name.clear();
+      _phone.clear();
+      _share.text = '50';
+    } catch (e) {
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final employeesAsync = ref.watch(activeEmployeesProvider);
+    // Only partners — never employees. The list everyone is weighed against
+    // must be exactly the people who will be paid, or the ≤100% check is
+    // meaningless.
+    final partners = (ref.watch(partnersProvider).value ?? const <EmployeeRow>[])
+        .where((p) => p.active)
+        .toList();
+    final total =
+        partners.fold<double>(0, (s, p) => s + EmployeeRepository.normalizedShare(p.partnerShare));
 
     return AlertDialog(
       backgroundColor: AppColors.bgElevated,
-      title: const Text('إدارة الشركاء'),
+      title: const Text('إضافة شريك'),
       content: SizedBox(
-        width: 460,
-        child: employeesAsync.when(
-          loading: () => const SizedBox(
-              height: 120, child: Center(child: CircularProgressIndicator())),
-          error: (e, _) => Text('خطأ: $e',
-              style: const TextStyle(color: AppColors.danger)),
-          data: (employees) {
-            _init(employees);
-            final total = _totalPercent();
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'حدّد مين شريك، واكتب نسبة كل واحد من صافي الربح.',
-                  style: TextStyle(fontSize: 12, color: AppColors.textTertiary),
-                ),
-                const SizedBox(height: AppSpacing.md),
-                Flexible(
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        for (final e in employees)
-                          Padding(
-                            padding:
-                                const EdgeInsets.only(bottom: AppSpacing.sm),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child:
-                                      Text(e.name, style: AppTypography.body),
-                                ),
-                                SizedBox(
-                                  width: 70,
-                                  child: TextField(
-                                    controller: _share[e.id],
-                                    enabled: _isPartner[e.id] ?? false,
-                                    keyboardType: TextInputType.number,
-                                    textAlign: TextAlign.center,
-                                    decoration: const InputDecoration(
-                                      isDense: true,
-                                      suffixText: '%',
-                                    ),
-                                  ),
-                                ),
-                                Switch(
-                                  value: _isPartner[e.id] ?? false,
-                                  onChanged: (v) =>
-                                      setState(() => _isPartner[e.id] = v),
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'الشريك مش موظف — مش بيسجّل دخول ومش بيظهر في شاشة الموظفين. حدّد اسمه ونسبته من صافي الربح.',
+                style: TextStyle(fontSize: 12, color: AppColors.textTertiary),
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              TextField(
+                controller: _name,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'اسم الشريك'),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _share,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'نسبته من صافي الربح',
+                        suffixText: '%',
+                      ),
                     ),
                   ),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: TextField(
+                      controller: _phone,
+                      keyboardType: TextInputType.phone,
+                      decoration: const InputDecoration(
+                        labelText: 'رقم الموبايل (اختياري)',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: AppSpacing.md),
+                Text(_error!,
+                    style: const TextStyle(
+                        color: AppColors.danger, fontSize: 13)),
+              ],
+              if (partners.isNotEmpty) ...[
+                const SizedBox(height: AppSpacing.lg),
+                Row(
+                  children: [
+                    const Text('الشركاء الحاليين',
+                        style: AppTypography.cardTitle),
+                    const Spacer(),
+                    Text('${total.toStringAsFixed(0)}% من 100%',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: total > 100
+                              ? AppColors.danger
+                              : AppColors.textSecondary,
+                        )),
+                  ],
                 ),
                 const SizedBox(height: AppSpacing.sm),
-                Text(
-                  'مجموع النسب: ${total.toStringAsFixed(0)}%',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: total > 100
-                        ? AppColors.danger
-                        : AppColors.textSecondary,
-                  ),
-                ),
+                for (final p in partners)
+                  _PartnerEditRow(partner: p),
               ],
-            );
-          },
+            ],
+          ),
         ),
       ),
       actions: [
         TextButton(
           onPressed: _saving ? null : () => Navigator.of(context).pop(),
-          child: const Text('إلغاء'),
+          child: const Text('تم'),
         ),
         FilledButton(
-          onPressed: _saving
-              ? null
-              : () => _save(
-                  ref.read(activeEmployeesProvider).value ??
-                      const <EmployeeRow>[]),
+          onPressed: _saving ? null : _save,
           child: _saving
               ? const SizedBox(
                   width: 16,
                   height: 16,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : const Text('حفظ'),
+              : const Text('إضافة'),
         ),
       ],
     );
   }
 }
+
+/// One existing partner inside the add dialog: edit the name or share inline,
+/// or remove the partner outright.
+class _PartnerEditRow extends ConsumerStatefulWidget {
+  const _PartnerEditRow({required this.partner});
+
+  final EmployeeRow partner;
+
+  @override
+  ConsumerState<_PartnerEditRow> createState() => _PartnerEditRowState();
+}
+
+class _PartnerEditRowState extends ConsumerState<_PartnerEditRow> {
+  late final TextEditingController _name =
+      TextEditingController(text: widget.partner.name);
+  late final TextEditingController _share = TextEditingController(
+      text: EmployeeRepository.normalizedShare(widget.partner.partnerShare)
+          .toStringAsFixed(0));
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _share.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final repo = ref.read(employeeRepositoryProvider);
+    final name = _name.text.trim();
+    final share = double.tryParse(_share.text.trim());
+    try {
+      await repo.updatePartner(
+        widget.partner.id,
+        name: name == widget.partner.name ? null : name,
+        share: share,
+      );
+      if (!mounted) return;
+      ref.invalidate(partnershipSnapshotProvider);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('تعذّر الحفظ: $e')));
+    }
+  }
+
+  Future<void> _remove() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.bgElevated,
+        title: Text('إلغاء شراكة ${widget.partner.name}؟'),
+        content: const Text(
+          'هيتشال من قسمة الربح، وكل مسحوباته وسجله التاريخي هيفضلوا محفوظين. تقدر ترجّعه تاني في أي وقت.',
+          style: TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('إلغاء'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('تأكيد'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await ref
+        .read(employeeRepositoryProvider)
+        .setPartner(widget.partner.id, isPartner: false);
+    if (!mounted) return;
+    ref.invalidate(partnershipSnapshotProvider);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+      child: Row(
+        children: [
+          Expanded(
+            flex: 3,
+            child: TextField(
+              controller: _name,
+              decoration: const InputDecoration(
+                  isDense: true, labelText: 'الاسم'),
+              onSubmitted: (_) => _save(),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          SizedBox(
+            width: 90,
+            child: TextField(
+              controller: _share,
+              keyboardType: TextInputType.number,
+              textAlign: TextAlign.center,
+              decoration: const InputDecoration(
+                  isDense: true, suffixText: '%'),
+              onSubmitted: (_) => _save(),
+            ),
+          ),
+          IconButton(
+            tooltip: 'حفظ التعديل',
+            onPressed: _save,
+            icon: const Icon(Icons.check_rounded, size: 18),
+            color: AppColors.accentSecondary,
+            visualDensity: VisualDensity.compact,
+          ),
+          IconButton(
+            tooltip: 'إلغاء الشراكة',
+            onPressed: _remove,
+            icon: const Icon(Icons.person_remove_rounded, size: 18),
+            color: AppColors.textTertiary,
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
