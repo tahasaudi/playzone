@@ -9,19 +9,15 @@ part 'account_dao.g.dart';
 /// them. DAOs that earn/spend money (invoice, expense, refund) use
 /// [accountIdForCode] + [post] so every transaction lands in a category.
 @DriftAccessor(tables: [Accounts, AccountEntries])
-class AccountDao extends DatabaseAccessor<AppDatabase>
-    with _$AccountDaoMixin {
+class AccountDao extends DatabaseAccessor<AppDatabase> with _$AccountDaoMixin {
   AccountDao(super.db);
 
   Stream<List<AccountRow>> watchAll() =>
-      (select(accounts)..orderBy([(a) => OrderingTerm.asc(a.kind)]))
-          .watch();
+      (select(accounts)..orderBy([(a) => OrderingTerm.asc(a.kind)])).watch();
 
   Stream<List<AccountEntryRow>> watchEntries() =>
-      (select(accountEntries))
-          .watch()
-          .map((rows) => rows.toList()
-            ..sort((a, b) => b.createdAt.compareTo(a.createdAt)));
+      (select(accountEntries)).watch().map((rows) =>
+          rows.toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt)));
 
   Stream<List<AccountEntryRow>> watchEntriesFor(int accountId) =>
       (select(accountEntries)..where((e) => e.accountId.equals(accountId)))

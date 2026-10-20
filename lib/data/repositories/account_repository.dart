@@ -115,30 +115,6 @@ class AccountRepository {
     );
     return id;
   }
-
-  /// Movements whose label, note or amount matches [query].
-  ///
-  /// Matched in Dart rather than SQL because the owner searches in Arabic by
-  /// feel ("كوكاكولا", "نقل") and SQLite's LIKE is byte-wise: it would need the
-  /// exact spelling and case, which is no use for a free-text box. The window
-  /// being searched is already the current period, so the set is small.
-  List<AccountEntryRow> search(
-    List<AccountEntryRow> entries,
-    List<AccountRow> accounts,
-    String query,
-  ) {
-    final q = query.trim().toLowerCase();
-    if (q.isEmpty) return entries;
-    final nameOf = {for (final a in accounts) a.id: a.name.toLowerCase()};
-    return entries.where((e) {
-      if (e.note?.toLowerCase().contains(q) == true) return true;
-      if ((nameOf[e.accountId] ?? '').contains(q)) return true;
-      if (e.source.toLowerCase().contains(q)) return true;
-      // Amounts are searched on their plain form so '150' finds EGP 150.00.
-      if (e.amount.toStringAsFixed(2).contains(q)) return true;
-      return false;
-    }).toList();
-  }
 }
 
 final accountRepositoryProvider = Provider<AccountRepository>((ref) {
@@ -170,8 +146,7 @@ final accountingPeriodProvider =
 /// [accountEntriesProvider] still exists for anything that genuinely needs the
 /// full history, but the ledger deliberately does not — rendering every
 /// movement the shop has ever made is what made the screen crawl.
-final accountingEntriesProvider =
-    StreamProvider<List<AccountEntryRow>>((ref) {
+final accountingEntriesProvider = StreamProvider<List<AccountEntryRow>>((ref) {
   final range = currentReportRange(ref.watch(accountingPeriodProvider));
   return ref
       .watch(accountRepositoryProvider)
