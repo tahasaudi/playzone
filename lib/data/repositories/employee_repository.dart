@@ -22,6 +22,10 @@ class EmployeeRepository {
   Stream<List<EmployeeRow>> watchActive() => _db.employeeDao.watchActive();
   Stream<List<EmployeeRow>> watchPartners() => _db.employeeDao.watchPartners();
 
+  /// Every employee including disabled ones — the roster screen shows both so
+  /// a switched-off account is visible and can be switched back on.
+  Stream<List<EmployeeRow>> watchAll() => _db.employeeDao.watchAll();
+
   /// Validates a PIN login attempt. Returns the employee on success, or
   /// null on failure — the caller must show a generic "wrong PIN"
   /// message either way (spec §21: "Do not reveal whether the PIN
@@ -149,6 +153,47 @@ class EmployeeRepository {
     );
   }
 
+  /// Changes the employee's phone. The phone doubles as the login handle
+  /// (see [authenticate]), so moving it moves how this person signs in —
+  /// admin-only, and audit-logged for the same reason a PIN reset is.
+  Future<void> setPhone(int id, String phone) async {
+    _permissions.require(_permissions.canManageUsers, 'تغيير رقم موظف');
+    final trimmed = phone.trim();
+    if (trimmed.isEmpty) throw ArgumentError('رقم الموبايل مطلوب');
+    final clash = await _db.employeeDao.getByPhone(trimmed);
+    if (clash != null && clash.id != id) {
+      throw Exception('الرقم ده مسجّل لموظف تاني');
+    }
+    await _db.employeeDao.updateEmployee(EmployeesCompanion(
+      id: Value(id),
+      phone: Value(trimmed),
+      updatedAt: Value(DateTime.now()),
+    ));
+    await _auditLog.log(
+      action: 'employee_phone_changed',
+      entityType: 'employee',
+      entityId: id,
+      newValue: trimmed,
+    );
+  }
+
+  /// Changes the employee's job role (admin-only). Roles gate the whole
+  /// permission baseline, so this is as sensitive as a PIN reset.
+  Future<void> setRole(int id, String role) async {
+    _permissions.require(_permissions.canManageUsers, 'تغيير وظيفة موظف');
+    await _db.employeeDao.updateEmployee(EmployeesCompanion(
+      id: Value(id),
+      role: Value(role),
+      updatedAt: Value(DateTime.now()),
+    ));
+    await _auditLog.log(
+      action: 'employee_role_changed',
+      entityType: 'employee',
+      entityId: id,
+      newValue: role,
+    );
+  }
+
   // ── مسحوبات وسداد ────────────────────────────────────────────────
   Stream<List<EmployeeTransactionRow>> watchTransactions() =>
       _db.employeeDao.watchTransactions();
@@ -272,6 +317,12 @@ class EmployeeRepository {
   // ── حضور وانصراف ────────────────────────────────────────────────
   Stream<List<EmployeeAttendanceRow>> watchAttendance() =>
       _db.employeeDao.watchAttendance();
+
+  Stream<List<EmployeeAttendanceRow>> watchAttendanceFor(int employeeId) =>
+      _db.employeeDao.watchAttendanceFor(employeeId);
+
+  Stream<List<EmployeeAttendanceRow>> watchOpenAttendance() =>
+      _db.employeeDao.watchOpenAttendance();
 
   Future<EmployeeAttendanceRow?> openAttendanceFor(int employeeId) =>
       _db.employeeDao.openAttendanceFor(employeeId);
@@ -407,6 +458,13 @@ final activeEmployeesProvider = StreamProvider<List<EmployeeRow>>((ref) {
   return ref.watch(employeeRepositoryProvider).watchActive();
 });
 
+/// The full roster — active *and* disabled. The employees screen watches this
+/// so an admin can see a switched-off account and bring it back, which a
+/// watchActive list can never show.
+final allEmployeesProvider = StreamProvider<List<EmployeeRow>>((ref) {
+  return ref.watch(employeeRepositoryProvider).watchAll();
+});
+
 final partnersProvider = StreamProvider<List<EmployeeRow>>((ref) {
   return ref.watch(employeeRepositoryProvider).watchPartners();
 });
@@ -440,4 +498,16 @@ final employeeTransactionsProvider =
 final employeeAttendanceProvider =
     StreamProvider<List<EmployeeAttendanceRow>>((ref) {
   return ref.watch(employeeRepositoryProvider).watchAttendance();
+});
+
+/// One employee's attendance history, newest first.
+final employeeAttendanceForProvider =
+    StreamProvider.family<List<EmployeeAttendanceRow>, int>((ref, employeeId) {
+  return ref.watch(employeeRepositoryProvider).watchAttendanceFor(employeeId);
+});
+
+/// Who is clocked in right now (open attendance records, one per employee).
+final openAttendanceProvider =
+    StreamProvider<List<EmployeeAttendanceRow>>((ref) {
+  return ref.watch(employeeRepositoryProvider).watchOpenAttendance();
 });

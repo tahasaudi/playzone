@@ -15,6 +15,15 @@ class EmployeeDao extends DatabaseAccessor<AppDatabase>
   Stream<List<EmployeeRow>> watchActive() =>
       (select(employees)..where((e) => e.active.equals(true))).watch();
 
+  /// Every employee, active and disabled, newest first.
+  ///
+  /// The roster screen needs the disabled ones too: an admin has to be able to
+  /// see who was switched off and switch them back on, and a screen that only
+  /// watches [watchActive] can never show the person it is meant to reactivate.
+  /// Ordered by name so the list does not reshuffle when someone is toggled.
+  Stream<List<EmployeeRow>> watchAll() =>
+      (select(employees)..orderBy([(e) => OrderingTerm.asc(e.name)])).watch();
+
   /// Partners (شركاء) only — eligible for a profit share. All-time list
   /// (includes disabled partners so history stays visible).
   Stream<List<EmployeeRow>> watchPartners() =>
@@ -102,4 +111,16 @@ class EmployeeDao extends DatabaseAccessor<AppDatabase>
             ..orderBy([(a) => OrderingTerm.desc(a.checkIn)])
             ..limit(limit))
           .watch();
+
+  /// The full attendance history for one employee, newest first.
+  Stream<List<EmployeeAttendanceRow>> watchAttendanceFor(int employeeId) =>
+      (select(employeeAttendance)
+            ..where((a) => a.employeeId.equals(employeeId))
+            ..orderBy([(a) => OrderingTerm.desc(a.checkIn)]))
+          .watch();
+
+  /// The currently-open attendance records, one per employee on the floor —
+  /// what the roster uses to show who is clocked in right now.
+  Stream<List<EmployeeAttendanceRow>> watchOpenAttendance() =>
+      (select(employeeAttendance)..where((a) => a.checkOut.isNull())).watch();
 }
