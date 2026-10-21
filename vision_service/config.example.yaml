@@ -1,0 +1,27 @@
+﻿# إعدادات الكاميرا
+camera:
+  source: "rtsp://USERNAME:PASSWORD@192.168.1.100:554/stream1"
+  roi: [[50, 40], [700, 40], [700, 450], [50, 450]] # عدّلها حسب زاوية الكاميرا
+
+# إعدادات الموديل
+model:
+  weights: "yolov11n.pt"
+  conf_threshold: 0.6
+  iou_threshold: 0.45
+
+# إعدادات ربط الكاشير
+pos:
+  enabled: true
+  base_url: "https://api.your-pos-system.com"
+  check_window_seconds: 90
+
+# إعدادات التنبيهات
+alerts:
+  telegram:
+    enabled: true
+  log_to_file: true
+
+# إعدادات السيرفر
+server:
+  host: "127.0.0.1"
+  port: 8765
