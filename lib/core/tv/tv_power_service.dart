@@ -326,8 +326,8 @@ class TvPowerService {
     _activeScreen = tvIp;
     final tv = TvDisplayService.instance;
     tv.markScreenOpen(tvIp);
-    tv.unblank();
-    tv.stopPushing();
+    tv.unblank(tvIp: tvIp);
+    tv.stopPushingScreen(tvIp);
     _lastResult = 'الشاشة بتفتح';
     _endTiming();
     // The screen's own history is written immediately, so a panel that is

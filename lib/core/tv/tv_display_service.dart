@@ -46,24 +46,41 @@ class TvDisplayService {
   Uint8List? _image;
   int _imageBytes = 0;
 
-  /// Counts up on every frame we hand out, and starts from the moment this
-  /// process started rather than from zero.
+  /// Video being played on a specific screen (pulled by that TV only).
+  final Map<String, File> _videoFiles = {};
+  final Map<String, String> _videoUrls = {};
+  final Set<String> _videoScreens = {};
+  final Map<String, String> _videoContentTypes = {};
+
+  /// One counter **per screen**, each seeded from the clock so a restarted
+  /// program never re-offers an address a panel has already cached.
   ///
-  /// The television fetches the address we give it, and it caches what it has
-  /// already fetched. A plain counter restarts at zero on every launch, so a
-  /// restarted program keeps offering `v=1`, `v=2` — addresses the panels
-  /// already have — and they answer from their own cache without ever asking
-  /// us for the file. A picture nobody downloaded is a picture we cannot use
-  /// to prove a command worked, so a command that succeeded on the wall would
-  /// be reported as a failure. Seeding from the clock makes every run offer
-  /// addresses the panels have never seen.
-  int _revision = DateTime.now().millisecondsSinceEpoch;
+  /// This used to be a single shared number, and that is what made the walls
+  /// move together. The number is baked into the picture URL
+  /// (`.../tv.jpg?s=<token>-<revision>`), so bumping it for one screen made
+  /// the URL "new" for *every* screen — the other panels saw a changed address
+  /// and re-fetched the frame, which reads on the wall as every screen
+  /// flickering or changing at once, when only one was asked to. Keying the
+  /// counter by address means pushing to screen A cannot invalidate screen B's
+  /// URL, so a command lands on exactly the screen it was sent to.
+  ///
+  /// Seeding from the clock matters for the same reason it always did: the
+  /// television caches the address it was given, and a counter that restarted
+  /// at zero would hand it an address it already holds, so it would answer
+  /// from its own cache and never ask us for the file — a picture nobody
+  /// downloaded being a picture we cannot use to prove the command worked.
+  final Map<String, int> _revisions = {};
+  int _revisionFor(String tvIp) =>
+      _revisions.putIfAbsent(tvIp.trim(), () => DateTime.now().millisecondsSinceEpoch);
   String? _lastError;
   DateTime? _lastPushAt;
   bool _tvFetched = false;
   DateTime? _lastFetchAt;
   DateTime? get lastFetchAt => _lastFetchAt;
-  Timer? _timer;
+
+  /// One refresh timer per screen, so starting the cards on one wall cannot
+  /// cancel the other's. Replaces the single `_timer` that used to be shared.
+  final Map<String, Timer> _pushTimers = {};
 
   /// Screens with a push in flight. A set, not a flag: the café has two and
   /// one must never cancel the other.
@@ -368,8 +385,7 @@ class TvDisplayService {
   }
 
   Future<void> stopServer() async {
-    _timer?.cancel();
-    _timer = null;
+    stopPushing();
     await _testServer?.close(force: true);
     _testServer = null;
     await _server?.close(force: true);
@@ -455,10 +471,16 @@ class TvDisplayService {
   Future<void> publish(Uint8List pngBytes) async {
     _image = pngBytes;
     _imageBytes = pngBytes.length;
+    _tvFetchedScreens.clear();
     _tvFetched = false;
     // A real frame from the broadcaster always wins over the blank one, so
-    // the screen comes back to life the moment a session starts again.
+    // the screen comes back to life the moment a session starts again. This is
+    // board-wide — every wall shows this same frame — so every screen's dark
+    // mark is cleared here, not just one address's.
+    _blankedScreens.clear();
     _blanked = false;
+    _tvFetchedScreens.clear();
+    _tvFetched = false;
     _controller.add(pngBytes);
   }
 
@@ -471,20 +493,56 @@ class TvDisplayService {
   bool _blanked = false;
   bool get isBlanked => _blanked;
 
+  /// Per-screen frames that stand in for the shared board.
+  ///
+  /// Right now this holds one thing: the "عرّفني" label. It exists so a
+  /// single screen can be shown something *without* the whole wall seeing it.
+  /// The alternative — swapping the shared image for twelve seconds — meant a
+  /// screen that fetched during that window was handed another screen's name.
+  final Map<String, Uint8List> _overrides = {};
+
   /// Serves a solid black frame instead of the session cards.
-  Future<void> blank() async {
+  ///
+  /// [tvIp] is the screen being blacked out. Its own counter is bumped so that
+  /// screen re-fetches the black frame; leaving it out (an internal call with
+  /// no single screen in mind) bumps nobody, since handing every panel a new
+  /// address is the "all the walls move at once" fault this file no longer
+  /// has.
+  Future<void> blank({String? tvIp}) async {
     if (_image == null) {
       _black ??= await _buildBlackFrame();
       _image = _black;
     }
     _imageBytes = _image!.length;
-    _blanked = true;
-    _tvFetched = false;
-    _revision++;
+    // Recorded per screen: "is this wall dark?" has to be answerable for one
+    // panel at a time, and one blanket flag made a screen that had just been
+    // blacked out look dark even after a different one was woken back up.
+    if (tvIp != null && tvIp.trim().isNotEmpty) {
+      _blankedScreens.add(tvIp.trim());
+      _tvFetchedScreens.remove(tvIp.trim());
+      _revisions[tvIp.trim()] = _revisionFor(tvIp) + 1;
+    }
+    _blanked = _blankedScreens.isNotEmpty;
+    _tvFetched = _tvFetchedScreens.isNotEmpty;
   }
 
   /// Back to normal: the next capture from the broadcaster is shown again.
-  void unblank() => _blanked = false;
+  ///
+  /// [tvIp] names the screen being woken, so only that panel is marked as no
+  /// longer dark. Without an address (an internal "everything is live again"
+  /// call) there is no single screen to clear, so nothing is cleared.
+  void unblank({String? tvIp}) {
+    if (tvIp != null && tvIp.trim().isNotEmpty) {
+      _blankedScreens.remove(tvIp.trim());
+    }
+    _blanked = _blankedScreens.isNotEmpty;
+  }
+
+  /// The screens currently showing our black frame, by address.
+  final Set<String> _blankedScreens = {};
+
+  /// The screens that have pulled a frame from us, by address.
+  final Set<String> _tvFetchedScreens = {};
 
   final Set<String> _closedScreens = closedScreenLedger();
 
@@ -559,7 +617,11 @@ class TvDisplayService {
       return false;
     }
     _closedScreens.remove(tvIp);
-    _blanked = false;
+    // This screen is going back to its console, so it is no longer dark —
+    // cleared for this address only, so a different wall that is still
+    // blacked out keeps saying so.
+    _blankedScreens.remove(tvIp.trim());
+    _blanked = _blankedScreens.isNotEmpty;
     // Only ever use an endpoint we already know. Discovering here would put
     // a 2,100-port sweep in the middle of a session start, which is exactly
     // the multi-second pause the cashier feels. Background discovery covers
@@ -608,11 +670,11 @@ class TvDisplayService {
       // Nothing known yet — kick discovery off in the background and say so
       // rather than making checkout wait for a port sweep.
       if (!_warming.contains(tvIp)) unawaited(warmUp(tvIp: tvIp));
-      await blank();
+      await blank(tvIp: tvIp);
       return false;
     }
-    await announce();
-    await blank();
+    await announce(tvIp: tvIp);
+    await blank(tvIp: tvIp);
     final watch = Stopwatch()..start();
     final ok = await _pushOnce(tvIp);
     watch.stop();
@@ -637,19 +699,20 @@ class TvDisplayService {
     String? mac,
   }) async {
     if (!tvAllowed) return false;
-    final previous = _image;
     final png = await _buildIdentifyFrame(name, tvIp, mac);
-    // The picture server hands every screen the same bytes, so this is set
-    // only long enough to send it to this one screen, and put back on the way
-    // out below.
-    _image = png;
-    _imageBytes = png.length;
-    _blanked = false;
-    _tvFetched = false;
+    // The frame belongs to THIS screen, not to the shared board. It is parked
+    // in `_overrides` under the screen's address so the picture server hands
+    // it out only when that panel asks — the other walls keep seeing the board
+    // they were already showing.
+    final key = tvIp.trim();
+    _overrides[key] = png;
+    // Its own address changes, so it comes back for the new frame instead of
+    // answering from its cache.
+    _revisions[key] = _revisionFor(tvIp) + 1;
     final ok = await _pushOnce(tvIp);
     _identifyTimers[tvIp]?.cancel();
     _identifyTimers[tvIp] = Timer(const Duration(seconds: 12), () {
-      unawaited(_endIdentify(tvIp, previous ?? _black));
+      unawaited(_endIdentify(tvIp));
     });
     return ok;
   }
@@ -657,14 +720,15 @@ class TvDisplayService {
   final Map<String, Timer> _identifyTimers = {};
 
   /// Puts a screen back the way `identify` found it.
-  Future<void> _endIdentify(String tvIp, Uint8List? restore) async {
+  Future<void> _endIdentify(String tvIp) async {
     _identifyTimers.remove(tvIp)?.cancel();
-    _image = restore ?? _black;
-    _imageBytes = _image?.length ?? 0;
+    // Drop the label first, so the next fetch on this screen gets the board
+    // again. Nothing was ever taken away from the other screens.
+    _overrides.remove(tvIp.trim());
     // A screen that is paid for stays dark; anything else goes back to its
     // console, which is what the normal flow would leave it doing.
     if (_closedScreens.contains(tvIp)) {
-      await blank();
+      await blank(tvIp: tvIp);
       await _pushOnce(tvIp);
     } else {
       await releaseToInput(tvIp);
@@ -732,23 +796,16 @@ class TvDisplayService {
   /// was measured across both walls: `?v=`, `?s=` and no query at all are
   /// accepted; anything with an `&` is refused. Do not add a parameter here.
   ///
-  /// The single parameter carries the screen's token and the revision together,
-  /// so the screen is still named on every fetch — without it `imagesServed`
-  /// was one number shared by every TV, which is why "is the picture reaching
-  /// the screen?" could not be answered for one panel at a time.
+  /// The single parameter carries the screen's token and its **own** revision
+  /// together, so the screen is still named on every fetch — without it
+  /// `imagesServed` was one number shared by every TV, which is why "is the
+  /// picture reaching the screen?" could not be answered for one panel at a
+  /// time — and so a push aimed at one screen cannot invalidate another's URL.
   String _imageUriFor(String self, String tvIp) =>
-      'http://$self:$port/tv.jpg?s=${_tokenFor(tvIp)}-$_revision';
+      'http://$self:$port/tv.jpg?s=${_tokenFor(tvIp)}-${_revisionFor(tvIp)}';
 
-  /// The cached AVTransport endpoint for [tvIp], discovering it if needed.
-  Future<String?> _controlUrlFor(String tvIp) async {
-    if (tvIp.isEmpty) return null;
-    final cached = _controlCache[tvIp];
-    if (cached != null &&
-        DateTime.now().difference(cached.$2) < const Duration(minutes: 30)) {
-      return cached.$1;
-    }
-    return _findControlUrl(tvIp);
-  }
+  String _videoUriFor(String self, String tvIp) =>
+      'http://$self:$port/video?s=${_tokenFor(tvIp)}-${_revisionFor(tvIp)}';
 
   /// Finds (and remembers) the TV's control endpoint ahead of time.
   ///
@@ -773,7 +830,7 @@ class TvDisplayService {
           _dlnaRefused.remove(tvIp);
           _suspect.remove(tvIp);
         }
-        await announce();
+        await announce(tvIp: tvIp);
         if (await _findControlUrl(tvIp) != null) {
           _suspect.remove(tvIp);
           if (force) _lastError = null;
@@ -888,19 +945,25 @@ class TvDisplayService {
   /// flow (HDMI on, black off) is one-shot: `releaseToInput()` and
   /// `pushBlack()` each fire a single command, so nothing polls in the
   /// background and a session start feels instant.
+  ///
+  /// One timer **per screen**. There used to be a single timer, so starting
+  /// the cards on a second screen cancelled the first one's refresh — the
+  /// first wall then stopped being re-asserted and could drift. Each screen
+  /// now owns its own loop, and they cannot stop each other.
   void startPushing(
       {required String tvIp, Duration every = const Duration(seconds: 2)}) {
     if (kHardLockWallNetwork) return;
-    stopPushing();
     if (tvIp.isEmpty) return;
+    final key = tvIp.trim();
+    _pushTimers.remove(key)?.cancel();
     _currentTvIp = tvIp;
-    unawaited(announce());
+    unawaited(announce(tvIp: tvIp));
     var tick = 0;
-    _timer = Timer.periodic(every, (_) {
+    _pushTimers[key] = Timer.periodic(every, (_) {
       tick++;
       // The TV only renders media from a device it has "met" on SSDP, so we
       // re-announce periodically (and immediately after the first push).
-      if (tick % 10 == 0) unawaited(announce());
+      if (tick % 10 == 0) unawaited(announce(tvIp: tvIp));
       unawaited(_pushOnce(tvIp));
     });
     // Fire immediately so the screen lights up without waiting a cycle.
@@ -909,10 +972,18 @@ class TvDisplayService {
 
   /// SSDP alive announcement. Without it an LG renderer answers Play with
   /// HTTP 500 because it never saw this PC on the network.
-  Future<void> announce() async {
+  ///
+  /// [tvIp] is the screen this announcement is for. It is passed in rather than
+  /// read from the shared `_currentTvIp` because that single field was
+  /// whichever screen spoke last: with two walls live, the periodic re-announce
+  /// for one was resolved against the other's address. On one LAN the local
+  /// address comes out the same either way, but naming the screen keeps the
+  /// call honest about who it is for.
+  Future<void> announce({String? tvIp}) async {
     if (kHardLockWallNetwork) return;
-    final self = await resolveLocalAddress(
-        forHost: _currentTvIp.isEmpty ? null : _currentTvIp);
+    final host = (tvIp ?? _currentTvIp).trim();
+    final self =
+        await resolveLocalAddress(forHost: host.isEmpty ? null : host);
     if (self == null) return;
     try {
       final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
@@ -947,9 +1018,173 @@ class TvDisplayService {
   bool _announced = false;
   bool get announced => _announced;
 
+  /// Stops every screen's refresh loop.
+  ///
+  /// Called when the wall hands back to the consoles (session start / collect),
+  /// where every screen should stop polling rather than one being singled out.
   void stopPushing() {
-    _timer?.cancel();
-    _timer = null;
+    for (final t in _pushTimers.values) {
+      t.cancel();
+    }
+    _pushTimers.clear();
+  }
+
+  /// Stops the refresh loop for one screen only, leaving the others running.
+  void stopPushingScreen(String tvIp) {
+    _pushTimers.remove(tvIp.trim())?.cancel();
+  }
+
+  /// Whether this screen is currently playing a video file.
+  bool isPlayingVideo(String tvIp) => _videoScreens.contains(tvIp.trim());
+
+  /// Play a local video file on a single screen. Returns true if the command
+  /// was accepted. The TV pulls the file directly from this PC over LAN.
+  Future<bool> playVideoFile(String tvIp, File file, {String? contentType}) async {
+    if (!tvAllowed) return false;
+    final key = tvIp.trim();
+    if (key.isEmpty) return false;
+    final self = await resolveLocalAddress(forHost: key);
+    if (self == null) {
+      _lastError = 'ما قدرتش أعرف IP الجهاز على الشبكة';
+      return false;
+    }
+    final ctl = await _findControlUrl(key);
+    if (ctl == null) {
+      _lastError = 'التلفزيون $key مش راد على استعلام DLNA';
+      return false;
+    }
+    _videoFiles[key] = file;
+    _videoUrls.remove(key);
+    _videoContentTypes[key] = contentType ?? _contentTypeForFile(file.path);
+    _videoScreens.add(key);
+    stopPushingScreen(key);
+    _overrides.remove(key);
+    unblank(tvIp: key);
+
+    final uri = _videoUriFor(self, key);
+    final proto = _videoProtocolFor(_videoContentTypes[key]!);
+    final ext = file.path.split('.').last.toLowerCase();
+    final klass = ext == 'mpg' || ext == 'mpeg'
+        ? 'object.item.videoItem.movie'
+        : 'object.item.videoItem';
+    final didl =
+        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/"'
+        ' xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        '<item id="0" parentID="-1" restricted="1">'
+        '<dc:title>PlayZone Video</dc:title>'
+        '<upnp:class>$klass</upnp:class>'
+        '<res protocolInfo="$proto" size="${await file.length()}">$uri</res>'
+        '</item></DIDL-Lite>';
+
+    _log(key).lastPushedUri = uri;
+    await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    final setFuture = _soap(
+        ctl,
+        'SetAVTransportURI',
+        '<InstanceID>0</InstanceID><CurrentURI>${_escapeXml(uri)}</CurrentURI>'
+            '<CurrentURIMetaData>${_escapeXml(didl)}</CurrentURIMetaData>');
+    final playFuture =
+        _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
+    await Future.wait([setFuture, playFuture]);
+    _lastPushAt = DateTime.now();
+    markReached(key, state: 'PLAYING');
+    noteCommand(key, 'تشغيل فيلم', 'بيلعب الآن', ok: true);
+    return true;
+  }
+
+  /// Play a direct video URL on a single screen.
+  Future<bool> playVideoUrl(String tvIp, String url, {String? contentType}) async {
+    if (!tvAllowed) return false;
+    final key = tvIp.trim();
+    if (key.isEmpty || url.trim().isEmpty) return false;
+    final self = await resolveLocalAddress(forHost: key);
+    if (self == null) {
+      _lastError = 'ما قدرتش أعرف IP الجهاز على الشبكة';
+      return false;
+    }
+    final ctl = await _findControlUrl(key);
+    if (ctl == null) {
+      _lastError = 'التلفزيون $key مش راد على استعلام DLNA';
+      return false;
+    }
+    _videoFiles.remove(key);
+    _videoUrls[key] = url.trim();
+    _videoContentTypes[key] = contentType ?? 'video/mp4';
+    _videoScreens.add(key);
+    stopPushingScreen(key);
+    _overrides.remove(key);
+    unblank(tvIp: key);
+
+    final uri = _videoUriFor(self, key);
+    final proto = _videoProtocolFor(_videoContentTypes[key]!);
+    final didl =
+        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/"'
+        ' xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        '<item id="0" parentID="-1" restricted="1">'
+        '<dc:title>PlayZone Video</dc:title>'
+        '<upnp:class>object.item.videoItem</upnp:class>'
+        '<res protocolInfo="$proto">$uri</res>'
+        '</item></DIDL-Lite>';
+
+    _log(key).lastPushedUri = uri;
+    await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    final setFuture = _soap(
+        ctl,
+        'SetAVTransportURI',
+        '<InstanceID>0</InstanceID><CurrentURI>${_escapeXml(uri)}</CurrentURI>'
+            '<CurrentURIMetaData>${_escapeXml(didl)}</CurrentURIMetaData>');
+    final playFuture =
+        _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
+    await Future.wait([setFuture, playFuture]);
+    _lastPushAt = DateTime.now();
+    markReached(key, state: 'PLAYING');
+    noteCommand(key, 'تشغيل فيلم (لينك)', 'بيلعب الآن', ok: true);
+    return true;
+  }
+
+  /// Stop video playback and return this screen to game cards/console as normal.
+  Future<bool> stopVideo(String tvIp) async {
+    final key = tvIp.trim();
+    _videoFiles.remove(key);
+    _videoUrls.remove(key);
+    _videoContentTypes.remove(key);
+    _videoScreens.remove(key);
+    if (key.isNotEmpty) {
+      await releaseToInput(key);
+    }
+    return true;
+  }
+
+  String _contentTypeForFile(String path) {
+    final ext = path.split('.').last.toLowerCase();
+    switch (ext) {
+      case 'mp4':
+      case 'm4v':
+        return 'video/mp4';
+      case 'mpg':
+      case 'mpeg':
+        return 'video/mpeg';
+      case 'mkv':
+        return 'video/x-matroska';
+      case 'avi':
+        return 'video/x-msvideo';
+      case 'webm':
+        return 'video/webm';
+      default:
+        return 'video/mp4';
+    }
+  }
+
+  String _videoProtocolFor(String ct) {
+    if (ct.contains('mpeg')) return 'http-get:*:video/mpeg:DLNA.ORG_OP=01;DLNA.ORG_CI=0';
+    if (ct.contains('x-msvideo')) return 'http-get:*:video/x-msvideo:DLNA.ORG_OP=01;DLNA.ORG_CI=0';
+    if (ct.contains('x-matroska')) return 'http-get:*:video/x-matroska:DLNA.ORG_OP=01;DLNA.ORG_CI=0';
+    if (ct.contains('webm')) return 'http-get:*:video/webm:DLNA.ORG_OP=01;DLNA.ORG_CI=0';
+    return 'http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0';
   }
 
   Future<bool> _pushOnce(String tvIp) async {
@@ -970,8 +1205,10 @@ class TvDisplayService {
         return false;
       }
       // A new query string forces the TV to re-fetch instead of using its
-      // cached copy of the same URL.
-      _revision++;
+      // cached copy of the same URL. Bumped for **this screen only**, so the
+      // other panels' addresses stay exactly as they were and they have no
+      // reason to fetch again.
+      _revisions[tvIp.trim()] = _revisionFor(tvIp) + 1;
       final uri = _imageUriFor(self, tvIp);
       // Written down the moment we decide to show it, before anything is
       // sent. If this screen then refuses, the one fact worth having is the
@@ -1182,14 +1419,6 @@ class TvDisplayService {
     log.refusedAt ??= DateTime.now();
   }
 
-  static const _xmlEscapes = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&apos;',
-  };
-
   static String _escapeXml(String value) => value
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
@@ -1227,8 +1456,24 @@ class TvDisplayService {
     }
     _lastDiscoveryAt[tvIp] = DateTime.now();
 
+    // Answer the question from the television itself, before guessing.
+    //
+    // SSDP is asked FIRST now, not last. A panel announces its own renderer
+    // address in its reply, so this returns the port the screen is listening on
+    // right now — the one thing the guessed list and the sweep can only hope to
+    // stumble onto. Measured on this network, a reply arrives in well under a
+    // second and named ports (1602, 1684, 1685, 1593, 1502, 1470) that were in
+    // neither the cached list nor the sweep's range, which is exactly why the
+    // walls sat unreachable while they were open and answering.
+    _targetHost = tvIp;
+    final announced = await _ssdpSearch(tvIp);
+    if (announced.isNotEmpty) {
+      final control = await _firstControlUrl(tvIp, announced);
+      if (control != null) return control;
+    }
+
     // Every port either wall screen has served its renderer on, across
-    // restarts. Checked first because it costs nothing, and it is the
+    // restarts. Checked second because it costs nothing, and it is the
     // difference between a screen that lights up immediately and one that
     // sits black for ten seconds waiting for a scan.
     //
@@ -1243,22 +1488,21 @@ class TvDisplayService {
         // 65UP7500PVG
         1102, 1104, 1180, 1299, 1313, 1315, 1356, 1415, 1567, 1694,
         3001,
+        // Ports these panels were actually announcing when the walls went
+        // unreachable — recorded so the next boot that happens to reuse one
+        // lights up without waiting for a reply at all.
+        1470, 1502, 1593, 1602, 1684, 1685,
       ])
         'http://$tvIp:$port/',
     ];
     if (await _hasControlUrl(tvIp, candidates)) return _controlCache[tvIp]!.$1;
 
-    // The sweep is the only method that has never let us down: the TV moves
-    // its renderer port on every boot and only answers on the new one. SSDP
-    // is tried alongside it, but a reply we filter out must not stop the
-    // scan, which used to leave the screen unreachable all day.
-    _targetHost = tvIp;
+    // The sweep is the last resort: it is the heaviest thing this program does
+    // to the café network and it can only find a port inside its range, so it
+    // runs only after the screen has failed to name its own address.
     final scanned = await _scanLocations(tvIp);
     if (scanned != null) return scanned;
-    // SSDP is the fallback, not the first move: it is the slower of the two and
-    // the one a filtered reply can quietly defeat.
-    final found = await _ssdpSearch(tvIp);
-    return _firstControlUrl(tvIp, found);
+    return null;
   }
 
   /// Returns the first AVTransport endpoint among [locations], caching it.
@@ -1358,13 +1602,19 @@ class TvDisplayService {
 
   Future<String?> _sweepPorts(String tvIp) async {
     const batch = 512;
-    const total = 2101; // ports 1000..3100 inclusive
+    // The floor to the ceiling of the range LG hands its renderer. Widened past
+    // the old 1000..3100 after ports in the 4000s and 5000s were seen on these
+    // panels: a range that stops at 3100 can miss the one port that matters and
+    // then report "no screen" for a wall that is wide awake.
+    const from = 1000;
+    const to = 8000;
+    const total = to - from + 1; // ports 1000..8000 inclusive
     var scanned = 0;
     final found = <String>[];
     try {
-      for (var start = 1000; start <= 3100; start += batch) {
+      for (var start = from; start <= to; start += batch) {
         final ports = [
-          for (var p = start; p <= 3100 && p < start + batch; p++) p,
+          for (var p = start; p <= to && p < start + batch; p++) p,
         ];
         final results = await Future.wait(ports.map(_isPortOpen));
         scanned += ports.length;
@@ -1402,7 +1652,13 @@ class TvDisplayService {
       socket = await Socket.connect(
         _targetHost,
         port,
-        timeout: const Duration(milliseconds: 300),
+        // Long enough for the café's Wi-Fi, which is the actual problem here.
+        // Measured against a live panel: the first connect to a real renderer
+        // port took 532 ms, so the old 300 ms budget hung up on the correct
+        // port before it ever answered — discovery then reported "no screen"
+        // for a panel that was open and waiting. A closed port still rejects
+        // immediately, so this costs nothing on the ports that are shut.
+        timeout: const Duration(milliseconds: 1800),
       );
       return true;
     } catch (_) {
@@ -1458,7 +1714,7 @@ class TvDisplayService {
         );
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
-      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      await Future<void>.delayed(const Duration(milliseconds: 2500));
     } catch (e) {
       _lastError = 'SSDP search: $e';
     } finally {
@@ -1830,13 +2086,22 @@ class TvDisplayService {
     String inner;
     switch (action) {
       case 'Browse':
-        final self = await resolveLocalAddress(
-            forHost: request.connectionInfo?.remoteAddress.address);
+        final caller = request.connectionInfo?.remoteAddress.address;
+        final self = await resolveLocalAddress(forHost: caller);
         // A browse response carries the full absolute URL. Left without the
         // scheme it reads as a file name, so a panel that browses and then plays
         // what it found has nothing to dial - and the failure surfaces later as
         // a renderer that accepts the play and never fetches.
-        final uri = 'http://$self:$port/tv.jpg?v=$_revision';
+        //
+        // The revision is the *caller's* own, keyed by the address the browse
+        // came from, so answering one panel does not hand every other panel a
+        // new address to re-fetch.
+        final uri = 'http://$self:$port/tv.jpg?v=${_revisionFor(caller ?? '')}';
+        // The size advertised has to be the size of the frame this panel will
+        // actually be handed — its own override if it has one, otherwise the
+        // shared board. A wrong `size` makes the panel distrust the resource.
+        final served =
+            _overrides[_screenForTag(_tokenFor(caller ?? ''))] ?? _image;
         final didl =
             '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
             ' xmlns:dc="http://purl.org/dc/elements/1.1/"'
@@ -1846,7 +2111,7 @@ class TvDisplayService {
             '<dc:creator>PlayZone</dc:creator>'
             '<upnp:class>object.item.imageItem.photo</upnp:class>'
             '<res protocolInfo="http-get:*:image/png:DLNA.ORG_OP=01;'
-            'DLNA.ORG_CI=0" size="${_imageBytes}">$uri</res>'
+            'DLNA.ORG_CI=0" size="${served?.length ?? _imageBytes}">$uri</res>'
             '</item></DIDL-Lite>';
         inner =
             '<u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
@@ -1899,7 +2164,7 @@ class TvDisplayService {
   /// explain a fault would be the thing that stops answering.
   String _statusBody() => 'running=$isRunning\n'
       'announced=$_announced\n'
-      'pushing=${_timer != null}\n'
+      'pushing=${_pushTimers.isNotEmpty}\n'
       'blanked=$_blanked\n'
       'fullscreen=${WindowState.fullScreen}\n'
       'hasControlUrl=${_controlCache.isNotEmpty}\n'
@@ -2023,46 +2288,190 @@ class TvDisplayService {
       await _handleControl(request, res);
       return;
     }
-    if (request.uri.path != '/tv.jpg' || _image == null) {
-      res.statusCode = HttpStatus.notFound;
-      res.headers.set(
-          'X-PlayZone-Reason', _image == null ? 'no-image-yet' : 'wrong-path');
+    if (request.uri.path == '/tv.jpg') {
+      if (_image == null) {
+        res.statusCode = HttpStatus.notFound;
+        res.headers.set('X-PlayZone-Reason', 'no-image-yet');
+        await res.close();
+        return;
+      }
+      // A screen that has been singled out (the "عرّفني" label) is served its
+      // own frame instead of the shared board. This is what keeps one screen's
+      // label from painting itself onto every other wall for the twelve seconds
+      // it is up: the override belongs to that address, and nobody else asks for
+      // it.
+      final who = _screenForTag(request.uri.queryParameters['s']?.trim() ?? '');
+      final frame = _overrides[who] ?? _image!;
+      res.statusCode = HttpStatus.ok;
+      res.headers.contentType = ContentType('image', 'png');
+      res.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.headers.set('Accept-Ranges', 'none');
+      res.headers.contentLength = frame.length;
+      // The screen fetches back the exact URL we handed it, and that URL carries
+      // the screen's token — so the fetch is attributed to a real panel instead of
+      // to a shared counter. A `HEAD` first is normal (the TV sizes the image
+      // before pulling it), and counting it separately is what proves the TV got
+      // as far as asking. An unrecognised token is credited to nobody: a request
+      // this process did not ask for is not proof about any wall in particular.
+      if (request.method == 'HEAD') {
+        if (who.isNotEmpty) _log(who).headRequests++;
+        await res.close();
+        return;
+      }
+      res.add(frame);
       await res.close();
+      _imagesServed++;
+      _lastFetchAt = DateTime.now();
+      if (who.isNotEmpty) {
+        // Which screens have pulled a frame, by address. The blanket `_tvFetched`
+        // flag could only ever say "some screen somewhere is being served", which
+        // is the wrong answer when one wall is fetching and another is not.
+        _tvFetchedScreens.add(who);
+        _tvFetched = true;
+        final log = _log(who);
+        log.imagesServed++;
+        log.lastFetchAt = _lastFetchAt;
+        // Pulling the frame is the strongest possible proof that this panel is
+        // alive and showing us, so record it as the state it demonstrates
+        // instead of leaving it to be inferred later.
+        markReached(who, state: 'PLAYING');
+        log.lastOk = true;
+        log.note('جابت الصورة (${log.imagesServed} مرة)');
+      }
       return;
     }
-    res.statusCode = HttpStatus.ok;
-    res.headers.contentType = ContentType('image', 'png');
-    res.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.headers.set('Accept-Ranges', 'none');
-    res.headers.contentLength = _imageBytes;
-    // The screen fetches back the exact URL we handed it, and that URL carries
-    // the screen's token — so the fetch is attributed to a real panel instead of
-    // to a shared counter. A `HEAD` first is normal (the TV sizes the image
-    // before pulling it), and counting it separately is what proves the TV got
-    // as far as asking. An unrecognised token is credited to nobody: a request
-    // this process did not ask for is not proof about any wall in particular.
-    final who = _screenForTag(request.uri.queryParameters['s']?.trim() ?? '');
-    if (request.method == 'HEAD') {
-      if (who.isNotEmpty) _log(who).headRequests++;
-      await res.close();
+
+    // Video streaming — local file or proxied URL. Served with Range support.
+    if (request.uri.path == '/video' || request.uri.path.startsWith('/video/')) {
+      await _handleVideoRequest(request, res);
       return;
     }
-    res.add(_image!);
+
+    res.statusCode = HttpStatus.notFound;
+    res.headers.set('X-PlayZone-Reason', 'wrong-path');
     await res.close();
-    _imagesServed++;
-    _tvFetched = true;
-    _lastFetchAt = DateTime.now();
-    if (who.isNotEmpty) {
-      final log = _log(who);
-      log.imagesServed++;
-      log.lastFetchAt = _lastFetchAt;
-      // Pulling the frame is the strongest possible proof that this panel is
-      // alive and showing us, so record it as the state it demonstrates
-      // instead of leaving it to be inferred later.
-      markReached(who, state: 'PLAYING');
-      log.lastOk = true;
-      log.note('جابت الصورة (${log.imagesServed} مرة)');
+  }
+
+  Future<void> _handleVideoRequest(HttpRequest request, HttpResponse res) async {
+    final tag = request.uri.queryParameters['s']?.trim() ?? '';
+    final who = _screenForTag(tag);
+    File? file = who.isNotEmpty ? _videoFiles[who] : null;
+    String? url = who.isNotEmpty ? _videoUrls[who] : null;
+    if (file == null && url == null && _videoFiles.isNotEmpty) {
+      // fallback to first video if tag unknown
+      final k = _videoFiles.keys.first;
+      file = _videoFiles[k];
+      url = _videoUrls[k];
+      who.isEmpty ? null : null;
     }
+    if (file == null && url == null) {
+      res.statusCode = HttpStatus.notFound;
+      res.headers.set('X-PlayZone-Reason', 'no-video');
+      await res.close();
+      return;
+    }
+
+    String contentType = 'video/mp4';
+    if (who.isNotEmpty) {
+      final ct = _videoContentTypes[who];
+      if (ct != null && ct.isNotEmpty) contentType = ct;
+    }
+
+    res.headers.set('Cache-Control', 'no-store');
+    res.headers.set('Accept-Ranges', 'bytes');
+    res.headers.contentType = ContentType.parse(contentType);
+
+    if (url != null && file == null) {
+      try {
+        final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+        final up = await client.getUrl(Uri.parse(url));
+        final range = request.headers.value('range');
+        if (range != null) up.headers.set('Range', range);
+        up.headers.set('User-Agent', 'Mozilla/5.0');
+        final down = await up.close();
+        res.statusCode = down.statusCode;
+        down.headers.forEach((k, v) => res.headers.set(k, v.join(', ')));
+        if (request.method == 'HEAD') {
+          await res.close();
+          client.close(force: true);
+          return;
+        }
+        await res.addStream(down);
+        await res.close();
+        client.close(force: true);
+        if (who.isNotEmpty) {
+          _tvFetchedScreens.add(who);
+          _tvFetched = true;
+          final log = _log(who);
+          log.lastFetchAt = DateTime.now();
+          markReached(who, state: 'PLAYING');
+        }
+        return;
+      } catch (e) {
+        res.statusCode = HttpStatus.badGateway;
+        res.write('$e');
+        await res.close();
+        return;
+      }
+    }
+
+    if (file != null && await file.exists()) {
+      final length = await file.length();
+      final range = request.headers.value('range');
+      if (request.method == 'HEAD') {
+        res.statusCode = HttpStatus.ok;
+        res.headers.contentLength = length;
+        await res.close();
+        if (who.isNotEmpty) _log(who).headRequests++;
+        return;
+      }
+      if (range != null) {
+        final m = RegExp(r'bytes=(\d+)-(\d*)').firstMatch(range);
+        if (m != null) {
+          var start = int.parse(m.group(1)!);
+          var end = m.group(2)!.isNotEmpty ? int.parse(m.group(2)!) : length - 1;
+          if (end >= length) end = length - 1;
+          if (start < 0) start = 0;
+          final raf = await file.open();
+          await raf.setPosition(start);
+          final slice = await raf.read(end - start + 1);
+          await raf.close();
+          res.statusCode = HttpStatus.partialContent;
+          res.headers.set('Content-Range', 'bytes $start-$end/$length');
+          res.headers.contentLength = slice.length;
+          res.add(slice);
+          await res.close();
+          if (who.isNotEmpty) {
+            _tvFetchedScreens.add(who);
+            _tvFetched = true;
+            final log = _log(who);
+            log.imagesServed++;
+            log.lastFetchAt = DateTime.now();
+            markReached(who, state: 'PLAYING');
+            log.lastOk = true;
+          }
+          return;
+        }
+      }
+      res.statusCode = HttpStatus.ok;
+      res.headers.contentLength = length;
+      await res.addStream(file.openRead());
+      await res.close();
+      if (who.isNotEmpty) {
+        _tvFetchedScreens.add(who);
+        _tvFetched = true;
+        final log = _log(who);
+        log.imagesServed++;
+        log.lastFetchAt = DateTime.now();
+        markReached(who, state: 'PLAYING');
+        log.lastOk = true;
+      }
+      return;
+    }
+
+    res.statusCode = HttpStatus.notFound;
+    res.headers.set('X-PlayZone-Reason', 'video-missing');
+    await res.close();
   }
 
   /// Set by the broadcaster when a capture throws, so the status endpoint

@@ -38,6 +38,32 @@ class ProductDao extends DatabaseAccessor<AppDatabase> with _$ProductDaoMixin {
   Future<int> insertProduct(ProductsCompanion entry) =>
       into(products).insert(entry);
 
+  /// Live products matching a typed query by name, code (`sku`) or barcode.
+  ///
+  /// Searched in Dart rather than SQL for the same version-safety reason as
+  /// [watchLowStock], and because the catalog is small enough that a scan is
+  /// cheaper than getting a `LIKE` across three columns right in every drift
+  /// version. An empty query returns everything, so the picker can show the
+  /// full list before the cashier types.
+  Stream<List<ProductRow>> watchProductsMatching(String query) {
+    final needle = query.trim().toLowerCase();
+    return (select(products)
+          ..where((p) => p.active.equals(true))
+          ..orderBy([(p) => OrderingTerm.asc(p.name)]))
+        .watch()
+        .map((rows) {
+      if (needle.isEmpty) return rows;
+      return rows.where((p) {
+        final name = p.name.toLowerCase();
+        final sku = (p.sku ?? '').toLowerCase();
+        final barcode = (p.barcode ?? '').toLowerCase();
+        return name.contains(needle) ||
+            sku.contains(needle) ||
+            barcode.contains(needle);
+      }).toList();
+    });
+  }
+
   /// Every product, active or not — the partnership ledger prices cost of
   /// goods off this, because a soft-deleted product sold months ago still
   /// carries its cost and must not read as free.

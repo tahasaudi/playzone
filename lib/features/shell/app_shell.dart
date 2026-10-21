@@ -33,6 +33,7 @@ import '../expenses/expenses_screen.dart';
 import '../refunds/refunds_screen.dart';
 import '../refunds/refund_report_screen.dart';
 import '../inventory/stock_count_screen.dart';
+import '../suppliers/suppliers_screen.dart';
 import '../partnership/partnership_screen.dart';
 import '../reports/protected_screen.dart';
 import '../search/global_search_dialog.dart';
@@ -629,6 +630,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         return const RefundReportScreen();
       case 'stock_counts':
         return const StockCountScreen();
+      case 'suppliers':
+        return const SuppliersScreen();
       case 'names_manager':
         return const NamesManagerScreen();
       case 'partnership':
@@ -701,6 +704,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         return 'تقرير المرتجعات';
       case 'stock_counts':
         return 'الجرد الدوري';
+      case 'suppliers':
+        return 'الموردين';
       case 'names_manager':
         return 'إدارة الأسماء';
       case 'partnership':
@@ -762,6 +767,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         return 'كل المرتجعات المسجّلة وبنودها وإجمالي المبالغ';
       case 'stock_counts':
         return 'حصيلة جرد الأصناف وضبط المخزون';
+      case 'suppliers':
+        return 'مين المورد، اشتريت إيه، وبكام';
       case 'names_manager':
         return 'تعديل الأسماء في كل الكتالوج من مكان واحد';
       case 'partnership':

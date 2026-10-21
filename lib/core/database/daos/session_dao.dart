@@ -389,15 +389,20 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
   }
 
   /// All sessions started inside [from]..[to] (inclusive start time) —
-  /// feeds the per-employee performance report. Filtered in Dart like
-  /// the other ranged reads; consistent and version-proof.
+  /// feeds the per-employee performance report.
+  ///
+  /// Filtered in SQL: the earlier version read the whole sessions table and
+  /// discarded the out-of-range rows in Dart, so the per-employee report
+  /// carried every session the shop had ever run.
   Stream<List<SessionRow>> watchBetween({
     required DateTime from,
     required DateTime to,
   }) {
-    return select(sessions).watch().map((rows) => rows
-        .where((r) => !r.startTime.isBefore(from) && r.startTime.isBefore(to))
-        .toList());
+    return (select(sessions)
+          ..where((s) =>
+              s.startTime.isBiggerOrEqualValue(from) &
+              s.startTime.isSmallerThanValue(to)))
+        .watch();
   }
 }
 

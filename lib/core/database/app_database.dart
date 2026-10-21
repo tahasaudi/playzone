@@ -32,6 +32,7 @@ import 'tables/refund_items_table.dart';
 import 'tables/stock_counts_table.dart';
 import 'tables/employee_transactions_table.dart';
 import 'tables/employee_attendance_table.dart';
+import 'tables/suppliers_table.dart';
 
 import 'daos/employee_dao.dart';
 import 'daos/device_dao.dart';
@@ -51,6 +52,7 @@ import 'daos/settings_dao.dart';
 import 'daos/account_dao.dart';
 import 'daos/refund_dao.dart';
 import 'daos/stock_count_dao.dart';
+import 'daos/supplier_dao.dart';
 import '../permissions/pin_hasher.dart';
 
 part 'app_database.g.dart';
@@ -92,6 +94,9 @@ part 'app_database.g.dart';
     StockCountItems,
     EmployeeTransactions,
     EmployeeAttendance,
+    Suppliers,
+    Purchases,
+    PurchaseItems,
   ],
   daos: [
     EmployeeDao,
@@ -112,18 +117,20 @@ part 'app_database.g.dart';
     AccountDao,
     RefundDao,
     StockCountDao,
+    SupplierDao,
   ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 14;
+  int get schemaVersion => 17;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) async {
           await m.createAll();
+          await _createReportIndexes(this);
           await _seed(this);
         },
         onUpgrade: (m, from, to) async {
@@ -288,8 +295,55 @@ class AppDatabase extends _$AppDatabase {
           if (from < 14) {
             await m.createTable(refundItems);
           }
+          // v14 → v15: الموردين وفواتير الشراء. كانت البضاعة بتتزود من
+          // شاشة المنتجات مباشرة، من غير أي سجل لمين المورد ولا بكام — يعني
+          // "اشتريت من مين ودفعت كام" مكانش له إجابة في البرنامج. تلات جداول
+          // جديدة (موردين + فاتورة شراء + بنودها). إضافة جداول بس — مفيش
+          // مساس بأي بيانات موجودة.
+          if (from < 15) {
+            await m.createTable(suppliers);
+            await m.createTable(purchases);
+            await m.createTable(purchaseItems);
+          }
+          // v15 → v16: كود المورد. رقم بيتولّد لوحده لكل مورد، عشان تعرف
+          // تشاور على المورد برقمه بدل ما تدور على الاسم. عمود جديد بس،
+          // والموردين اللي موجودين بالفعل بيملّيهم الريبو أول مرة يتعدّلوا.
+          if (from < 16) {
+            await m.addColumn(suppliers, suppliers.code);
+            await customStatement(
+                'UPDATE suppliers SET code = id WHERE code IS NULL');
+          }
+          // v16 → v17: فهارس على التواريخ اللي شاشات التقارير بتفلتر بيها.
+          //
+          // من غير فهرس، SQLite بيمسح الجدول كله (SCAN) ويفلتر بعده — وده
+          // كان بيخلي "اليوم" و"الأسبوع" يقرّوا كل فواتير وبند الكافيه عشان
+          // يستخدموا جزء صغيّر منها. الفهرس بيخلّي الداتابيز تروح مباشرة على
+          // المدى المطلوب، والفرق بيكبر كل يوم الكافيه شغال.
+          //
+          // "IF NOT EXISTS" عشان إعادة تشغيل الترحيل متكسرش حاجة.
+          if (from < 17) {
+            await _createReportIndexes(this);
+          }
         },
       );
+}
+
+/// Indexes the ranged report reads depend on.
+///
+/// Without these, SQLite has to scan the whole table and filter afterwards
+/// (`SCAN invoices`), so "اليوم" and "الأسبوع" pulled every invoice and every
+/// line the shop had ever recorded in order to keep a handful of them — and
+/// the cost grew every day the café stayed open.
+///
+/// Called from both `onCreate` (fresh install) and the v17 upgrade (existing
+/// install), so the two end up identical. `IF NOT EXISTS` keeps it repeatable.
+Future<void> _createReportIndexes(AppDatabase db) async {
+  await db.customStatement('CREATE INDEX IF NOT EXISTS '
+      'idx_invoices_created_at ON invoices (created_at)');
+  await db.customStatement('CREATE INDEX IF NOT EXISTS '
+      'idx_invoice_items_invoice_id ON invoice_items (invoice_id)');
+  await db.customStatement('CREATE INDEX IF NOT EXISTS '
+      'idx_sessions_start_time ON sessions (start_time)');
 }
 
 /// The café's real roster: 3 PlayStation 4 and 3 PlayStation 5, numbered

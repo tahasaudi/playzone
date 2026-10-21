@@ -1,3 +1,4 @@
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/database/app_database.dart';
@@ -124,6 +125,10 @@ class _ProductDialogState extends ConsumerState<_ProductDialog> {
       text: widget.existing?.minimumStock.toString() ?? '5');
   late final TextEditingController _unit =
       TextEditingController(text: widget.existing?.unit ?? 'قطعة');
+  late final TextEditingController _sku =
+      TextEditingController(text: widget.existing?.sku ?? '');
+  late final TextEditingController _barcode =
+      TextEditingController(text: widget.existing?.barcode ?? '');
   late int? _categoryId = widget.existing?.categoryId;
   late bool _active = widget.existing?.active ?? true;
   String? _error;
@@ -140,6 +145,8 @@ class _ProductDialogState extends ConsumerState<_ProductDialog> {
     _stock.dispose();
     _minStock.dispose();
     _unit.dispose();
+    _sku.dispose();
+    _barcode.dispose();
     super.dispose();
   }
 
@@ -188,6 +195,8 @@ class _ProductDialogState extends ConsumerState<_ProductDialog> {
           stockQuantity: stock,
           minimumStock: minStock,
           unit: _unit.text,
+          sku: _sku.text,
+          barcode: _barcode.text,
         );
       } else {
         await repo.updateProduct(existing.copyWith(
@@ -198,6 +207,9 @@ class _ProductDialogState extends ConsumerState<_ProductDialog> {
           stockQuantity: stock,
           minimumStock: minStock,
           unit: _unit.text.trim().isEmpty ? 'قطعة' : _unit.text.trim(),
+          sku: Value(_sku.text.trim().isEmpty ? null : _sku.text.trim()),
+          barcode:
+              Value(_barcode.text.trim().isEmpty ? null : _barcode.text.trim()),
           active: _active,
         ));
       }
@@ -222,6 +234,19 @@ class _ProductDialogState extends ConsumerState<_ProductDialog> {
       onSave: _save,
       children: [
         _field(_name, 'اسم المنتج'),
+        const SizedBox(height: AppSpacing.md),
+        Row(
+          children: [
+            Expanded(child: _field(_sku, 'كود الصنف (اختياري)')),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(child: _field(_barcode, 'الباركود (اختياري)')),
+          ],
+        ),
+        const SizedBox(height: AppSpacing.sm),
+        Text(
+          'الكود والباركود بيسهّلوا البحث عن الصنف في فاتورة الشراء.',
+          style: TextStyle(fontSize: 12, color: AppColors.textTertiary),
+        ),
         const SizedBox(height: AppSpacing.md),
         categoriesAsync.when(
           loading: () => const LinearProgressIndicator(),

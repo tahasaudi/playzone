@@ -518,40 +518,45 @@ class InvoiceDao extends DatabaseAccessor<AppDatabase> with _$InvoiceDaoMixin {
   }
 
   /// Invoices created inside [from]..[to] — feeds the per-employee
-  /// performance report and date-ranged totals. Filtered in Dart like
-  /// watchToday; consistent and version-proof.
+  /// performance report and date-ranged totals.
+  ///
+  /// The window is filtered in SQL rather than in Dart. This used to read the
+  /// whole table (`select(invoices).watch()`) and drop the out-of-range rows
+  /// afterwards, which meant "اليوم" pulled every invoice the shop had ever
+  /// written — 914 rows to keep 15 — on every rebuild, and got slower every
+  /// day the shop stayed open.
   Stream<List<InvoiceRow>> watchBetween({
     required DateTime from,
     required DateTime to,
   }) {
-    return select(invoices).watch().map((rows) => rows
-        .where((r) => !r.createdAt.isBefore(from) && r.createdAt.isBefore(to))
-        .toList());
+    return (select(invoices)
+          ..where((i) =>
+              i.createdAt.isBiggerOrEqualValue(from) &
+              i.createdAt.isSmallerThanValue(to)))
+        .watch();
   }
 
   /// Every invoice line whose parent invoice falls inside [from]..[to] —
   /// feeds the Statistics screen's top-products ranking and the cost-of-goods
-  /// side of the profit math. Joined so the date filter travels with each
-  /// line, then filtered in Dart to match the rest of the ranged reads.
+  /// side of the profit math.
   ///
   /// Only settled bills count: an unsettled draft moved stock but no money, so
-  /// its lines must not appear as a sale (nor add to cost of goods).
+  /// its lines must not appear as a sale (nor add to cost of goods). Both that
+  /// rule and the date window are applied in SQL; the old version joined the
+  /// two tables with no `WHERE` at all, so every line in the database was
+  /// fetched and discarded on each rebuild.
   Stream<List<InvoiceItemRow>> watchItemsBetween({
     required DateTime from,
     required DateTime to,
   }) {
     final query = select(invoiceItems).join([
       innerJoin(invoices, invoices.id.equalsExp(invoiceItems.invoiceId)),
-    ]);
-    return query.watch().map((rows) => rows
-        .where((r) {
-          final invoice = r.readTable(invoices);
-          return invoice.paymentMethod != 'unpaid' &&
-              !invoice.createdAt.isBefore(from) &&
-              invoice.createdAt.isBefore(to);
-        })
-        .map((r) => r.readTable(invoiceItems))
-        .toList());
+    ])
+      ..where(invoices.paymentMethod.isNotValue('unpaid') &
+          invoices.createdAt.isBiggerOrEqualValue(from) &
+          invoices.createdAt.isSmallerThanValue(to));
+    return query.watch().map((rows) =>
+        rows.map((r) => r.readTable(invoiceItems)).toList());
   }
 
   /// Today's settled invoice lines — the protected screen's real cost of goods.

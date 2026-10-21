@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -406,6 +408,38 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
         : '$name مردّتش دلوقتي — دوس «ابحث عن الشاشة» وجرّب تاني');
   }
 
+  Future<void> _playMovie(String ip, String name) async {
+    if (ip.trim().isEmpty) {
+      _say('اكتب عنوان الشاشة الأول');
+      return;
+    }
+    final typeGroup = XTypeGroup(
+      label: 'فيديو',
+      extensions: ['mp4', 'm4v', 'mpg', 'mpeg', 'mkv', 'avi', 'webm'],
+    );
+    final file = await openFile(acceptedTypeGroups: [typeGroup]);
+    if (file == null || !mounted) return;
+    final f = File(file.path);
+    if (!await f.exists()) {
+      _say('الملف مش موجود');
+      return;
+    }
+    _say('بنشغل الفيلم على $name… بص على الشاشة');
+    final ok = await TvDisplayService.instance
+        .playVideoFile(ip.trim(), f);
+    _say(ok ? 'الفيلم شغال الآن ✅' : 'ماقدرتش أشغّل الفيلم — شوف اللوج');
+  }
+
+  Future<void> _stopMovie(String ip, String name) async {
+    if (ip.trim().isEmpty) {
+      _say('اكتب عنوان الشاشة الأول');
+      return;
+    }
+    _say('بنرجّع $name للعبة…');
+    await TvDisplayService.instance.stopVideo(ip.trim());
+    _say('رجعنا للعرض العادي ✅');
+  }
+
   @override
   Widget build(BuildContext context) {
     final config = ref.watch(tvConfigProvider);
@@ -611,6 +645,8 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
       },
       onProbe: () => _probe(ip, identity.name),
       onSearch: () => _search(ip, identity.name),
+      onPlayMovie: () => _playMovie(ip, identity.name),
+      onStopMovie: () => _stopMovie(ip, identity.name),
       onOpen: () {
         TvPowerService.instance.turnOn(ip);
         _say('بتفتح ${identity.name}');
@@ -944,6 +980,8 @@ class _ScreenPanel extends StatelessWidget {
     required this.onDevice,
     required this.onProbe,
     required this.onSearch,
+    required this.onPlayMovie,
+    required this.onStopMovie,
     required this.onOpen,
     required this.onClose,
   });
@@ -965,6 +1003,8 @@ class _ScreenPanel extends StatelessWidget {
   final ValueChanged<int?> onDevice;
   final VoidCallback onProbe;
   final VoidCallback onSearch;
+  final VoidCallback onPlayMovie;
+  final VoidCallback onStopMovie;
   final VoidCallback onOpen;
   final VoidCallback onClose;
 
@@ -1321,6 +1361,16 @@ class _ScreenPanel extends StatelessWidget {
                   label: 'ابحث عن الشاشة',
                   icon: Icons.wifi_find_rounded,
                   onTap: onSearch),
+              const SizedBox(width: 6),
+              _ActionChip(
+                  label: 'شغل فيلم',
+                  icon: Icons.movie_rounded,
+                  onTap: onPlayMovie),
+              const SizedBox(width: 6),
+              _ActionChip(
+                  label: 'ارجع للعبة',
+                  icon: Icons.replay_rounded,
+                  onTap: onStopMovie),
               const Spacer(),
               if (r != null && r.events.isNotEmpty)
                 TextButton.icon(

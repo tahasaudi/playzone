@@ -84,7 +84,16 @@ class _ProductRow extends StatelessWidget {
             size: 18, color: AppColors.accentSecondary),
         const SizedBox(width: AppSpacing.sm),
         Expanded(
-          child: Text(p.name, style: AppTypography.cardTitle),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(p.name, style: AppTypography.cardTitle),
+              if (p.sku?.isNotEmpty == true)
+                Text('كود: ${p.sku}',
+                    style: const TextStyle(
+                        fontSize: 11, color: AppColors.textTertiary)),
+            ],
+          ),
         ),
         Text('متوفر: ${p.stockQuantity}',
             style: TextStyle(

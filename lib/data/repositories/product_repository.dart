@@ -26,6 +26,10 @@ class ProductRepository {
   Stream<List<ProductWithCategory>> watchAllWithCategory() =>
       _db.productDao.watchAllWithCategory();
 
+  /// Live products matching a query by name, code or barcode.
+  Stream<List<ProductRow>> searchProducts(String query) =>
+      _db.productDao.watchProductsMatching(query);
+
   Stream<List<ProductRow>> watchLowStock() => _db.productDao.watchLowStock();
 
   /// Every product, active or not. تكلفة البضاعة is priced from here because a
@@ -60,6 +64,7 @@ class ProductRepository {
     int stockQuantity = 0,
     int minimumStock = 5,
     String? sku,
+    String? barcode,
     String unit = 'قطعة',
   }) async {
     _permissions.require(_permissions.canChangePrice, 'إضافة منتج');
@@ -75,6 +80,7 @@ class ProductRepository {
       stockQuantity: Value(stockQuantity),
       minimumStock: Value(minimumStock),
       sku: Value(sku?.trim().isEmpty ?? true ? null : sku!.trim()),
+      barcode: Value(barcode?.trim().isEmpty ?? true ? null : barcode!.trim()),
       unit: Value(unit.trim().isEmpty ? 'قطعة' : unit.trim()),
     ));
     await _auditLog.log(
@@ -218,6 +224,14 @@ final productRepositoryProvider = Provider<ProductRepository>((ref) {
 final productsWithCategoryProvider =
     StreamProvider<List<ProductWithCategory>>((ref) {
   return ref.watch(productRepositoryProvider).watchAllWithCategory();
+});
+
+/// Live products matching a search box, by name or code. The purchase form's
+/// picker reads this so the cashier narrows 29 products down by typing instead
+/// of scrolling a dropdown.
+final productSearchProvider =
+    StreamProvider.family<List<ProductRow>, String>((ref, query) {
+  return ref.watch(productRepositoryProvider).searchProducts(query);
 });
 
 final lowStockProductsProvider = StreamProvider<List<ProductRow>>((ref) {

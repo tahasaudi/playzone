@@ -25,6 +25,7 @@ const List<NavItem> businessNavItems = [
   NavItem(Icons.local_offer_rounded, 'الباقات والعروض', 'packages'),
   NavItem(Icons.local_cafe_rounded, 'المنتجات', 'products'),
   NavItem(Icons.inventory_2_rounded, 'المخزون', 'inventory'),
+  NavItem(Icons.local_shipping_rounded, 'الموردين', 'suppliers'),
   NavItem(Icons.fact_check_rounded, 'الجرد الدوري', 'stock_counts'),
   NavItem(Icons.assignment_return_rounded, 'المرتجعات', 'refunds'),
   NavItem(Icons.summarize_rounded, 'تقرير المرتجعات', 'refund_report'),
@@ -84,6 +85,10 @@ bool routeAllowed(String route, UserRole role) {
       // Periodic stock count touches real inventory — admin-only (mirrors
       // PermissionService.canStockCount).
       return role == UserRole.admin;
+    case 'suppliers':
+      // Recording a purchase raises stock and writes an expense, so it needs
+      // the same audience as the ledger and the reports.
+      return role.canViewReports;
     case 'names_manager':
       // Renaming catalog entities is an admin concern.
       return role.canEditPrices;
