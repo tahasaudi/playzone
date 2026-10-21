@@ -13,6 +13,7 @@ import '../../data/repositories/loyalty_repository.dart';
 import '../../data/repositories/settings_repository.dart';
 import '../../core/permissions/permission_service.dart';
 import '../tv/tv_settings_card.dart';
+import 'sync_settings_tab.dart';
 
 /// Admin-facing pricing settings — now backed by the real SQLite database
 /// via DeviceRepository/ProductRepository (Phase 1). Three sections:
@@ -42,7 +43,7 @@ class _PricingSettingsScreenState extends ConsumerState<PricingSettingsScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 5, vsync: this);
+    _tabController = TabController(length: 6, vsync: this);
   }
 
   @override
@@ -118,6 +119,7 @@ class _PricingSettingsScreenState extends ConsumerState<PricingSettingsScreen>
               Tab(text: 'منتجات الكافيه'),
               Tab(text: 'الولاء'),
               Tab(text: 'الأزرار المحمية'),
+              Tab(text: 'المزامنة'),
             ],
           ),
         ),
@@ -131,6 +133,7 @@ class _PricingSettingsScreenState extends ConsumerState<PricingSettingsScreen>
               _ProductPricesTab(),
               _LoyaltyTab(),
               _LockedPinTab(),
+              SyncSettingsTab(),
             ],
           ),
         ),

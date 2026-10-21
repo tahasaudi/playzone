@@ -117,12 +117,15 @@ class _SessionOrderModalContentState
   @override
   Widget build(BuildContext context) {
     final productsAsync = ref.watch(productsWithCategoryProvider);
+    final screen = MediaQuery.of(context).size;
+    final width = screen.width * 0.92 < 720 ? screen.width * 0.92 : 720.0;
+    final height = screen.height * 0.85 < 560 ? screen.height * 0.85 : 560.0;
 
     return Dialog(
       backgroundColor: Colors.transparent,
       child: Container(
-        width: 720,
-        height: 560,
+        width: width,
+        height: height,
         padding: const EdgeInsets.all(AppSpacing.xl),
         decoration: BoxDecoration(
           color: AppColors.bgElevated,
@@ -156,18 +159,18 @@ class _SessionOrderModalContentState
                     );
                   }
                   return LayoutBuilder(builder: (context, constraints) {
-                    final columns = constraints.maxWidth > 600 ? 4 : 3;
+                    final columns = constraints.maxWidth > 600 ? 3 : 2;
                     return GridView.count(
                       crossAxisCount: columns,
                       mainAxisSpacing: AppSpacing.sm,
                       crossAxisSpacing: AppSpacing.sm,
-                      childAspectRatio: 2.1,
+                      childAspectRatio: 1.7,
                       children: available.map((p) {
                         final qty = _lines[p.product.id]?.quantity ?? 0;
                         return GestureDetector(
                           onTap: () => _add(p),
                           child: GlassCard(
-                            padding: const EdgeInsets.all(AppSpacing.sm),
+                            padding: const EdgeInsets.all(AppSpacing.md),
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [

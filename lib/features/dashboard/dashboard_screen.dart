@@ -307,24 +307,31 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           ),
           const SizedBox(height: AppSpacing.sm),
           LayoutBuilder(builder: (context, constraints) {
-            final columns = constraints.maxWidth > 1400
+            // Square cards, clean grid
+            final width = constraints.maxWidth;
+            final columns = width >= 900
                 ? 6
-                : constraints.maxWidth > 1100
+                : width >= 700
                     ? 5
-                    : constraints.maxWidth > 800
+                    : width >= 500
                         ? 4
-                        : 3;
+                        : width >= 360
+                            ? 3
+                            : 2;
+            final spacing = AppSpacing.xs;
+            final totalSpacing = spacing * (columns - 1);
+            final itemWidth = (width - totalSpacing) / columns;
+            final itemHeight = itemWidth * 1.0;
             return GridView.count(
               crossAxisCount: columns,
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: AppSpacing.sm,
-              crossAxisSpacing: AppSpacing.sm,
-              // Taller than wide so the card breathes: header, mode
-              // toggles, the minutes + money row and the start button
-              // each get their own space.
-              childAspectRatio: 0.7,
-              children: devices.map((d) {
+              mainAxisSpacing: spacing,
+              crossAxisSpacing: spacing,
+              childAspectRatio: 1.0,
+              children: devices.asMap().entries.map((entry) {
+                final index = entry.key;
+                final d = entry.value;
                 final session = sessionByDevice[d.device.id];
                 final model =
                     _toUiModel(d.device, d.type, session, ordersBySession);
@@ -335,7 +342,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 final deviceMode = _modeForDevice(d.device.id);
                 return GestureDetector(
                   onTap: session != null ? () => _selectEntry(session) : null,
-                  child: DeviceCard(
+                    child: DeviceCard(
                     compact: true,
                     device: model,
                     queuedSince: endedAt,
@@ -638,6 +645,53 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   void _closeSelectedEntry() {
     setState(() => _selectedEntry = null);
     ref.read(escCloseHandlerProvider.notifier).state = null;
+  }
+
+  /// Tapping a card opens the full-control popup: everything the inline
+  /// card offered (time, money, mode, start/pause/checkout...) plus the
+  /// wall screen open/close and the live session bill, in one sheet.
+  Future<void> _showDeviceDetail(
+    DeviceWithType d,
+    SessionBoardEntry? session,
+    DeviceUiModel model,
+    DateTime? endedAt,
+  ) async {
+    final ordersTotal =
+        session == null ? 0.0 : (_currentOrdersBySession()[session.session.id] ?? 0.0);
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => _DeviceDetailDialog(
+        device: d,
+        session: session,
+        model: model,
+        endedAt: endedAt,
+        ordersTotal: ordersTotal,
+        selectedMinutes: durationForDevice(ref, d.device.id),
+        selectedAmount: ref.watch(deviceAmountsProvider)[d.device.id],
+        selectedMode: _modeForDevice(d.device.id),
+        hourlyRate: d.effectiveHourlyRate,
+        multiHourlyRate: d.effectiveHourlyRateMulti,
+        onSetMode: (mode) => _setDeviceMode(d, mode),
+        onSetDuration: (minutes) => _setDeviceDuration(d, minutes),
+        onSetOpenTime: (open) =>
+            _setDeviceDuration(d, open ? 0 : defaultSessionMinutes),
+        onSetAmount: (amount) => _setDeviceAmount(d, amount),
+        onStart: () => _startSession(d.device.id),
+        onPause: session == null ? null : () => _pause(session),
+        onResume: session == null ? null : () => _resume(session),
+        onOrder: session == null ? null : () => _openOrderModal(session),
+        onCheckout: session == null ? null : () => _checkout(session),
+        onSwitchMode: session == null || session.session.status != 'active'
+            ? null
+            : () => _switchMode(session),
+        onExtendCustom: session == null || session.session.status != 'active'
+            ? null
+            : () => _openExtendDialog(session),
+        onWake: () => _wakeWallScreen(d.device.id),
+        onSleep: () => _sleepWallScreen(d.device.id),
+      ),
+    );
   }
 
   DeviceUiModel _toUiModel(DeviceRow device, DeviceTypeRow type,
@@ -981,6 +1035,218 @@ class _PackagePickerDialog extends StatelessWidget {
               ),
               const SizedBox(height: AppSpacing.sm),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The popup that opens on tapping a device card: live session facts
+/// (state, collected time, orders) on top, the wall screen open/close
+/// row, and the full inline card underneath for adding time / starting
+/// an open session with every property of the normal card.
+class _DeviceDetailDialog extends StatelessWidget {
+  const _DeviceDetailDialog({
+    required this.device,
+    required this.session,
+    required this.model,
+    this.endedAt,
+    required this.ordersTotal,
+    required this.selectedMinutes,
+    required this.selectedAmount,
+    required this.selectedMode,
+    required this.hourlyRate,
+    required this.multiHourlyRate,
+    required this.onSetMode,
+    required this.onSetDuration,
+    required this.onSetOpenTime,
+    required this.onSetAmount,
+    required this.onStart,
+    this.onPause,
+    this.onResume,
+    this.onOrder,
+    this.onCheckout,
+    this.onSwitchMode,
+    this.onExtendCustom,
+    required this.onWake,
+    required this.onSleep,
+  });
+
+  final DeviceWithType device;
+  final SessionBoardEntry? session;
+  final DeviceUiModel model;
+  final DateTime? endedAt;
+  final double ordersTotal;
+  final int? selectedMinutes;
+  final double? selectedAmount;
+  final String selectedMode;
+  final double hourlyRate;
+  final double multiHourlyRate;
+  final ValueChanged<String> onSetMode;
+  final ValueChanged<int> onSetDuration;
+  final ValueChanged<bool> onSetOpenTime;
+  final ValueChanged<double?> onSetAmount;
+  final VoidCallback onStart;
+  final VoidCallback? onPause;
+  final VoidCallback? onResume;
+  final VoidCallback? onOrder;
+  final VoidCallback? onCheckout;
+  final VoidCallback? onSwitchMode;
+  final VoidCallback? onExtendCustom;
+  final VoidCallback onWake;
+  final VoidCallback onSleep;
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Container(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          decoration: BoxDecoration(
+            color: AppColors.bgElevated,
+            borderRadius: AppRadius.largeR,
+            border: Border.all(color: AppColors.glassBorderPurple),
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.sports_esports_rounded,
+                        color: AppColors.accentPrimary, size: 22),
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(model.name,
+                          style: AppTypography.sectionTitle),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.close_rounded,
+                          color: AppColors.textSecondary),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                _infoRow('الحالة', model.status.labelAr()),
+                if (model.customerName != null)
+                  _infoRow('العميل', model.customerName!),
+                if (model.elapsed != null)
+                  _infoRow('الوقت المنقضي', model.elapsed!),
+                if (model.remaining != null)
+                  _infoRow('الوقت المتبقي', model.remaining!),
+                if (model.timeCost != null)
+                  _infoRow('تحصيل الوقت', model.timeCost!),
+                if (ordersTotal > 0)
+                  _infoRow('تحصيل الطلبات',
+                      'EGP ${ordersTotal.toStringAsFixed(2)}'),
+                const SizedBox(height: AppSpacing.md),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _screenButton(
+                        label: 'فتح الشاشة',
+                        icon: Icons.tv_rounded,
+                        onTap: onWake,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _screenButton(
+                        label: 'قفل/إطفاء الشاشة',
+                        icon: Icons.tv_off_rounded,
+                        onTap: onSleep,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Divider(color: AppColors.glassBorder, height: 1),
+                const SizedBox(height: AppSpacing.md),
+                DeviceCard(
+                  compact: false,
+                  device: model,
+                  queuedSince: endedAt,
+                  selectedMinutes: selectedMinutes,
+                  selectedAmount: selectedAmount,
+                  selectedMode: selectedMode,
+                  hourlyRate: hourlyRate,
+                  multiHourlyRate: multiHourlyRate,
+                  onSelectMode: onSetMode,
+                  onSelectDuration: onSetDuration,
+                  onSelectOpenTime: onSetOpenTime,
+                  onAmountChanged: onSetAmount,
+                  onStart: onStart,
+                  onPause: onPause,
+                  onResume: onResume,
+                  onOrder: onOrder,
+                  onCheckout: onCheckout,
+                  onSwitchMode: onSwitchMode,
+                  onExtend: onExtendCustom,
+                  onExtendCustom: onExtendCustom,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(label,
+                style: const TextStyle(
+                    fontSize: 12, color: AppColors.textTertiary)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _screenButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: AppRadius.smallR,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+        decoration: BoxDecoration(
+          color: AppColors.glassFill,
+          borderRadius: AppRadius.smallR,
+          border: Border.all(color: AppColors.glassBorder),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 18, color: AppColors.accentPrimary),
+            const SizedBox(height: 4),
+            Text(label,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    fontSize: 11, color: AppColors.textSecondary)),
           ],
         ),
       ),

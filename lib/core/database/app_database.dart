@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -48,6 +49,7 @@ import 'daos/account_dao.dart';
 import 'daos/refund_dao.dart';
 import 'daos/stock_count_dao.dart';
 import '../permissions/pin_hasher.dart';
+import '../sync/sync_schema.dart';
 
 part 'app_database.g.dart';
 
@@ -76,6 +78,12 @@ part 'app_database.g.dart';
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
+
+  /// A database wired to a caller-supplied connection, for tests that need
+  /// an in-memory store instead of the app's real sqlite file. The schema,
+  /// seed and the sync triggers all run exactly as on a real install.
+  @visibleForTesting
+  AppDatabase.forTesting(super.executor);
 
   @override
   int get schemaVersion => 9;
@@ -187,6 +195,13 @@ class AppDatabase extends _$AppDatabase {
             }
             await _reconcileDevices(this);
           }
+        },
+        // Runs on every open, not just on a migration: the change-tracking
+        // tables and their triggers are read from `sqlite_master` at this
+        // point, so a table added to the schema tomorrow gets its triggers
+        // without anybody remembering to add them here.
+        beforeOpen: (details) async {
+          await installSyncSchema(this);
         },
       );
 }

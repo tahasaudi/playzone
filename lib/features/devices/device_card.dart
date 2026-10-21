@@ -154,7 +154,7 @@ class DeviceCard extends StatelessWidget {
   final VoidCallback? onExtendCustom;
 
   EdgeInsets get _pad => compact
-      ? const EdgeInsets.all(AppSpacing.sm)
+      ? const EdgeInsets.all(AppSpacing.md)
       : const EdgeInsets.all(AppSpacing.lg);
 
   @override
@@ -198,9 +198,11 @@ class DeviceCard extends StatelessWidget {
   Widget _buildAvailable() {
     // Vertical breathing room between every block on the card. The "بدء
     // جلسة" button is pinned to the card's bottom via the Spacer, so it
-    // always sits at the end with fresh clearance under it.
-    final gap = compact ? AppSpacing.md : AppSpacing.lg;
-    return GlassCard(
+    // always sits at the end with fresh clearance under it. The list card
+    // gets a guaranteed minimum height so it reads as a big tap target
+    // before the session starts (the Spacers spread the slack evenly).
+    final gap = compact ? AppSpacing.lg : AppSpacing.lg;
+    final card = GlassCard(
       hoverable: true,
       padding: _pad,
       child: Column(
@@ -220,15 +222,13 @@ class DeviceCard extends StatelessWidget {
             const Text('الجهاز متاح دلوقتي',
                 style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
           SizedBox(height: gap),
-          // This machine's own mode (single or multi). The cashier picks
-          // it right on the card, and it prices everything below.
-          if (onSelectMode != null) ...[
+          // Only the popup (non-compact) card carries the 60/30/15 chips
+          // and the فردي/مالتي toggle — the list card stays clean.
+          if (!compact && onSelectMode != null) ...[
             _modeToggles(),
             SizedBox(height: gap),
           ],
-          // This machine's own time. Each card keeps its own choice, so
-          // one tap on the card is all it takes to start it.
-          if (onSelectDuration != null) ...[
+          if (!compact && onSelectDuration != null) ...[
             _durationChips(),
             SizedBox(height: gap),
           ],
@@ -278,6 +278,12 @@ class DeviceCard extends StatelessWidget {
         ],
       ),
     );
+    // Before a session starts the list card gets a taller fixed box, so
+    // it reads as one big obvious tap target (the Spacers center the start
+    // button in the extra room). The popup card sizes itself as before.
+    // Balanced height for phone: compact cards reasonable height
+    if (compact) return SizedBox(height: 130, child: card);
+    return card;
   }
 
   /// فردي / مالتي toggle — sits right on the card like the time chips,
@@ -585,7 +591,7 @@ class DeviceCard extends StatelessWidget {
               ),
             ),
           ],
-          if (device.mode != null && !compact) ...[
+          if (device.mode != null) ...[
             const SizedBox(height: 4),
             Center(
               child: GestureDetector(
@@ -603,7 +609,7 @@ class DeviceCard extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(device.mode!,
+                      Text('الوضع: ${device.mode}',
                           style: const TextStyle(
                               fontSize: 11,
                               color: AppColors.accentSecondary,
@@ -619,20 +625,16 @@ class DeviceCard extends StatelessWidget {
               ),
             ),
           ],
-          if (compact) ...[
+          if (compact)
+            ...[
+              const SizedBox(height: AppSpacing.xs),
+              _costRow('الإجمالي', _sumCost(), emphasize: true),
+            ]
+          else ...[
             const SizedBox(height: AppSpacing.xs),
             _costRow('الوقت', device.timeCost ?? '—'),
-            _costRow('الإجمالي', _sumCost(), emphasize: true),
-          ] else ...[
-            const SizedBox(height: AppSpacing.sm),
-            _costRow('الوقت', device.timeCost ?? '—'),
             _costRow('الطلبات', device.ordersCost ?? '—'),
-            const Divider(height: AppSpacing.md, color: AppColors.glassBorder),
-            _costRow(
-              'الإجمالي',
-              _sumCost(),
-              emphasize: true,
-            ),
+            _costRow('الإجمالي', _sumCost(), emphasize: true),
           ],
           SizedBox(height: compact ? AppSpacing.xs : AppSpacing.sm),
           Row(

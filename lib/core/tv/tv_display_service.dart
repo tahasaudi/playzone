@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import '../sync/sync_config.dart';
 import 'hard_lock.dart';
 import 'tv_power_service.dart';
 import 'tv_screen_report.dart';
@@ -203,7 +204,7 @@ class TvDisplayService {
 
   /// Starts the local image server. Idempotent.
   Future<bool> startServer() async {
-    if (kHardLockWallNetwork) return false;
+    if (!kWallPushAllowed) return false;
     if (_server != null) return true;
     try {
       _server =
@@ -522,7 +523,7 @@ class TvDisplayService {
   /// TV refuses a real network power-off. One push, no loop, so it is
   /// immediate.
   Future<bool> pushBlack(String tvIp) async {
-    if (kHardLockWallNetwork) return false;
+    if (!kWallPushAllowed) return false;
     // Claimed before anything else happens, including the blank. From this
     // moment the wall is paid for and dark, and any release already in flight
     // is no longer allowed to take it back.
@@ -549,7 +550,7 @@ class TvDisplayService {
 
   /// A single SOAP push, for callers that manage their own timing.
   Future<bool> pushOnceNow() async {
-    if (kHardLockWallNetwork) return false;
+    if (!kWallPushAllowed) return false;
     return _pushOnce(_currentTvIp);
   }
 
@@ -707,7 +708,7 @@ class TvDisplayService {
   /// background and a session start feels instant.
   void startPushing(
       {required String tvIp, Duration every = const Duration(seconds: 2)}) {
-    if (kHardLockWallNetwork) return;
+    if (!kWallPushAllowed) return;
     stopPushing();
     if (tvIp.isEmpty) return;
     _currentTvIp = tvIp;
@@ -727,7 +728,10 @@ class TvDisplayService {
   /// SSDP alive announcement. Without it an LG renderer answers Play with
   /// HTTP 500 because it never saw this PC on the network.
   Future<void> announce() async {
-    if (kHardLockWallNetwork) return;
+    // The phone has no picture server to advertise, and the locked machine
+    // must not be seen on the café's network at all. Discovery (`warmUp`)
+    // deliberately stays open to both — finding a screen is not driving it.
+    if (!kWallPushAllowed) return;
     final self = await resolveLocalAddress();
     if (self == null) return;
     try {
