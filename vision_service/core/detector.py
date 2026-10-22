@@ -8,10 +8,12 @@ from ultralytics import YOLO
 
 
 class FridgeDetector:
-    def __init__(self, weights, conf_thres=0.55, iou_thres=0.45, keep_labels=None):
+    def __init__(self, weights, conf_thres=0.55, iou_thres=0.45, keep_labels=None,
+                 imgsz=480):
         self.model = YOLO(weights)
         self.conf_thres = float(conf_thres)
         self.iou_thres = float(iou_thres)
+        self.imgsz = max(160, int(imgsz))
         self.keep_labels = {
             str(item).strip().lower()
             for item in (keep_labels or [])
@@ -23,6 +25,7 @@ class FridgeDetector:
             frame,
             conf=self.conf_thres,
             iou=self.iou_thres,
+            imgsz=self.imgsz,
             verbose=False,
         )
         detections = []

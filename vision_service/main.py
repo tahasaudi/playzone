@@ -101,6 +101,10 @@ def is_video_file(source) -> bool:
 
 def open_camera(source):
     if isinstance(source, int):
+        # DirectShow opens a USB camera in ~100ms; the default backend can sit
+        # for many seconds before the first frame on Windows.
+        if os.name == "nt":
+            return cv2.VideoCapture(source, cv2.CAP_DSHOW)
         return cv2.VideoCapture(source)
     text = str(source)
     backend = cv2.CAP_FFMPEG if text.lower().startswith(("rtsp://", "http://", "https://")) else cv2.CAP_ANY
@@ -188,6 +192,7 @@ def run(cfg, args):
         conf_thres=cfg["model"].get("conf_threshold", 0.55),
         iou_thres=cfg["model"].get("iou_threshold", 0.45),
         keep_labels=cfg["model"].get("labels") or [],
+        imgsz=cfg["model"].get("imgsz", 480),
     )
     pos = PosClient(cfg["pos"], cfg["_base_dir"])
     alerts = AlertManager(cfg, cfg["_base_dir"])
@@ -237,6 +242,10 @@ def run(cfg, args):
                     break
                 continue
             LOG.info("الكاميرا اتوصلت: %s", source)
+            try:
+                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except cv2.error:
+                pass
             previous_gray = None
 
         ok, frame = capture.read()

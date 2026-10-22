@@ -25,6 +25,9 @@ DEFAULTS = {
         "weights": "yolo11n.pt",
         "conf_threshold": 0.55,
         "iou_threshold": 0.45,
+        # 480 keeps a fridge product readable while running ~2× faster than 640
+        # on a till with no GPU.
+        "imgsz": 480,
         "labels": [],
     },
     # ربط صنف الموديل (bottle / cup / ...) بأسماء المنتجات في PlayZone.
