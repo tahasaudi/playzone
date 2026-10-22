@@ -236,7 +236,8 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
       _say('$name: الرقم ما اتقبلش');
       return false;
     }
-    _say('$name: التلفزيون ما ردش (${result.error ?? 'مش متأكد'})');
+    _say('$name: التلفزيون ما ردش — دوس «صوت أعلى» تاني، ولما تطلع رسالة على '
+        'شاشة التلفزيون دوس OK على الريموت');
     return false;
   }
 
@@ -1681,15 +1682,20 @@ class _ScreenPanel extends StatelessWidget {
                 style: const TextStyle(
                     fontSize: 12, color: AppColors.textSecondary),
               ),
-              if (volume == null) ...[
-                const SizedBox(width: 8),
-                const Text(
-                  '— دوس «صوت أعلى» مرة واحدة عشان تسمح للتلفزيون',
-                  style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
-                ),
-              ],
             ],
           ),
+
+          // The hint gets a line of its own, so the buttons above never have
+          // to squeeze a long sentence into themselves.
+          if (volume == null)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(
+                'دوس «صوت أعلى» مرة واحدة عشان تسمح للتلفزيون',
+                style: const TextStyle(
+                    fontSize: 11, color: AppColors.textSecondary),
+              ),
+            ),
 
           if (expanded && r != null) ...[
             const SizedBox(height: AppSpacing.sm),
