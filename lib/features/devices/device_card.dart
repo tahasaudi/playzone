@@ -240,17 +240,46 @@ class DeviceCard extends StatelessWidget {
         Icon(device.type.icon,
             size: compact ? 14 : 18, color: AppColors.accentSecondary),
         SizedBox(width: compact ? 4 : 6),
-        Flexible(
-          child: Text('${device.type.labelAr} — ${device.name}',
-              overflow: TextOverflow.ellipsis,
-              style: compact
-                  ? const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary)
-                  : AppTypography.cardTitle),
+        Expanded(
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Text('${device.type.labelAr} — ${device.name}',
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                  textAlign: TextAlign.center,
+                  style: compact
+                      ? const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.textPrimary)
+                      : AppTypography.cardTitle),
+              Positioned.fill(
+                child: Align(
+                  alignment: Alignment.center,
+                  child: Container(
+                    padding: EdgeInsets.symmetric(
+                        horizontal: compact ? 6 : 8, vertical: compact ? 2 : 3),
+                    decoration: BoxDecoration(
+                      color: AppColors.accentPrimary.withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: AppColors.glassBorderPurple),
+                    ),
+                    child: Text(
+                      'مكتب',
+                      style: TextStyle(
+                        fontSize: compact ? 9 : 11,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
-        const Spacer(),
+        const SizedBox(width: AppSpacing.sm),
         StatusBadge(status: device.status, compact: true),
       ],
     );

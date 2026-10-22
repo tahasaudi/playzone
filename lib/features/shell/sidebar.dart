@@ -164,32 +164,74 @@ class AppSidebar extends ConsumerWidget {
 class _Logo extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return Row(
+    return Column(
       children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            gradient: AppColors.primaryButtonGradient,
-            borderRadius: AppRadius.mediumR,
+        const Text(
+          'مكتب',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.textPrimary,
+            fontWeight: FontWeight.w700,
+            fontSize: 14,
+            letterSpacing: 0.5,
           ),
-          child: const Icon(Icons.sports_esports_rounded,
-              color: Colors.white, size: 22),
         ),
-        const SizedBox(width: AppSpacing.sm),
-        const Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('PLAYZONE',
-                style: TextStyle(
-                  color: AppColors.textPrimary,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 16,
-                  letterSpacing: 1,
-                )),
-            Text('Gaming Café',
-                style: TextStyle(color: AppColors.textTertiary, fontSize: 11)),
-          ],
+        const SizedBox(height: AppSpacing.sm),
+          Stack(
+            alignment: Alignment.topCenter,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 18),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        gradient: AppColors.primaryButtonGradient,
+                        borderRadius: AppRadius.mediumR,
+                      ),
+                      child: const Icon(Icons.sports_esports_rounded,
+                          color: Colors.white, size: 22),
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('PLAYZONE',
+                            style: TextStyle(
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                              letterSpacing: 1,
+                            )),
+                        Text('Gaming Café',
+                            style: TextStyle(color: AppColors.textTertiary, fontSize: 11)),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              Positioned(
+                top: 0,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: AppColors.accentPrimary.withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: AppColors.glassBorderPurple),
+                  ),
+                  child: const Text(
+                    'مكتب',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+              ),
+            ],
         ),
       ],
     );

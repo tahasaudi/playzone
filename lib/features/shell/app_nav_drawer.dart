@@ -41,32 +41,59 @@ class AppNavDrawer extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Brand
-            Row(
+            Stack(
+              alignment: Alignment.topCenter,
               children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    gradient: AppColors.primaryButtonGradient,
-                    borderRadius: AppRadius.mediumR,
+                Padding(
+                  padding: const EdgeInsets.only(top: 18),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          gradient: AppColors.primaryButtonGradient,
+                          borderRadius: AppRadius.mediumR,
+                        ),
+                        child: const Icon(Icons.sports_esports_rounded,
+                            color: Colors.white, size: 20),
+                      ),
+                      const SizedBox(width: AppSpacing.sm),
+                      const Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('PLAYZONE',
+                              style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.textPrimary,
+                                  letterSpacing: 1.2)),
+                          Text('Gaming Café',
+                              style: TextStyle(
+                                  fontSize: 11, color: AppColors.textTertiary)),
+                        ],
+                      ),
+                    ],
                   ),
-                  child: const Icon(Icons.sports_esports_rounded,
-                      color: Colors.white, size: 20),
                 ),
-                const SizedBox(width: AppSpacing.sm),
-                const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('PLAYZONE',
-                        style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.textPrimary,
-                            letterSpacing: 1.2)),
-                    Text('Gaming Café',
-                        style: TextStyle(
-                            fontSize: 11, color: AppColors.textTertiary)),
-                  ],
+                Positioned(
+                  top: 0,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: AppColors.accentPrimary.withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: AppColors.glassBorderPurple),
+                    ),
+                    child: const Text(
+                      'مكتب',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
                 ),
               ],
             ),
