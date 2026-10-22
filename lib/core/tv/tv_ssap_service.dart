@@ -128,6 +128,24 @@ class TvSsapService {
   // Sound
   // ---------------------------------------------------------------------
 
+  /// Opens the screen's control socket and registers on it, ready to be told
+  /// things.
+  ///
+  /// The registration is not a formality: a television only answers commands
+  /// from a client it has registered, so a socket that skipped it would sit
+  /// there while the television ignored everything sent down it.
+  Future<_SsapSession?> _openReady(String ip, String clientKey) async {
+    final session = await _SsapSession.open(ip, clientKey: clientKey);
+    final outcome = await session.register(wait: timeout);
+    if (outcome.paired) return session;
+    // A key the television no longer knows is worse than no key at all: it
+    // would ask for permission again and again. So it is put away, and the
+    // next press of the button starts the asking over.
+    await session.close();
+    await forget(ip);
+    return null;
+  }
+
   /// The screen's own volume, as the screen reports it.
   ///
   /// Null when the screen is not reachable, has not been let in, or is in
@@ -138,7 +156,8 @@ class TvSsapService {
     if (key == null) return null;
     _SsapSession? session;
     try {
-      session = await _SsapSession.open(address, clientKey: key);
+      session = await _openReady(address, key);
+      if (session == null) return null;
       final answer = await session.request('ssap://audio/getVolume');
       return _volumeOf(answer);
     } catch (_) {
@@ -161,7 +180,8 @@ class TvSsapService {
     if (step == 0) return null;
     _SsapSession? session;
     try {
-      session = await _SsapSession.open(address, clientKey: key);
+      session = await _openReady(address, key);
+      if (session == null) return null;
       final current = _volumeOf(
         await session.request('ssap://audio/getVolume'),
       );
@@ -317,6 +337,7 @@ class _SsapSession {
   Future<TvSsapPairResult> register({
     String? pin,
     Future<String?> Function()? askForPin,
+    Duration? wait,
   }) async {
     final completer = Completer<TvSsapPairResult>();
     _registration = completer;
@@ -330,7 +351,7 @@ class _SsapSession {
       'payload': _registrationPayload(clientKey),
     });
     return completer.future.timeout(
-      TvSsapService.consentTimeout,
+      wait ?? TvSsapService.consentTimeout,
       onTimeout: () => const TvSsapPairResult.failed('no answer'),
     );
   }
@@ -357,6 +378,18 @@ class _SsapSession {
         }
         return;
       }
+    }
+
+    // The television saying no is an answer too, and it saves waiting out
+    // the whole prompt for a request that was turned down at the start.
+    if (message['type'] == 'error' && id == _registrationId) {
+      final registration = _registration;
+      if (registration != null && !registration.isCompleted) {
+        registration.complete(
+          TvSsapPairResult.failed('${message['error'] ?? 'turned down'}'),
+        );
+      }
+      return;
     }
 
     // The television asking for a PIN is the one case that needs answering
