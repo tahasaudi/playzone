@@ -673,6 +673,126 @@ class TvDisplayService {
     return ok;
   }
 
+  // ── Sound ──────────────────────────────────────────────────────────────────
+
+  /// The endpoint that moves the sound of a screen.
+  ///
+  /// It sits in the same device description as the picture endpoint, so it is
+  /// normally known already and the volume of a wall costs no extra searching.
+  /// A screen that was described before this part existed is read once more.
+  Future<String?> _renderingUrl(String tvIp) async {
+    final key = tvIp.trim();
+    final cached = _renderingCache[key];
+    if (cached != null &&
+        DateTime.now().difference(cached.$2) < const Duration(minutes: 30)) {
+      return cached.$1;
+    }
+    // Not known yet. The picture endpoint comes first, because that is what
+    // knows the port; the description is then read from that same port for the
+    // sound endpoint.
+    final av = await _findControlUrl(key);
+    if (av == null) return null;
+    final hit = _renderingCache[key];
+    if (hit != null) return hit.$1;
+    final origin = Uri.tryParse(av)?.origin;
+    if (origin == null) return null;
+    for (final path in const [
+      // LG's televisions serve their description at the root of the port, not
+      // at a named file, so the root is tried first.
+      '/',
+      '/desc.xml',
+      '/rootDesc.xml',
+      '/xml/device_description.xml',
+    ]) {
+      final found = await _servicesFrom('$origin$path');
+      final render = found?.render;
+      if (render != null) {
+        _renderingCache[key] = (render, DateTime.now());
+        return render;
+      }
+    }
+    return null;
+  }
+
+  /// The sound level of a screen, 0 to 100. Null when the screen will not say.
+  Future<int?> getVolume(String tvIp) async {
+    final url = await _renderingUrl(tvIp);
+    if (url == null) return null;
+    final (status, payload, _) = await _soapRaw(
+      url,
+      'GetVolume',
+      '<Channel>Master</Channel>',
+      service: 'urn:schemas-upnp-org:service:RenderingControl:1',
+    );
+    if (status == null || status >= 400) return null;
+    final value = RegExp(r'<CurrentVolume>\s*(-?\d+)\s*</CurrentVolume>')
+        .firstMatch(payload)
+        ?.group(1);
+    final level = int.tryParse(value ?? '');
+    if (level == null) return null;
+    return level.clamp(0, 100);
+  }
+
+  /// Sets the sound level of a screen, 0 to 100.
+  Future<bool> setVolume(String tvIp, int level) async {
+    final url = await _renderingUrl(tvIp);
+    if (url == null) {
+      _lastError = 'الشاشة ${tvIp.trim()} مش راد على التحكم في الصوت';
+      return false;
+    }
+    final want = level.clamp(0, 100);
+    return _soap(
+      url,
+      'SetVolume',
+      '<Channel>Master</Channel><DesiredVolume>$want</DesiredVolume>',
+      service: 'urn:schemas-upnp-org:service:RenderingControl:1',
+    );
+  }
+
+  /// Turns the sound up or down and says what the level is now.
+  ///
+  /// The new level is worked out from what the screen itself reports, so two
+  /// people pressing the button at once do not send two different numbers.
+  Future<int?> changeVolume(String tvIp, int step) async {
+    final current = await getVolume(tvIp);
+    if (current == null) return null;
+    final want = (current + step).clamp(0, 100);
+    final ok = await setVolume(tvIp, want);
+    return ok ? want : null;
+  }
+
+  /// Whether a screen is silent.
+  Future<bool?> isMuted(String tvIp) async {
+    final url = await _renderingUrl(tvIp);
+    if (url == null) return null;
+    final (status, payload, _) = await _soapRaw(
+      url,
+      'GetMute',
+      '<Channel>Master</Channel>',
+      service: 'urn:schemas-upnp-org:service:RenderingControl:1',
+    );
+    if (status == null || status >= 400) return null;
+    final value = RegExp(r'<CurrentMute>\s*(\d)\s*</CurrentMute>')
+        .firstMatch(payload)
+        ?.group(1);
+    return value == null ? null : value == '1';
+  }
+
+  /// Silences a screen, or gives it its sound back.
+  Future<bool> setMute(String tvIp, bool muted) async {
+    final url = await _renderingUrl(tvIp);
+    if (url == null) {
+      _lastError = 'الشاشة ${tvIp.trim()} مش راد على التحكم في الصوت';
+      return false;
+    }
+    return _soap(
+      url,
+      'SetMute',
+      '<Channel>Master</Channel><DesiredMute>${muted ? 1 : 0}</DesiredMute>',
+      service: 'urn:schemas-upnp-org:service:RenderingControl:1',
+    );
+  }
+
   /// Paints the screen at [tvIp] black — our stand-in for "off", since this
   /// TV refuses a real network power-off. One push, no loop, so it is
   /// immediate.
@@ -1711,10 +1831,10 @@ class TvDisplayService {
   /// Returns the first AVTransport endpoint among [locations], caching it.
   Future<String?> _firstControlUrl(String tvIp, List<String> locations) async {
     for (final location in locations) {
-      final control = await _controlUrlFrom(location);
-      if (control != null) {
-        _rememberEndpoint(tvIp, control);
-        return control;
+      final found = await _servicesFrom(location);
+      if (found != null) {
+        _rememberEndpoint(tvIp, found.av, render: found.render);
+        return found.av;
       }
     }
     return null;
@@ -1725,8 +1845,11 @@ class TvDisplayService {
   /// The timestamp is what lets the settings page say "we've known this
   /// address for twenty minutes" — the difference between a screen that has
   /// been reachable all along and one that needs looking at.
-  void _rememberEndpoint(String tvIp, String control) {
+  void _rememberEndpoint(String tvIp, String control, {String? render}) {
     _controlCache[tvIp] = (control, DateTime.now());
+    if (render != null && render.isNotEmpty) {
+      _renderingCache[tvIp] = (render, DateTime.now());
+    }
     // A freshly found endpoint is proof the screen is answering again, so drop
     // any "needs another look" verdict from the attempt that failed before it.
     _suspect.remove(tvIp);
@@ -1742,11 +1865,11 @@ class TvDisplayService {
   /// Tries a list of known device-description URLs in parallel and caches
   /// the first AVTransport endpoint among them.
   Future<bool> _hasControlUrl(String tvIp, List<String> candidates) async {
-    final controls =
-        await Future.wait(candidates.map(_controlUrlFrom), eagerError: false);
-    for (final control in controls) {
-      if (control != null) {
-        _rememberEndpoint(tvIp, control);
+    final found =
+        await Future.wait(candidates.map(_servicesFrom), eagerError: false);
+    for (final services in found) {
+      if (services != null) {
+        _rememberEndpoint(tvIp, services.av, render: services.render);
         _lastLocations = 'known ports';
         return true;
       }
@@ -1755,6 +1878,10 @@ class TvDisplayService {
   }
 
   final Map<String, (String, DateTime)> _controlCache = {};
+
+  /// The sound endpoint of each screen, read from the same device description
+  /// as the picture one — so the volume of a wall costs no extra searching.
+  final Map<String, (String, DateTime)> _renderingCache = {};
   final Map<String, DateTime> _lastDiscoveryAt = {};
 
   int _ssdpDatagrams = 0;
@@ -1927,35 +2054,53 @@ class TvDisplayService {
     return locations.toList();
   }
 
-  /// Fetches one device description and extracts its AVTransport
-  /// controlURL (absolute, resolved against the description's base).
+  /// Fetches one device description and extracts the two endpoints this
+  /// program needs: the one that moves the picture (AVTransport) and the one
+  /// that moves the sound (RenderingControl).
+  ///
+  /// Both come out of the same document, so the description is read once and
+  /// both are taken from it.
   ///
   /// Uses the shared [HttpClient] for the same reason the SOAP path does, and
   /// bounds the body read as well as the connect: a panel that starts
   /// answering and then stalls mid-body used to hang this call with no
   /// timeout on the read at all, which is a screen that looks unreachable
   /// while it is merely slow.
-  Future<String?> _controlUrlFrom(String location) async {
+  Future<({String av, String? render})?> _servicesFrom(String location) async {
     try {
       final req = await _http.getUrl(Uri.parse(location));
       final res = await req.close();
       if (res.statusCode != 200) return null;
       final body =
           await res.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
-      // Any AVTransport block followed by its own controlURL.
-      final match = RegExp(
-              r'<serviceType>\s*urn:schemas-upnp-org:service:AVTransport:1\s*</serviceType>(?:(?!</service>).)*?<controlURL>\s*([^<]+?)\s*</controlURL>',
-              dotAll: true,
-              caseSensitive: false)
-          .firstMatch(body);
-      if (match == null) return null;
+      final av = _serviceControlUrl(body, 'AVTransport');
+      if (av == null) return null;
+      final render = _serviceControlUrl(body, 'RenderingControl');
       final base = Uri.parse(location);
-      final resolved = base.resolve(match.group(1)!.trim());
-      if (resolved.path.isEmpty || resolved.path == '/') return null;
-      return resolved.toString();
+      return (av: base.resolve(av).toString(), render: render == null ? null : base.resolve(render).toString());
     } catch (_) {
       return null;
     }
+  }
+
+  /// The controlURL of one service inside a device description.
+  ///
+  /// A service block names its type and then its own address, so the type is
+  /// looked for first and the address is taken from the same block after it.
+  static String? _serviceControlUrl(String body, String service) {
+    final match = RegExp(
+            r'<serviceType>\s*urn:schemas-upnp-org:service:$service:1\s*</serviceType>(?:(?!</service>).)*?<controlURL>\s*([^<]+?)\s*</controlURL>',
+            dotAll: true,
+            caseSensitive: false)
+        .firstMatch(body);
+    if (match == null) return null;
+    final url = match.group(1)!.trim();
+    if (url.isEmpty) return null;
+    final resolved = Uri.tryParse(url);
+    if (resolved == null || resolved.path.isEmpty || resolved.path == '/') {
+      return null;
+    }
+    return url;
   }
 
   /// The UPnP fault number inside a SOAP error, if the panel sent one.
@@ -1997,8 +2142,8 @@ class TvDisplayService {
   /// The two need opposite handling: a silent panel is usually asleep, while
   /// a refused connection means the address itself is suspect.
   Future<(int?, String, bool)> _soapRaw(
-      String controlUrl, String action, String body) async {
-    const service = 'urn:schemas-upnp-org:service:AVTransport:1';
+      String controlUrl, String action, String body,
+      {String service = 'urn:schemas-upnp-org:service:AVTransport:1'}) async {
     final xml = _soapEnvelope.replaceAll('%BODY%',
         '<u:$action xmlns:u="$service"><InstanceID>0</InstanceID>$body</u:$action>');
     try {
@@ -2023,8 +2168,10 @@ class TvDisplayService {
     }
   }
 
-  Future<bool> _soap(String controlUrl, String action, String body) async {
-    final (status, payload, reached) = await _soapRaw(controlUrl, action, body);
+  Future<bool> _soap(String controlUrl, String action, String body,
+      {String service = 'urn:schemas-upnp-org:service:AVTransport:1'}) async {
+    final (status, payload, reached) =
+        await _soapRaw(controlUrl, action, body, service: service);
     final host = Uri.tryParse(controlUrl)?.host ?? '';
     if (reached && host.isNotEmpty) markReached(host);
     if (status == null) {

@@ -6,12 +6,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/database/daos/device_dao.dart';
+import '../../core/database/database_provider.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/tv/tv_display_service.dart';
 import '../../core/tv/tv_power_service.dart';
 import '../../core/tv/tv_screen_report.dart';
+import '../../core/tv/tv_ssap_service.dart';
 import '../../core/tv/video_probe.dart';
 import '../../data/repositories/device_repository.dart';
 import 'tv_mode_screen.dart';
@@ -44,6 +46,232 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
   /// True while a "اكتشف الشاشات بالماك" sweep is running, so the button can
   /// say it is working instead of looking dead.
   bool _discovering = false;
+
+  /// The sound level of each screen, as the screen itself reports it.
+  final Map<String, int> _volumeOf = {};
+  final Set<String> _volumePending = <String>{};
+
+  /// The screens whose sound is being changed right now, so a second press
+  /// does not queue up behind the first.
+  final Set<String> _volumeBusy = <String>{};
+
+  /// Asks a screen how loud it is, once, in the background.
+  ///
+  /// The level belongs to the screen, not to this program, so it is read from
+  /// the screen and not remembered from the last thing we set — otherwise the
+  /// number on the button would be a guess.
+  void _learnVolume(String ip) {
+    final key = ip.trim();
+    if (key.isEmpty) return;
+    if (_volumePending.contains(key)) return;
+    if (_volumeOf.containsKey(key)) return;
+    _volumePending.add(key);
+    _learnVolumeNow(key);
+  }
+
+  /// Reads the level the way the screen is willing to give it.
+  Future<void> _learnVolumeNow(String key) async {
+    // Two ways to read a screen's sound, and the order matters: DLNA answers
+    // straight away on the brands that allow it, and LG's own socket is only
+    // worth asking once the screen has let this program in.
+    try {
+      final int? overDlna = await _readVolumeOverDlna(key);
+      final int? overSsap =
+          overDlna != null ? null : await _readVolumeOverSsap(key);
+      final int? level = overDlna ?? overSsap;
+      _volumePending.remove(key);
+      if (!mounted || level == null) return;
+      setState(() => _volumeOf[key] = level);
+    } catch (_) {
+      _volumePending.remove(key);
+    }
+  }
+
+  /// Reads the level over DLNA, which is what most screens answer.
+  Future<int?> _readVolumeOverDlna(String ip) async {
+    try {
+      return await TvDisplayService.instance.getVolume(ip);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Reads the level over LG's own control socket.
+  Future<int?> _readVolumeOverSsap(String ip) async {
+    final ssap = await _ssap();
+    if (!ssap.isPaired(ip)) return null;
+    return ssap.getVolume(ip);
+  }
+
+  /// Moves the level over DLNA, which is what most screens answer.
+  Future<int?> _changeVolumeOverDlna(String ip, int step) async {
+    try {
+      return await TvDisplayService.instance.changeVolume(ip, step);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The SSAP client, with the saved keys read in.
+  ///
+  /// Reading them on the way in means a screen that was let in yesterday is
+  /// still let in today, and the staff is not asked to approve anything they
+  /// already approved.
+  Future<TvSsapService> _ssap() async {
+    final ssap = TvSsapService.instance;
+    await ssap.load(ref.read(appDatabaseProvider));
+    return ssap;
+  }
+
+  /// Moves the sound of a screen up or down, five steps at a time.
+  ///
+  /// A screen that has never been let in is asked first — LG's televisions
+  /// refuse to be told what to do over DLNA, so the only way to their own
+  /// volume is their own control socket, and that socket asks for permission
+  /// the first time.
+  Future<void> _volume(String ip, String name, int step) async {
+    final key = ip.trim();
+    if (key.isEmpty) return;
+    if (_volumeBusy.contains(key)) return;
+    setState(() => _volumeBusy.add(key));
+    try {
+      final ssap = await _ssap();
+      if (!mounted) return;
+
+      // Most screens answer over DLNA and need nothing else. LG's televisions
+      // refuse that outright, so they are asked for permission once and then
+      // spoken to over their own socket.
+      int? level = await _changeVolumeOverDlna(key, step);
+      if (level == null) {
+        if (!ssap.isPaired(key)) {
+          final allowed = await _askScreenForPermission(ip, name);
+          if (!allowed || !mounted) return;
+        }
+        level = await ssap.changeVolume(key, step);
+      }
+
+      final int? current = level;
+      if (!mounted) return;
+      if (current == null) {
+        _say('$name مش راد على الصوت — شوف اللوج');
+        return;
+      }
+      setState(() => _volumeOf[key] = current);
+      _say('$name: الصوت $current');
+    } finally {
+      if (mounted) setState(() => _volumeBusy.remove(key));
+    }
+  }
+
+  /// Asks a screen to let this program touch its sound.
+  ///
+  /// The television puts the question on its own screen, so the staff has to
+  /// press OK on the remote. The dialog says exactly that, because a button
+  /// that looks dead for half a minute is worse than one that says why.
+  Future<bool> _askScreenForPermission(String ip, String name) async {
+    final ssap = await _ssap();
+    if (!mounted) return false;
+    _say('$name: استنى موافقة التلفزيون…');
+
+    // The dialog carries the instruction while the television waits.
+    var dialogClosed = false;
+    final dialogContext = Completer<BuildContext>();
+    final pending = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        if (!dialogContext.isCompleted) dialogContext.complete(ctx);
+        return AlertDialog(
+          backgroundColor: AppColors.glassFill,
+          title: Text('$name: موافقة التلفزيون'),
+          content: const Text(
+            'التلفزيون طلب الإذن. دوس «OK» على الريموت عشان يسمع من البرنامج.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('إلغاء'),
+            ),
+          ],
+        );
+      },
+    );
+
+    Future<void> closeDialog() async {
+      if (dialogClosed) return;
+      dialogClosed = true;
+      if (!dialogContext.isCompleted) await dialogContext.future;
+      final dctx = await dialogContext.future;
+      if (dctx.mounted) Navigator.of(dctx).pop();
+      await pending;
+    }
+
+    // Some televisions show a number instead of a yes/no, and that number
+    // belongs to this one request — so it is typed while the same connection
+    // is still open.
+    final result = await ssap.pair(
+      ip,
+      askForPin: () async {
+        await closeDialog();
+        return _askScreenForPin(name);
+      },
+    );
+
+    await closeDialog();
+
+    if (!mounted) return false;
+    if (result.paired) {
+      _say('$name: التلفزيون سمح');
+      return true;
+    }
+    if (result.needsPin) {
+      final pin = await _askScreenForPin(name);
+      if (pin == null || !mounted) return false;
+      final second = await ssap.pair(ip, pin: pin);
+      if (!mounted) return false;
+      if (second.paired) {
+        _say('$name: التلفزيون سمح');
+        return true;
+      }
+      _say('$name: الرقم ما اتقبلش');
+      return false;
+    }
+    _say('$name: التلفزيون ما ردش (${result.error ?? 'مش متأكد'})');
+    return false;
+  }
+
+  /// Asks the staff for the PIN the television is showing on its screen.
+  Future<String?> _askScreenForPin(String name) async {
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.glassFill,
+        title: Text('$name: اكتب الرقم الظاهر على التلفزيون'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          textInputAction: TextInputAction.done,
+          decoration: const InputDecoration(hintText: 'الرقم'),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: const Text('تمام'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final pin = result?.trim() ?? '';
+    return pin.isEmpty ? null : pin;
+  }
 
   /// Edits one screen's name in a small dialog.
   ///
@@ -628,6 +856,7 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
         ? null
         : TvPowerService.primaryMacFor(ip) ?? _macCache[ip];
     if (ip.isNotEmpty) _learnMac(ip);
+    if (ip.isNotEmpty) _learnVolume(ip);
     return _ScreenPanel(
       index: key,
       report: _findReport(reports, ip),
@@ -635,6 +864,8 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
       deviceId: slot.deviceId,
       devices: devices,
       mac: mac,
+      volume: _volumeOf[ip],
+      volumeBusy: _volumeBusy.contains(ip),
       expanded: _expanded.contains(ip),
       onToggleExpanded: () => setState(() {
         if (!_expanded.remove(ip)) _expanded.add(ip);
@@ -668,6 +899,8 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
       onSearch: () => _search(ip, identity.name),
       onPlayMovie: () => _playMovie(ip, identity.name),
       onStopMovie: () => _stopMovie(ip, identity.name),
+      onVolumeUp: () => _volume(ip, identity.name, 5),
+      onVolumeDown: () => _volume(ip, identity.name, -5),
       onOpen: () {
         TvPowerService.instance.turnOn(ip);
         _say('بتفتح ${identity.name}');
@@ -993,6 +1226,8 @@ class _ScreenPanel extends StatelessWidget {
     required this.deviceId,
     required this.devices,
     required this.mac,
+    required this.volume,
+    required this.volumeBusy,
     required this.expanded,
     required this.onToggleExpanded,
     required this.onEditName,
@@ -1003,6 +1238,8 @@ class _ScreenPanel extends StatelessWidget {
     required this.onSearch,
     required this.onPlayMovie,
     required this.onStopMovie,
+    required this.onVolumeUp,
+    required this.onVolumeDown,
     required this.onOpen,
     required this.onClose,
   });
@@ -1016,6 +1253,12 @@ class _ScreenPanel extends StatelessWidget {
   /// The screen's Wi-Fi MAC, shown so a person can match this entry to a
   /// television by reading it off the set's own network page.
   final String? mac;
+
+  /// How loud the screen is right now, as the screen reports it.
+  final int? volume;
+
+  /// True while the screen's sound is being changed.
+  final bool volumeBusy;
   final bool expanded;
   final VoidCallback onToggleExpanded;
   final VoidCallback onEditName;
@@ -1026,6 +1269,8 @@ class _ScreenPanel extends StatelessWidget {
   final VoidCallback onSearch;
   final VoidCallback onPlayMovie;
   final VoidCallback onStopMovie;
+  final VoidCallback onVolumeUp;
+  final VoidCallback onVolumeDown;
   final VoidCallback onOpen;
   final VoidCallback onClose;
 
@@ -1408,6 +1653,41 @@ class _ScreenPanel extends StatelessWidget {
                         fontSize: 12, color: AppColors.textSecondary),
                   ),
                 ),
+            ],
+          ),
+
+          // The sound, on its own line so the row of actions above never has
+          // to squeeze two more buttons into itself. Five steps at a time,
+          // which is a step you can hear.
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              _ActionChip(
+                label: volumeBusy ? 'بستنى…' : 'صوت أعلى',
+                icon: Icons.volume_up_rounded,
+                onTap: volumeBusy ? () {} : onVolumeUp,
+                busy: volumeBusy,
+              ),
+              const SizedBox(width: 6),
+              _ActionChip(
+                label: volumeBusy ? 'بستنى…' : 'صوت أقل',
+                icon: Icons.volume_down_rounded,
+                onTap: volumeBusy ? () {} : onVolumeDown,
+                busy: volumeBusy,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                volume == null ? 'الصوت: مش متأكد' : 'الصوت: $volume',
+                style: const TextStyle(
+                    fontSize: 12, color: AppColors.textSecondary),
+              ),
+              if (volume == null) ...[
+                const SizedBox(width: 8),
+                const Text(
+                  '— دوس «صوت أعلى» مرة واحدة عشان تسمح للتلفزيون',
+                  style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                ),
+              ],
             ],
           ),
 
