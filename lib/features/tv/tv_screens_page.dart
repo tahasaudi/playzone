@@ -71,17 +71,32 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
 
   /// Reads the level the way the screen is willing to give it.
   Future<void> _learnVolumeNow(String key) async {
-    // Two ways to read a screen's sound, and the order matters: DLNA answers
-    // straight away on the brands that allow it, and LG's own socket is only
-    // worth asking once the screen has let this program in.
+    // Two ways to read a screen's sound, and the order matters.
+    //
+    // A screen that has already let this program in is asked over its own
+    // socket FIRST. That socket answers in about a second and it does not
+    // depend on any searching, which the other way does: the screen's
+    // description has to be found before the sound endpoint can be read, and
+    // finding it can mean a scan across thousands of ports.
+    //
+    // For a screen that has NOT let us in there is nothing to ask over that
+    // socket yet, so the other way is tried first — and it is given a short
+    // leash, because a screen that will not answer must not keep the button
+    // waiting.
     try {
-      final int? overDlna = await _readVolumeOverDlna(key);
-      final int? overSsap =
-          overDlna != null ? null : await _readVolumeOverSsap(key);
-      final int? level = overDlna ?? overSsap;
+      final ssap = await _ssap();
+      int? level;
+      if (ssap.isPaired(key)) {
+        // Its own socket, and nothing else: an LG that has let this program
+        // in refuses the other way outright.
+        level = await _readVolumeOverSsap(key);
+      } else {
+        level = await _readVolumeOverDlna(key);
+      }
       _volumePending.remove(key);
       if (!mounted || level == null) return;
-      setState(() => _volumeOf[key] = level);
+      final int current = level;
+      setState(() => _volumeOf[key] = current);
     } catch (_) {
       _volumePending.remove(key);
     }
@@ -90,7 +105,9 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
   /// Reads the level over DLNA, which is what most screens answer.
   Future<int?> _readVolumeOverDlna(String ip) async {
     try {
-      return await TvDisplayService.instance.getVolume(ip);
+      return await TvDisplayService.instance
+          .getVolume(ip)
+          .timeout(const Duration(seconds: 8));
     } catch (_) {
       return null;
     }
@@ -106,7 +123,9 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
   /// Moves the level over DLNA, which is what most screens answer.
   Future<int?> _changeVolumeOverDlna(String ip, int step) async {
     try {
-      return await TvDisplayService.instance.changeVolume(ip, step);
+      return await TvDisplayService.instance
+          .changeVolume(ip, step)
+          .timeout(const Duration(seconds: 8));
     } catch (_) {
       return null;
     }
@@ -119,7 +138,7 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
   /// already approved.
   Future<TvSsapService> _ssap() async {
     final ssap = TvSsapService.instance;
-    await ssap.load(ref.read(appDatabaseProvider));
+    await ssap.load(ref.read(appDatabaseProvider).settingsDao);
     return ssap;
   }
 
@@ -129,6 +148,11 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
   /// refuse to be told what to do over DLNA, so the only way to their own
   /// volume is their own control socket, and that socket asks for permission
   /// the first time.
+  ///
+  /// Every word in this method is about THIS screen and no other: its own
+  /// socket, its own key, its own number. One screen that is slow or silent
+  /// must not hold up another screen's button, so each attempt is given a
+  /// short leash of its own.
   Future<void> _volume(String ip, String name, int step) async {
     final key = ip.trim();
     if (key.isEmpty) return;
@@ -138,16 +162,33 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
       final ssap = await _ssap();
       if (!mounted) return;
 
-      // Most screens answer over DLNA and need nothing else. LG's televisions
-      // refuse that outright, so they are asked for permission once and then
-      // spoken to over their own socket.
-      int? level = await _changeVolumeOverDlna(key, step);
-      if (level == null) {
-        if (!ssap.isPaired(key)) {
+      // A screen that has already let this program in is told over its own
+      // socket first. That is quick — about a second — and it needs nothing
+      // found first, which the other way does: the screen's description has to
+      // be located before its sound endpoint can even be addressed, and that
+      // search can run across thousands of ports.
+      //
+      // So the LG, which has let us in, is answered straight away, and the
+      // others are asked the way every other screen is asked.
+      int? level;
+      if (ssap.isPaired(key)) {
+        // A screen that has already let this program in is told over its own
+        // socket and NOWHERE ELSE. It refuses the other way outright, so
+        // trying it would only make the button slow before the same answer
+        // arrives by the road that works.
+        level = await ssap.changeVolume(key, step);
+      } else {
+        // The ordinary way, for the screens that answer over DLNA.
+        level = await _changeVolumeOverDlna(key, step);
+
+        // Neither way answered. If the screen is an LG that has not let us
+        // in, it is asked for permission once, and then told over its own
+        // socket.
+        if (level == null) {
           final allowed = await _askScreenForPermission(ip, name);
           if (!allowed || !mounted) return;
+          level = await ssap.changeVolume(key, step);
         }
-        level = await ssap.changeVolume(key, step);
       }
 
       final int? current = level;

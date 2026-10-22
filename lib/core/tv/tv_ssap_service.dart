@@ -3,7 +3,15 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import '../database/app_database.dart';
+/// Where the pairing keys are kept.
+///
+/// It is the little bit of the shop's settings this service needs, and
+/// nothing more, so that the service can be exercised — and a key repaired —
+/// without opening the whole shop.
+abstract class TvSsapKeyStore {
+  Future<String?> getValue(String key);
+  Future<void> setValue(String key, String value);
+}
 
 /// Talks to an LG webOS television over SSAP, the protocol on the TV's own
 /// control socket.
@@ -31,13 +39,29 @@ class TvSsapService {
   /// How long the television is given to answer a command.
   static const Duration timeout = Duration(seconds: 8);
 
+  /// How long a sound command may take before the screen is given up on.
+  ///
+  /// Short, because a person is standing there waiting for the wall to
+  /// answer. A television that is awake answers in a fraction of a second, so
+  /// three seconds of silence already means something is wrong — and a
+  /// button that hangs for eight seconds is a button nobody presses twice.
+  static const Duration commandTimeout = Duration(seconds: 3);
+
+  /// How long an already-paired screen is given to answer.
+  ///
+  /// It knows this program already, so the answer comes straight back — but
+  /// it does not come back at once on every television, and a button that
+  /// waits eight seconds for a screen that has already said hello is a
+  /// button nobody presses.
+  static const Duration knownTimeout = Duration(seconds: 4);
+
   /// How long the television is given to show its approval prompt.
   static const Duration consentTimeout = Duration(seconds: 90);
 
   /// The keys this program holds, one per television.
   final Map<String, String> _keys = <String, String>{};
 
-  AppDatabase? _db;
+  TvSsapKeyStore? _store;
   bool _loaded = false;
 
   /// The key this program holds for a screen, if the screen has given it one.
@@ -50,11 +74,11 @@ class TvSsapService {
   bool isPaired(String ip) => keyFor(ip) != null;
 
   /// Reads the saved keys. Safe to call more than once.
-  Future<void> load(AppDatabase db) async {
+  Future<void> load(TvSsapKeyStore store) async {
     if (_loaded) return;
     _loaded = true;
-    _db = db;
-    final raw = await db.settingsDao.getValue(keysSettingKey);
+    _store = store;
+    final raw = await store.getValue(keysSettingKey);
     if (raw == null || raw.isEmpty) return;
     try {
       final decoded = jsonDecode(raw);
@@ -72,14 +96,20 @@ class TvSsapService {
   }
 
   Future<void> _persist() async {
-    final db = _db;
-    if (db == null) return;
-    await db.settingsDao.setValue(keysSettingKey, jsonEncode(_keys));
+    final store = _store;
+    if (store == null) return;
+    await store.setValue(keysSettingKey, jsonEncode(_keys));
   }
 
   /// Forgets a screen's key, so the next command asks the television again.
   Future<void> forget(String ip) async {
-    if (_keys.remove(ip.trim()) == null) return;
+    final address = ip.trim();
+    // The connection was opened with a key the television no longer knows, so
+    // it is shut rather than left open and useless.
+    await _closeSession(address);
+    _levels.remove(address);
+    _levelsAt.remove(address);
+    if (_keys.remove(address) == null) return;
     await _persist();
   }
 
@@ -128,6 +158,47 @@ class TvSsapService {
   // Sound
   // ---------------------------------------------------------------------
 
+  /// The level each screen last reported, and how the last word went.
+  ///
+  /// Kept per screen, never in one shared place: the whole point of the
+  /// buttons is that each wall answers for itself, so one screen's silence
+  /// must never be mistaken for another's.
+  final Map<String, int> _levels = <String, int>{};
+  final Map<String, String> _outcomes = <String, String>{};
+
+  /// When each screen last reported its level.
+  ///
+  /// A number is only worth keeping for as long as it is true. A level read
+  /// half a minute ago may well have been changed with the television's own
+  /// remote, so after that the screen is asked again rather than trusted.
+  final Map<String, DateTime> _levelsAt = <String, DateTime>{};
+
+  /// The level a screen last reported, if it has reported one.
+  int? levelFor(String ip) => _levels[ip.trim()];
+
+  /// How the last word from a screen went.
+  String? outcomeFor(String ip) => _outcomes[ip.trim()];
+
+  /// Every screen's sound, as a line for a report.
+  String soundReport() {
+    final addresses = <String>{..._levels.keys, ..._outcomes.keys}.toList()
+      ..sort();
+    if (addresses.isEmpty) return 'sound=none';
+    return addresses
+        .map((ip) =>
+            '$ip level=${_levels[ip] ?? "?"} last=${_outcomes[ip] ?? "none"}')
+        .join(' | ');
+  }
+
+  void _note(String ip, int? level, String outcome) {
+    final address = ip.trim();
+    if (level != null) {
+      _levels[address] = level;
+      _levelsAt[address] = DateTime.now();
+    }
+    _outcomes[address] = outcome;
+  }
+
   /// Opens the screen's control socket and registers on it, ready to be told
   /// things.
   ///
@@ -136,7 +207,7 @@ class TvSsapService {
   /// there while the television ignored everything sent down it.
   Future<_SsapSession?> _openReady(String ip, String clientKey) async {
     final session = await _SsapSession.open(ip, clientKey: clientKey);
-    final outcome = await session.register(wait: timeout);
+    final outcome = await session.register(wait: knownTimeout);
     if (outcome.paired) return session;
     // A key the television no longer knows is worse than no key at all: it
     // would ask for permission again and again. So it is put away, and the
@@ -146,24 +217,90 @@ class TvSsapService {
     return null;
   }
 
+  /// The open connection to a screen, ready to be told things.
+  ///
+  /// The connection is KEPT. Opening it costs a secure handshake with the
+  /// television and a permission handshake on top of that, and together they
+  /// are most of the time a button press used to take — so a screen that has
+  /// already said hello is spoken to over the connection it already has, and
+  /// the answer comes back in a fraction of a second.
+  ///
+  /// Each screen has its own connection. Nothing is shared between them, so
+  /// one screen that is slow or silent can never hold up another.
+  Future<_SsapSession?> _sessionFor(String ip) async {
+    final address = ip.trim();
+    final key = keyFor(address);
+    if (key == null) return null;
+    final open = _sessions[address];
+    if (open != null && open.isOpen) return open;
+    await _closeSession(address);
+    final session = await _openReady(address, key);
+    if (session == null) return null;
+    _sessions[address] = session;
+    return session;
+  }
+
+  /// The open connection to each screen.
+  final Map<String, _SsapSession> _sessions = {};
+
+  /// Closes and forgets one screen's connection.
+  Future<void> _closeSession(String ip) async {
+    final session = _sessions.remove(ip.trim());
+    await session?.close();
+  }
+
+  /// Closes every open connection.
+  ///
+  /// Used when the program is shutting down, and by the tools that measure
+  /// the buttons — an open socket keeps the program alive, so a tool that
+  /// forgot to close it would never finish.
+  Future<void> closeAll() async {
+    final addresses = _sessions.keys.toList();
+    for (final address in addresses) {
+      await _closeSession(address);
+    }
+  }
+
+  /// Asks a screen one thing, opening a fresh connection if the old one has
+  /// gone stale.
+  ///
+  /// A television that has been idle may close the socket; the answer then
+  /// comes back as nothing at all. That is not a refusal, it is a door that
+  /// shut, so the door is opened again and the question asked one more time.
+  Future<Map<String, dynamic>?> _ask(
+    String ip,
+    String uri, [
+    Map<String, dynamic>? body,
+  ]) async {
+    final address = ip.trim();
+    var session = await _sessionFor(address);
+    if (session == null) return null;
+    var answer = await session.request(uri, body);
+    if (answer != null) return answer;
+    await _closeSession(address);
+    session = await _sessionFor(address);
+    if (session == null) return null;
+    return session.request(uri, body);
+  }
+
   /// The screen's own volume, as the screen reports it.
   ///
   /// Null when the screen is not reachable, has not been let in, or is in
   /// standby — the caller cannot tell those apart and does not need to.
   Future<int?> getVolume(String ip) async {
     final address = ip.trim();
-    final key = keyFor(address);
-    if (key == null) return null;
-    _SsapSession? session;
-    try {
-      session = await _openReady(address, key);
-      if (session == null) return null;
-      final answer = await session.request('ssap://audio/getVolume');
-      return _volumeOf(answer);
-    } catch (_) {
+    if (keyFor(address) == null) {
+      _note(address, null, 'not let in');
       return null;
-    } finally {
-      await session?.close();
+    }
+    try {
+      final answer = await _ask(address, 'ssap://audio/getVolume');
+      final level = _volumeOf(answer);
+      _note(address, level, level == null ? 'no answer' : 'read');
+      return level;
+    } catch (error) {
+      _note(address, null, _reason(error));
+      return null;
     }
   }
 
@@ -173,36 +310,56 @@ class TvSsapService {
   /// hear from across the room. The level is read first and written back, so
   /// the number shown next to the button is the screen's own number and never
   /// a guess kept from the last time something was pressed.
+  ///
+  /// The level is read only when it is not already fresh. A number read a
+  /// moment ago is as true as one read now, and asking again would turn a
+  /// single press into two round trips to the television for nothing.
   Future<int?> changeVolume(String ip, int step) async {
     final address = ip.trim();
-    final key = keyFor(address);
-    if (key == null) return null;
+    if (keyFor(address) == null) {
+      _note(address, null, 'not let in');
+      return null;
+    }
     if (step == 0) return null;
-    _SsapSession? session;
     try {
-      session = await _openReady(address, key);
-      if (session == null) return null;
-      final current = _volumeOf(
-        await session.request('ssap://audio/getVolume'),
-      );
-      if (current == null) return null;
+      var current = _freshLevel(address);
+      if (current == null) {
+        current = _volumeOf(await _ask(address, 'ssap://audio/getVolume'));
+        if (current == null) {
+          _note(address, null, 'no answer');
+          return null;
+        }
+      }
       final target = (current + step).clamp(0, 100);
-      final ok = await session.setVolume(target);
-      if (ok) return target;
+      final ok = await _ask(address, 'ssap://audio/setVolume', {'volume': target});
+      if (ok != null) {
+        _note(address, target, 'set');
+        return target;
+      }
 
       // Some screens are routed through an amplifier, and those refuse a
       // direct level. The step buttons still work there, so they are pressed
       // the same number of times instead.
       final button = step > 0 ? 'ssap://audio/volumeUp' : 'ssap://audio/volumeDown';
       for (var i = 0; i < step.abs(); i++) {
-        await session.request(button);
+        await _ask(address, button);
       }
-      return _volumeOf(await session.request('ssap://audio/getVolume'));
-    } catch (_) {
+      final settled = _volumeOf(await _ask(address, 'ssap://audio/getVolume'));
+      _note(address, settled, 'stepped');
+      return settled;
+    } catch (error) {
+      _note(address, null, _reason(error));
       return null;
-    } finally {
-      await session?.close();
     }
+  }
+
+  /// The level last heard from a screen, if it was heard recently.
+  int? _freshLevel(String ip) {
+    final level = _levels[ip.trim()];
+    final at = _levelsAt[ip.trim()];
+    if (level == null || at == null) return null;
+    if (DateTime.now().difference(at) > const Duration(seconds: 30)) return null;
+    return level;
   }
 
   /// Pulls the level out of the television's answer.
@@ -288,6 +445,12 @@ class _SsapSession {
 
   final WebSocket _socket;
   final HttpClient _client;
+
+  /// Whether the connection is still good.
+  ///
+  /// A television that has been idle may shut the door; the socket says so
+  /// and the next command opens a new one instead of talking to a wall.
+  bool get isOpen => _socket.readyState == WebSocket.open;
 
   /// The key this program already holds for this television, if any.
   final String? clientKey;
@@ -461,7 +624,7 @@ class _SsapSession {
       if (body != null) 'payload': body,
     });
     return completer.future.timeout(
-      TvSsapService.timeout,
+      TvSsapService.commandTimeout,
       onTimeout: () {
         _pending.remove(id);
         return null;

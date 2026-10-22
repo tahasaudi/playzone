@@ -1,14 +1,18 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
 import '../window/window_state.dart';
 import 'hard_lock.dart';
 import 'tv_power_service.dart';
 import 'tv_screen_report.dart';
+import 'tv_ssap_service.dart';
 import 'video_probe.dart';
 
 /// Pushes a still image to an LG (webOS) TV over DLNA / UPnP AVTransport.
@@ -266,13 +270,42 @@ class TvDisplayService {
   int get imagesServed => _imagesServed;
 
   /// Starts the local image server. Idempotent.
+  ///
+  /// It is called from a widget's build, which happens often, so it must never
+  /// race with itself: two binds at once would have the second one fail and
+  /// report a fault that did not exist. One attempt is in flight at a time and
+  /// everybody waits for it.
   Future<bool> startServer() async {
     if (!tvAllowed) return false;
     if (_server != null) return true;
+    final inFlight = _starting;
+    if (inFlight != null) return inFlight;
+    final attempt = _startServerOnce();
+    _starting = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (identical(_starting, attempt)) _starting = null;
+    }
+  }
+
+  /// The bind attempt currently in flight, if any.
+  Future<bool>? _starting;
+
+  /// Tries to open the picture port, and says honestly why if it cannot.
+  Future<bool> _startServerOnce() async {
     try {
       _server =
           await HttpServer.bind(InternetAddress.anyIPv4, port, shared: false);
-      _server!.listen(_handleRequest, onError: (_) {});
+      // A server that has closed must not be mistaken for one that is still
+      // running: `isRunning` is asked by the shell on every rebuild to decide
+      // whether to start it again, and a closed socket left behind would make
+      // that question answer wrongly forever.
+      _server!.listen(
+        _handleRequest,
+        onError: (_) {},
+        onDone: () => _server = null,
+      );
       await _startSelfTest();
       // Have a frame ready before anyone asks for one. A TV that is sent a
       // URI for an image that 404s comes back with UPnP error 716
@@ -288,6 +321,10 @@ class TvDisplayService {
       // settings footer can name the address the screens must dial from the
       // first time it is shown rather than "…".
       await resolveLocalAddress();
+      if (_anotherCopy) {
+        _anotherCopy = false;
+        _lastError = null;
+      }
       return true;
     } catch (e) {
       // Two copies of this program are the one fault that used to show up as
@@ -298,11 +335,75 @@ class TvDisplayService {
       // work at the same time. A bind failure here is almost never a firewall
       // or a port range problem - it is another copy of this program, already
       // running and already serving the same screens.
-      _anotherCopy = true;
-      _lastError = 'في نسخة تانية من البرنامج شغالة دلوقتي';
+      //
+      // But it is ONLY that when the port really is taken. Windows also says
+      // "address already in use" while the previous copy's connections are
+      // still tidying up, and telling the staff "another copy is running" for
+      // that is a lie that sends them looking for a program that is not there.
+      final taken = _isAddressInUse(e);
+      _lastBindError = e;
+      _anotherCopy = taken;
+      _lastError = taken
+          ? 'في نسخة تانية من البرنامج شغالة دلوقتي'
+          : 'مقدرتش أفتح بورت الصور ($e)';
       return false;
     }
   }
+
+  /// Whether this failure means the port is already taken.
+  bool _isAddressInUse(Object? error) {
+    if (error is! SocketException) return false;
+    // 10048 on Windows, 48 on Linux and macOS.
+    final code = error.osError?.errorCode;
+    if (code == 10048 || code == 48) return true;
+    final text = '${error.osError?.message ?? ''} ${error.message}'.toLowerCase();
+    return text.contains('in use') || text.contains('already used');
+  }
+
+  /// The failure from the last bind attempt, kept so a retry can tell "the
+  /// port is busy" from "something else went wrong".
+  Object? _lastBindError;
+
+  /// Opens the picture port, waiting out the tidying-up of a copy that has
+  /// just closed.
+  ///
+  /// A program that is restarted leaves its sockets behind for a while, and
+  /// until they clear the new copy cannot take the port. Retrying for a few
+  /// seconds turns a wall that stayed dark because of a restart into a wall
+  /// that came back on its own.
+  ///
+  /// Only one round of retries may be in flight: this is called from a widget's
+  /// build, which happens often, and a dozen retry loops all trying to bind
+  /// the same port would be exactly the fight this is meant to prevent.
+  Future<bool> startServerWithRetry() async {
+    if (_retrying) return _server != null;
+    final now = DateTime.now();
+    if (now.isBefore(_nextServerAttemptAt)) return _server != null;
+    _retrying = true;
+    try {
+      for (var attempt = 0; attempt < 6; attempt++) {
+        if (await startServer()) {
+          _nextServerAttemptAt = DateTime.now();
+          return true;
+        }
+        if (!_isAddressInUse(_lastBindError)) {
+          // Not a fight over the port — something else is wrong, and saying so
+          // again every second would only bury the real message.
+          _nextServerAttemptAt =
+              DateTime.now().add(const Duration(seconds: 30));
+          return false;
+        }
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
+      _nextServerAttemptAt = DateTime.now().add(const Duration(seconds: 10));
+      return false;
+    } finally {
+      _retrying = false;
+    }
+  }
+
+  bool _retrying = false;
+  DateTime _nextServerAttemptAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// True when this program could not open the picture port because another copy
   /// of itself already holds it.
@@ -680,7 +781,7 @@ class TvDisplayService {
   /// It sits in the same device description as the picture endpoint, so it is
   /// normally known already and the volume of a wall costs no extra searching.
   /// A screen that was described before this part existed is read once more.
-  Future<String?> _renderingUrl(String tvIp) async {
+  Future<String?> _renderingUrl(String tvIp, {bool allowSweep = false}) async {
     final key = tvIp.trim();
     final cached = _renderingCache[key];
     if (cached != null &&
@@ -690,7 +791,7 @@ class TvDisplayService {
     // Not known yet. The picture endpoint comes first, because that is what
     // knows the port; the description is then read from that same port for the
     // sound endpoint.
-    final av = await _findControlUrl(key);
+    final av = await _findControlUrl(key, allowSweep: allowSweep);
     if (av == null) return null;
     final hit = _renderingCache[key];
     if (hit != null) return hit.$1;
@@ -974,11 +1075,16 @@ class TvDisplayService {
       for (var attempt = 0; attempt < 3; attempt++) {
         if (force) {
           // A manual "look again" must not be blocked by the cooldown.
-          _lastDiscoveryAt.remove(tvIp);
           _controlCache.remove(tvIp);
           _dlnaRefused.remove(tvIp);
           _suspect.remove(tvIp);
         }
+        // This loop IS the cooldown for this screen: three tries, two
+        // seconds apart, is one screen saying "look again" to itself. The
+        // thirty-second cooldown exists to stop a screen's own repeated
+        // asking from becoming a search every second — and applying it here
+        // spent the second and third tries doing nothing at all.
+        _lastDiscoveryAt.remove(tvIp);
         await announce(tvIp: tvIp);
         if (await _findControlUrl(tvIp) != null) {
           _suspect.remove(tvIp);
@@ -1062,7 +1168,6 @@ class TvDisplayService {
     _controlCache.remove(tvIp);
     _dlnaRefused.remove(tvIp);
     _suspect.remove(tvIp);
-    _targetHost = tvIp;
     final found = await _findControlUrl(tvIp);
     // Off right now? Keep the slow background retries going, so it still comes
     // good by itself when the panel wakes up.
@@ -1755,7 +1860,7 @@ class TvDisplayService {
   /// into 1063/1990/2028 on the same set), so we ask the TV itself over
   /// SSDP and parse the LOCATION it hands back. The old fixed port list is
   /// only a fallback.
-  Future<String?> _findControlUrl(String tvIp) async {
+  Future<String?> _findControlUrl(String tvIp, {bool allowSweep = true}) async {
     // Re-use the endpoint we already found — unless a command against it has
     // already failed. A suspect address must be re-checked, never handed back:
     // returning it here is what kept a screen whose port had moved failing for
@@ -1788,7 +1893,6 @@ class TvDisplayService {
     // second and named ports (1602, 1684, 1685, 1593, 1502, 1470) that were in
     // neither the cached list nor the sweep's range, which is exactly why the
     // walls sat unreachable while they were open and answering.
-    _targetHost = tvIp;
     final announced = await _ssdpSearch(tvIp);
     if (announced.isNotEmpty) {
       final control = await _firstControlUrl(tvIp, announced);
@@ -1823,6 +1927,15 @@ class TvDisplayService {
     // The sweep is the last resort: it is the heaviest thing this program does
     // to the café network and it can only find a port inside its range, so it
     // runs only after the screen has failed to name its own address.
+    //
+    // A COMMAND never sweeps. The sweep is a search across thousands of ports
+    // and it can take minutes, so a button that waited for it would look
+    // broken — and worse, one screen's search would hold up another screen's
+    // button, which is exactly the coupling this program must not have. A
+    // command that finds no endpoint is answered honestly ("this screen did not
+    // answer") instead of being made to wait for a search that belongs to
+    // somebody else.
+    if (!allowSweep) return null;
     final scanned = await _scanLocations(tvIp);
     if (scanned != null) return scanned;
     return null;
@@ -1911,15 +2024,24 @@ class TvDisplayService {
   /// that same network. A screen that finds the sweep busy waits for the one
   /// in flight (and is then served its answer, if any) rather than piling on.
   Future<String?> _scanLocations(String tvIp) async {
+    // One sweep at a time across the whole program: two or three screens each
+    // firing hundreds of sockets at once is the single heaviest thing this
+    // program does to the café network.
+    //
+    // But waiting is not the same as giving up. The old behaviour waited for
+    // the sweep in flight and then handed back "nothing found" — so a screen
+    // whose turn came second was written off as unreachable, not because it
+    // could not be reached but because another screen had been looking first.
+    // Now a screen waits its turn and then runs its OWN sweep, so what comes
+    // back is that screen's answer and not another screen's.
+    var waited = Duration.zero;
+    while (_sweeping && waited < const Duration(seconds: 30)) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      waited += const Duration(milliseconds: 200);
+    }
     if (_sweeping) {
-      // Another screen is already sweeping. Wait for it to finish, then do a
-      // cheap cached lookup instead of starting a second full scan — by then
-      // a fresh endpoint very likely exists for this screen too.
-      for (var i = 0; i < 40 && _sweeping; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-      }
-      final cached = _controlCache[tvIp];
-      if (cached != null && !_suspect.contains(tvIp)) return cached.$1;
+      // Still busy after half a minute. Rather than pile on, this screen says
+      // nothing and tries again on its own schedule later.
       return null;
     }
     _sweeping = true;
@@ -1946,7 +2068,7 @@ class TvDisplayService {
         final ports = [
           for (var p = start; p <= to && p < start + batch; p++) p,
         ];
-        final results = await Future.wait(ports.map(_isPortOpen));
+        final results = await Future.wait(ports.map((p) => _isPortOpen(p, tvIp)));
         scanned += ports.length;
         final open = <String>[
           for (var j = 0; j < ports.length; j++)
@@ -1976,11 +2098,11 @@ class TvDisplayService {
   /// batch — so one closed port used to abort the entire sweep before it
   /// reached the real one. That is why discovery silently never worked and
   /// the app kept using a stale port from an older TV boot.
-  Future<bool> _isPortOpen(int port) async {
+  Future<bool> _isPortOpen(int port, String host) async {
     Socket? socket;
     try {
       socket = await Socket.connect(
-        _targetHost,
+        host,
         port,
         // Long enough for the café's Wi-Fi, which is the actual problem here.
         // Measured against a live panel: the first connect to a real renderer
@@ -1998,34 +2120,47 @@ class TvDisplayService {
     }
   }
 
-  String _targetHost = '';
-
   Future<List<String>> _ssdpSearch(String tvIp) async {
     final locations = <String>{};
     _ssdpDatagrams = 0;
     RawDatagramSocket? socket;
+    // When the last answer arrived. Silence for a moment means the answers
+    // have all landed.
+    DateTime? lastReadAt;
     try {
       socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       socket.broadcastEnabled = true;
       socket.multicastHops = 4;
       socket.listen((event) {
         if (event != RawSocketEvent.read) return;
-        final datagram = socket?.receive();
-        if (datagram == null) return;
-        _ssdpDatagrams++;
-        // Only the TV we asked about counts. An M-SEARCH is multicast, so
-        // every DLNA device on the café Wi-Fi answers it; taking their
-        // locations too leaves us testing someone else's endpoints and
-        // never falling back to a port scan of the real TV.
-        if (datagram.address.address != tvIp) return;
-        final text = utf8.decode(datagram.data, allowMalformed: true);
-        final match = RegExp(r'^LOCATION:\s*(\S+)',
-                multiLine: true, caseSensitive: false)
-            .firstMatch(text);
-        if (match != null) {
-          locations.add(match.group(1)!.trim());
-        } else if (_ssdpDatagrams <= 3) {
-          _lastSsdpSample = text.split('\r\n').first.trim();
+        lastReadAt = DateTime.now();
+        // EVERY datagram that arrived must be read, not just the first one.
+        //
+        // A read event can cover a burst of replies, because all five screens
+        // answer the same multicast question at the same moment. Reading one
+        // datagram per event threw away the rest — and since the answer we
+        // need is the one from the screen we asked about, and the answers
+        // arrive in no particular order, that is exactly how a screen that was
+        // wide awake and answering got written off as unreachable.
+        var datagram = socket?.receive();
+        while (datagram != null) {
+          _ssdpDatagrams++;
+          // Only the TV we asked about counts. An M-SEARCH is multicast, so
+          // every DLNA device on the café Wi-Fi answers it; taking their
+          // locations too leaves us testing someone else's endpoints and
+          // never falling back to a port scan of the real TV.
+          if (datagram.address.address == tvIp) {
+            final text = utf8.decode(datagram.data, allowMalformed: true);
+            final match = RegExp(r'^LOCATION:\s*(\S+)',
+                    multiLine: true, caseSensitive: false)
+                .firstMatch(text);
+            if (match != null) {
+              locations.add(match.group(1)!.trim());
+            } else if (_ssdpDatagrams <= 3) {
+              _lastSsdpSample = text.split('\r\n').first.trim();
+            }
+          }
+          datagram = socket?.receive();
         }
       });
 
@@ -2044,14 +2179,55 @@ class TvDisplayService {
         );
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
-      await Future<void>.delayed(const Duration(milliseconds: 2500));
+
+      // The search waits until the socket has been QUIET for a moment, not
+      // for a fixed number of seconds.
+      //
+      // A screen answers with several datagrams, one for each of the
+      // services it offers, and the ones that matter — the one that carries
+      // the picture — are not always among the first. A fixed wait ended
+      // before the last answer arrived and a closed socket throws away
+      // whatever was still in it, so a screen that was awake and answering
+      // was written off as unreachable.
+      //
+      // The cap keeps a silent screen from holding the others up.
+      final started = DateTime.now();
+      const quiet = Duration(milliseconds: 500);
+      const cap = Duration(seconds: 8);
+      while (DateTime.now().difference(started) < cap) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        final last = lastReadAt;
+        if (last == null) continue;
+        // The screens were asked with MX: 2, so no answer can come sooner
+        // than two seconds. Before that, silence means nothing.
+        final waited = DateTime.now().difference(started);
+        if (waited > const Duration(milliseconds: 2400) &&
+            DateTime.now().difference(last) > quiet) {
+          break;
+        }
+      }
     } catch (e) {
       _lastError = 'SSDP search: $e';
     } finally {
       socket?.close();
     }
     _lastLocations = locations.join(' , ');
+    // Kept per screen: what one screen announced says nothing about another,
+    // and a report that mixed them up would send the staff looking at the
+    // wrong wall.
+    _ssdpFound[tvIp] = locations.toList();
     return locations.toList();
+  }
+
+  /// What each screen announced about itself, by address.
+  final Map<String, List<String>> _ssdpFound = {};
+
+  /// What each screen announced, as one line for a report.
+  String ssdpReport() {
+    if (_ssdpFound.isEmpty) return 'ssdp=none';
+    return _ssdpFound.entries
+        .map((e) => '${e.key} -> ${e.value.isEmpty ? "silent" : e.value.join(",")}')
+        .join(' | ');
   }
 
   /// Fetches one device description and extracts the two endpoints this
@@ -2539,6 +2715,9 @@ class TvDisplayService {
       'ssdpLocations=$_lastLocations\n'
       'ssdpSample=$_lastSsdpSample\n'
       'browseCalls=$_browseCalls\n'
+      '--- sound ---\n'
+      '${TvSsapService.instance.soundReport()}\n'
+      '${ssdpReport()}\n'
       '--- screens ---\n'
       'config=${configSummary()}\n'
       'anotherCopy=${_anotherCopy ? "YES <<<" : "no"}\n'
@@ -2557,6 +2736,31 @@ class TvDisplayService {
       // questions the settings page answers — and cannot confuse the two
       // panels, which a single shared set of counters never could.
       '${reports().map(_reportBlock).join()}';
+
+  /// Starts writing the on-disk report.
+  ///
+  /// The report on the status page can only be read while the picture server
+  /// is up — and the moment anybody needs to read it is the moment the server
+  /// is down. A file on disk answers "what was this program doing?" even then.
+  void startStatusFile() {
+    _statusTimer ??= Timer.periodic(const Duration(seconds: 20), (_) {
+      unawaited(_writeStatusFile());
+    });
+  }
+
+  Timer? _statusTimer;
+
+  /// Writes the report to a file beside the shop's database.
+  Future<void> _writeStatusFile() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final file = File(p.join(dir.path, 'tv-status.txt'));
+      await file.writeAsString(_statusBody(), flush: true);
+    } catch (_) {
+      // A report that cannot be written is not worth interrupting the program
+      // for, and it must never be the reason a screen misses a command.
+    }
+  }
 
   /// Serves the current image; answers HEAD (headers only) and GET.
   /// Also exposes /status so a problem can be diagnosed without the UI,

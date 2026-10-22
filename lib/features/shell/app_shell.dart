@@ -444,8 +444,16 @@ class _AppShellState extends ConsumerState<AppShell> {
         tvConfig.enabled &&
         tvConfig.addresses.isNotEmpty) {
       final tv = TvDisplayService.instance;
+      // The report on disk is written whatever else is happening, so that a
+      // question like "what was the program doing?" has an answer even while
+      // the picture server is down — which is exactly when it is asked.
+      tv.startStatusFile();
       // Cheap and idempotent: only binds the port when the server is down.
-      if (!tv.isRunning) tv.startServer();
+      // A restart can leave the old copy's sockets behind for a moment, and
+      // until they clear the port cannot be taken, so the opening is tried
+      // again for a few seconds instead of being given up on — a wall that
+      // stayed dark because of a restart is a wall that never comes back.
+      if (!tv.isRunning) unawaited(tv.startServerWithRetry());
       // Start/stop the card pusher only when the setting changes. Doing it on
       // every rebuild restarted the periodic timer roughly once a second, so
       // the timer itself never fired and the app paid for a new timer forever.

@@ -1,4 +1,5 @@
 import 'package:drift/drift.dart';
+import '../../tv/tv_ssap_service.dart';
 import '../app_database.dart';
 import '../tables/app_settings_table.dart';
 
@@ -7,7 +8,9 @@ part 'settings_dao.g.dart';
 /// Key/value settings store — currently holds the PIN that unlocks the
 /// protected dashboard metric buttons.
 @DriftAccessor(tables: [AppSettings])
-class SettingsDao extends DatabaseAccessor<AppDatabase> with _$SettingsDaoMixin {
+class SettingsDao extends DatabaseAccessor<AppDatabase>
+    with _$SettingsDaoMixin
+    implements TvSsapKeyStore {
   SettingsDao(super.db);
 
   /// Key of the PIN that must be entered before the locked dashboard
