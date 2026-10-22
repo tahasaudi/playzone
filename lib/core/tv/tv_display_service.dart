@@ -640,9 +640,12 @@ class TvDisplayService {
     var ok = await _soap(hit.$1, 'Stop', '<InstanceID>0</InstanceID>');
     if (!ok) {
       // The panel moved its renderer to another port, or it was restarted and
-      // came back somewhere else. The cached address is dead, so look for the
-      // new one and try once more before telling the cashier it failed.
-      final fresh = await _refreshControlUrl(tvIp);
+      // came back somewhere else. The cached address is dead, so wait for the
+      // background re-look that the failed command started and try once more.
+      // This does not start a look of its own: at the till a screen that is
+      // simply off must not turn into a 7,000-port sweep.
+      final fresh =
+          await _refreshControlUrl(tvIp, startLookup: false, timeoutMs: 1500);
       if (fresh != null && fresh != hit.$1) {
         ok = await _soap(fresh, 'Stop', '<InstanceID>0</InstanceID>');
       }
@@ -1309,26 +1312,36 @@ class TvDisplayService {
     return true;
   }
 
-  /// Looks for a screen's renderer address again, after a command to it failed.
+  /// Waits for a screen's renderer address to be looked up again, after a
+  /// command to it failed.
   ///
   /// The port a television serves its renderer on is picked fresh on every
-  /// boot, so a screen that rebooted looks exactly like a screen that is off.
-  /// The old address is dead in that case and every command to it is lost, so
-  /// a failure has to be followed by a fresh look — not just by a retry on the
-  /// same dead door. Waits a few seconds for the new address to turn up and
-  /// hands it back, or null when the screen really is gone.
-  Future<String?> _refreshControlUrl(String tvIp, {int timeoutMs = 4000}) async {
-    final before = _controlCache[tvIp]?.$1;
-    if (!_warming.contains(tvIp)) {
-      // A manual re-look must not be held back by the discovery cooldown:
-      // the whole point is that the address we have is wrong.
+  /// boot, so a screen that rebooted looks exactly like a screen that is off:
+  /// every command to the old address is lost. A failed command has to be
+  /// followed by a fresh look, not by a retry on the same dead door.
+  ///
+  /// [startLookup] decides whether this asks for the look itself. It is on
+  /// for an explicit action on the screen, and off where a slow 7,000-port
+  /// sweep would land on the till: there the background look is already
+  /// running, and this only waits for it.
+  Future<String?> _refreshControlUrl(
+    String tvIp, {
+    bool startLookup = true,
+    int timeoutMs = 4000,
+  }) async {
+    if (startLookup && !_warming.contains(tvIp)) {
+      // A re-look must not be held back by the discovery cooldown: the whole
+      // point is that the address we have is wrong.
       unawaited(warmUp(tvIp: tvIp, force: true));
     }
     final deadline = DateTime.now().add(Duration(milliseconds: timeoutMs));
     while (DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 150));
+      // A screen that is still flagged is still holding the address that just
+      // failed, so it is not an answer yet.
+      if (_suspect.contains(tvIp)) continue;
       final now = _controlCache[tvIp]?.$1;
-      if (now != null && now != before) return now;
+      if (now != null) return now;
     }
     return null;
   }
