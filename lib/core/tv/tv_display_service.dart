@@ -448,6 +448,31 @@ class TvDisplayService {
     final res = request.response;
     final want = request.uri.queryParameters['ip']?.trim() ?? '';
     try {
+      // Darkening one screen, and waking it again, measured.
+      //
+      // These are the two commands the cashier waits on, and they are on this
+      // loopback-only port so that the time they take can be measured
+      // without a customer watching the screen being used for an experiment.
+      if (request.uri.path == '/dim' || request.uri.path == '/open') {
+        if (want.isEmpty) {
+          res.statusCode = HttpStatus.badRequest;
+          res.write('which screen? add ?ip=<address>\n');
+          await res.close();
+          return;
+        }
+        final watch = Stopwatch()..start();
+        final ok = request.uri.path == '/dim'
+            ? await pushBlack(want)
+            : await releaseToInput(want, force: true);
+        watch.stop();
+        res.statusCode = HttpStatus.ok;
+        res.write('screen=$want action=${request.uri.path.substring(1)} '
+            'ok=$ok tookMs=${watch.elapsedMilliseconds}\n'
+            'lastResult=${_log(want).lastResult ?? "none"}\n'
+            'controlUrl=${hasControlUrlFor(want) ? _controlCache[want]?.$1 ?? "none" : "none"}\n');
+        await res.close();
+        return;
+      }
       if (request.uri.path != '/blank') {
         res.statusCode = HttpStatus.notFound;
         await res.close();
@@ -553,15 +578,31 @@ class TvDisplayService {
   /// When [forHost] is a screen's address, an address on that screen's own /24
   /// wins: this machine carries several IPv4 addresses, and only the one on
   /// the café LAN can actually be reached by the television.
+  final Map<String, String> _localAddressForPrefix = {};
+  DateTime? _localAddressReadAt;
+  static const _localAddressTtl = Duration(seconds: 30);
+
   Future<String?> resolveLocalAddress({String? forHost}) async {
     if (forHost != null && forHost.contains('.')) {
       final prefix = '${forHost.split('.').take(3).join('.')}.';
+      // Reading the machine's own interfaces is a system call that takes a
+      // moment, and it was made on every single push and every announcement.
+      // The answer only changes when the machine's network does, so it is
+      // remembered — but not for long, because a café PC that is moved between
+      // networks must not keep offering the television an address that is no
+      // longer on the same wire.
+      final stale = _localAddressReadAt == null ||
+          DateTime.now().difference(_localAddressReadAt!) > _localAddressTtl;
+      final remembered = _localAddressForPrefix[prefix];
+      if (remembered != null && !stale) return remembered;
       try {
         final list =
             await NetworkInterface.list(type: InternetAddressType.IPv4);
         for (final iface in list) {
           for (final addr in iface.addresses) {
             if (!addr.isLoopback && addr.address.startsWith(prefix)) {
+              _localAddressForPrefix[prefix] = addr.address;
+              _localAddressReadAt = DateTime.now();
               return addr.address;
             }
           }
@@ -582,6 +623,17 @@ class TvDisplayService {
     // the screen comes back to life the moment a session starts again. This is
     // board-wide — every wall shows this same frame — so every screen's dark
     // mark is cleared here, not just one address's.
+    //
+    // The black frame itself is parked per screen, so it has to be taken
+    // away per screen too. Leaving it behind meant a screen that had been
+    // paid for and darkened came back to life as soon as the next session
+    // published its cards.
+    for (final key in _blankedScreens) {
+      final current = _overrides[key];
+      if (current != null && _black != null && identical(current, _black)) {
+        _overrides.remove(key);
+      }
+    }
     _blankedScreens.clear();
     _blanked = false;
     _tvFetchedScreens.clear();
@@ -608,25 +660,32 @@ class TvDisplayService {
 
   /// Serves a solid black frame instead of the session cards.
   ///
-  /// [tvIp] is the screen being blacked out. Its own counter is bumped so that
-  /// screen re-fetches the black frame; leaving it out (an internal call with
-  /// no single screen in mind) bumps nobody, since handing every panel a new
-  /// address is the "all the walls move at once" fault this file no longer
-  /// has.
+  /// [tvIp] is the screen being blacked out. The frame is parked for that
+  /// screen alone — in the same place a screen's own name is parked — so the
+  /// picture server hands the black to that panel and to nobody else.
+  ///
+  /// It used to replace the shared frame instead, which meant one darkened
+  /// wall took every other wall in the café down with it, and a screen that
+  /// was dark on purpose came back to life the moment the next session
+  /// published its cards.
   Future<void> blank({String? tvIp}) async {
-    if (_image == null) {
-      _black ??= await _buildBlackFrame();
+    _black ??= await _buildBlackFrame();
+    final key = tvIp?.trim() ?? '';
+    if (key.isEmpty) {
+      // No single screen in mind: the shared board itself goes dark.
       _image = _black;
+      _imageBytes = _black!.length;
+      return;
     }
-    _imageBytes = _image!.length;
     // Recorded per screen: "is this wall dark?" has to be answerable for one
     // panel at a time, and one blanket flag made a screen that had just been
     // blacked out look dark even after a different one was woken back up.
-    if (tvIp != null && tvIp.trim().isNotEmpty) {
-      _blankedScreens.add(tvIp.trim());
-      _tvFetchedScreens.remove(tvIp.trim());
-      _revisions[tvIp.trim()] = _revisionFor(tvIp) + 1;
-    }
+    _blankedScreens.add(key);
+    _overrides[key] = _black!;
+    _tvFetchedScreens.remove(key);
+    // Its own address changes, so it comes back for the new frame instead of
+    // answering from its cache.
+    _revisions[key] = _revisionFor(key) + 1;
     _blanked = _blankedScreens.isNotEmpty;
     _tvFetched = _tvFetchedScreens.isNotEmpty;
   }
@@ -637,8 +696,14 @@ class TvDisplayService {
   /// longer dark. Without an address (an internal "everything is live again"
   /// call) there is no single screen to clear, so nothing is cleared.
   void unblank({String? tvIp}) {
-    if (tvIp != null && tvIp.trim().isNotEmpty) {
-      _blankedScreens.remove(tvIp.trim());
+    final key = tvIp?.trim() ?? '';
+    if (key.isEmpty) return;
+    _blankedScreens.remove(key);
+    // Only the black frame is taken away. A screen that is showing its own
+    // name keeps its name — that label is not the darkness.
+    final current = _overrides[key];
+    if (current != null && _black != null && identical(current, _black)) {
+      _overrides.remove(key);
     }
     _blanked = _blankedScreens.isNotEmpty;
   }
@@ -738,7 +803,13 @@ class TvDisplayService {
       return false;
     }
     final watch = Stopwatch()..start();
-    var ok = await _soap(hit.$1, 'Stop', '<InstanceID>0</InstanceID>');
+    // The stop is not judged on the status code alone. These panels answer
+    // with an error while going on to release the picture perfectly well, and
+    // a release that is called a failure is retried for fifteen seconds —
+    // which is the whole difference between a button that feels instant and
+    // one that feels broken.
+    var ok = await _soap(hit.$1, 'Stop', '<InstanceID>0</InstanceID>',
+        lenient: true);
     if (!ok) {
       // The panel moved its renderer to another port, or it was restarted and
       // came back somewhere else. The cached address is dead, so wait for the
@@ -748,7 +819,8 @@ class TvDisplayService {
       final fresh =
           await _refreshControlUrl(tvIp, startLookup: false, timeoutMs: 1500);
       if (fresh != null) {
-        ok = await _soap(fresh, 'Stop', '<InstanceID>0</InstanceID>');
+        ok = await _soap(fresh, 'Stop', '<InstanceID>0</InstanceID>',
+            lenient: true);
       }
     }
     watch.stop();
@@ -904,14 +976,26 @@ class TvDisplayService {
     // is no longer allowed to take it back.
     _closedScreens.add(tvIp);
     if (!_controlCache.containsKey(tvIp)) {
-      // Nothing known yet — kick discovery off in the background and say so
-      // rather than making checkout wait for a port sweep.
-      if (!_warming.contains(tvIp)) unawaited(warmUp(tvIp: tvIp));
-      await blank(tvIp: tvIp);
-      return false;
+      // Nothing known yet. Look for the screen now rather than giving up on
+      // it: the lookup is a question and an answer, not a search of thousands
+      // of ports, and a dim that quietly does nothing is far worse than a dim
+      // that takes a moment.
+      final found = await _findControlUrl(tvIp, allowSweep: false);
+      if (found == null) {
+        if (!_warming.contains(tvIp)) unawaited(warmUp(tvIp: tvIp));
+        await blank(tvIp: tvIp);
+        return false;
+      }
     }
-    await announce(tvIp: tvIp);
+    // The dark frame is parked for this screen alone, before the push, so the
+    // picture the television pulls is the black one and not the shared board.
     await blank(tvIp: tvIp);
+    // The announcement is what stops an LG renderer answering "no" because it
+    // has never heard of this PC — but it was sent on every single push, which
+    // cost a socket and a moment's wait on a button people watch closely. Once
+    // a screen has heard us it keeps listening, so it is only re-sent when
+    // that hearing has gone stale.
+    await _ensureAnnounced(tvIp);
     final watch = Stopwatch()..start();
     final ok = await _pushOnce(tvIp);
     watch.stop();
@@ -1130,6 +1214,24 @@ class TvDisplayService {
         DateTime.now().difference(hit.$2) < const Duration(minutes: 30);
   }
 
+  /// Waits, briefly, until this screen's endpoint is known.
+  ///
+  /// A screen whose endpoint is not known yet cannot be told anything at all,
+  /// and every other path has already started the looking. So this waits for
+  /// that work rather than repeating it — and it gives up rather than waiting
+  /// forever, because a command must never be the reason the till freezes.
+  Future<bool> waitForControlUrl(String tvIp,
+      {Duration budget = const Duration(seconds: 3)}) async {
+    final key = tvIp.trim();
+    final watch = Stopwatch()..start();
+    while (watch.elapsed < budget) {
+      if (hasControlUrlFor(key)) return true;
+      if (!_warming.contains(key)) unawaited(warmUp(tvIp: key));
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+    return hasControlUrlFor(key);
+  }
+
   /// Discards what we think we know and looks again. Wired to the "ابحث عن
   /// الشاشة" button so a TV that rebooted into a new port can be fixed
   /// without restarting the app.
@@ -1265,6 +1367,8 @@ class TvDisplayService {
       await Future<void>.delayed(const Duration(milliseconds: 150));
       socket.close();
       _announced = true;
+      final key = host.trim();
+      if (key.isNotEmpty) _announcedAt[key] = DateTime.now();
     } catch (e) {
       _lastError = 'SSDP announce: $e';
     }
@@ -1272,6 +1376,25 @@ class TvDisplayService {
 
   bool _announced = false;
   bool get announced => _announced;
+
+  /// When each screen last heard us announce ourselves.
+  final Map<String, DateTime> _announcedAt = {};
+
+  /// How long a screen keeps listening after one announcement.
+  ///
+  /// The announcement carries its own lifetime (the cache-control header),
+  /// and an LG renderer honours it. So one announcement is enough for a while,
+  /// and asking again on every push was a socket and a moment's delay spent
+  /// on a screen that had already heard us.
+  static const _announceTtl = Duration(seconds: 60);
+
+  /// Announces this program to [tvIp], unless it has heard us recently.
+  Future<void> _ensureAnnounced(String tvIp) async {
+    final key = tvIp.trim();
+    final at = _announcedAt[key];
+    if (at != null && DateTime.now().difference(at) < _announceTtl) return;
+    await announce(tvIp: tvIp);
+  }
 
   /// Stops every screen's refresh loop.
   ///
@@ -1804,8 +1927,12 @@ class TvDisplayService {
       [int budgetMs = 1400]) async {
     final log = _log(tvIp);
     if (log.imagesServed > before) return true;
-    for (var waited = 0; waited < budgetMs; waited += 200) {
-      await Future<void>.delayed(const Duration(milliseconds: 200));
+    // Looked at often. A television that has been given a picture usually
+    // pulls it within a moment, and every extra stretch of waiting is a
+    // stretch the cashier stands in front of a screen that is still showing
+    // the old thing. Two hundred milliseconds at a time was most of the wait.
+    for (var waited = 0; waited < budgetMs; waited += 60) {
+      await Future<void>.delayed(const Duration(milliseconds: 60));
       if (log.imagesServed > before) return true;
     }
     return false;
@@ -1895,18 +2022,25 @@ class TvDisplayService {
     // walls sat unreachable while they were open and answering.
     final announced = await _ssdpSearch(tvIp);
     if (announced.isNotEmpty) {
-      final control = await _firstControlUrl(tvIp, announced);
-      if (control != null) return control;
+      // The screen named its own address. That IS the port it is serving the
+      // picture on right now, so there is nothing to guess at and nothing to
+      // scan for — the answer is one description away.
+      //
+      // A screen that is busy answering the first time is often ready the
+      // second, so it is asked twice before giving up.
+      for (var attempt = 0; attempt < 2; attempt++) {
+        final control = await _firstControlUrl(tvIp, announced);
+        if (control != null) return control;
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
+      // The address is known, so the answer will come from the same place
+      // next time. Scanning thousands of ports now would only saturate the
+      // café's network and make every other screen slower to answer.
+      return null;
     }
 
-    // Every port either wall screen has served its renderer on, across
-    // restarts. Checked second because it costs nothing, and it is the
-    // difference between a screen that lights up immediately and one that
-    // sits black for ten seconds waiting for a scan.
-    //
-    // The list is a cache, never the source of truth: the renderer port is
-    // chosen fresh on every TV boot, so the sweep below is what actually
-    // keeps this working. A miss here must never look like "no screen".
+    // The screen did not answer for itself. Fall back to the ports these
+    // panels are known to serve on, and only then to the scan.
     final candidates = <String>[
       for (final port in const [
         // 55UP7760PVB
@@ -2053,7 +2187,14 @@ class TvDisplayService {
   }
 
   Future<String?> _sweepPorts(String tvIp) async {
-    const batch = 512;
+    // Small batches, and a pause between them.
+    //
+    // A sweep that opens hundreds of connections at once takes the café's
+    // network down to a crawl for as long as it runs, and every screen that
+    // is trying to answer at the same time is made to look dead. A gentler
+    // sweep finds the same port, just without stealing the network from
+    // the screens that are using it.
+    const batch = 96;
     // The floor to the ceiling of the range LG hands its renderer. Widened past
     // the old 1000..3100 after ports in the 4000s and 5000s were seen on these
     // panels: a range that stops at 3100 can miss the one port that matters and
@@ -2080,6 +2221,9 @@ class TvDisplayService {
           final control = await _firstControlUrl(tvIp, open);
           if (control != null) return control;
         }
+        // Let the network breathe before the next batch, so a screen that
+        // is trying to answer at the same time is not left waiting.
+        await Future<void>.delayed(const Duration(milliseconds: 120));
       }
     } catch (e) {
       // Keep whatever we found before the trouble — a partial answer still
@@ -2244,11 +2388,11 @@ class TvDisplayService {
   /// while it is merely slow.
   Future<({String av, String? render})?> _servicesFrom(String location) async {
     try {
-      final req = await _http.getUrl(Uri.parse(location));
+      final req = await _descriptionHttp.getUrl(Uri.parse(location));
       final res = await req.close();
       if (res.statusCode != 200) return null;
       final body =
-          await res.transform(utf8.decoder).join().timeout(const Duration(seconds: 2));
+          await res.transform(utf8.decoder).join().timeout(const Duration(seconds: 5));
       final av = _serviceControlUrl(body, 'AVTransport');
       if (av == null) return null;
       final render = _serviceControlUrl(body, 'RenderingControl');
@@ -2264,8 +2408,13 @@ class TvDisplayService {
   /// A service block names its type and then its own address, so the type is
   /// looked for first and the address is taken from the same block after it.
   static String? _serviceControlUrl(String body, String service) {
+    // NOT a raw string: the service name has to be woven into the pattern,
+    // and a raw string takes the "$service" as the literal text "$service".
+    // That way the pattern never matched any description at all, and every
+    // screen was written off as having no picture endpoint — which is what
+    // made "the screens refuse the commands" look like the screens' fault.
     final match = RegExp(
-            r'<serviceType>\s*urn:schemas-upnp-org:service:$service:1\s*</serviceType>(?:(?!</service>).)*?<controlURL>\s*([^<]+?)\s*</controlURL>',
+            '<serviceType>\\s*urn:schemas-upnp-org:service:$service:1\\s*</serviceType>(?:(?!</service>).)*?<controlURL>\\s*([^<]+?)\\s*</controlURL>',
             dotAll: true,
             caseSensitive: false)
         .firstMatch(body);
@@ -2310,6 +2459,17 @@ class TvDisplayService {
     ..idleTimeout = const Duration(seconds: 30)
     ..maxConnectionsPerHost = 6;
 
+  /// The client used to read a screen's description.
+  ///
+  /// It is kept apart from the one that speaks SOAP, and it is given more
+  /// patience, because a screen that is plainly answering must not be made
+  /// to look dead by a busy network — and the café's network gets busy the
+  /// moment a search of thousands of ports is running alongside.
+  static final HttpClient _descriptionHttp = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 5)
+    ..idleTimeout = const Duration(seconds: 15)
+    ..maxConnectionsPerHost = 8;
+
   /// Fires one SOAP action and hands back the panel's HTTP status and body.
   ///
   /// A null status means the call never completed — the TV holds a SOAP call
@@ -2345,7 +2505,8 @@ class TvDisplayService {
   }
 
   Future<bool> _soap(String controlUrl, String action, String body,
-      {String service = 'urn:schemas-upnp-org:service:AVTransport:1'}) async {
+      {String service = 'urn:schemas-upnp-org:service:AVTransport:1',
+      bool lenient = false}) async {
     final (status, payload, reached) =
         await _soapRaw(controlUrl, action, body, service: service);
     final host = Uri.tryParse(controlUrl)?.host ?? '';
@@ -2364,6 +2525,19 @@ class TvDisplayService {
       return true;
     }
     if (status >= 400) {
+      // The panel's own refusal is not always the last word.
+      //
+      // These panels answer HTTP 500 while going on to do exactly what was
+      // asked: the picture is fetched and shown, or released and handed back
+      // to the console. A command judged on the status code alone therefore
+      // reports work that worked as a failure — and a failure is retried, and
+      // a retry loop is what turns a button into fifteen seconds of nothing.
+      //
+      // It is used for the commands where the panel is known to answer this
+      // way. A connection we could not make is still a failure.
+      if (lenient && status >= 500) {
+        return true;
+      }
       final code = _upnpErrorCode(payload);
       _lastError = code == null
           ? '$action -> HTTP $status'

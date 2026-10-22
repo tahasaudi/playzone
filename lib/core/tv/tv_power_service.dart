@@ -348,16 +348,32 @@ class TvPowerService {
   Future<void> _wakeThenRelease(String tvIp) async {
     final tv = TvDisplayService.instance;
     final watch = Stopwatch()..start();
-    await _sendMagicPacket();
+    // The wake-up goes out without holding the release back. The packet needs
+    // a moment to arrive and the panel needs a moment to come up, and the
+    // release can be asked on every one of those moments — a panel that is
+    // already awake can be handed back to its console at once. Waiting for
+    // the whole burst before asking the panel anything was a second and a
+    // half of the button doing nothing at all.
+    unawaited(_sendMagicPacket());
+    // A screen whose endpoint is not known yet cannot be told anything, and
+    // every other path has already started the looking. Waiting a bounded
+    // moment for that is what turns a command that could not be sent at all
+    // into one that is sent the moment the screen answers — instead of a
+    // command that is quietly dropped.
+    if (!tv.hasControlUrlFor(tvIp)) {
+      await tv.waitForControlUrl(tvIp);
+    }
     // A checkout that landed while this loop was still waiting on a slow
     // panel. The wall is dark and paid for, so this release no longer applies
     // to anything — and it is the exact command that used to put the screen
     // back on the console a second after a customer paid.
     bool closedNow() => tv.isScreenClosed(tvIp);
 
-    const fastTries = 10;
-    for (var i = 0; i < fastTries; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 500));
+    // Fast first, then slow. The panel is usually up in well under a second,
+    // and every extra moment of waiting is a moment the customer stares at a
+    // wall that is still dark.
+    for (final wait in const [0, 100, 200, 350, 550, 800, 1200]) {
+      if (wait > 0) await Future<void>.delayed(Duration(milliseconds: wait));
       if (closedNow()) {
         _done(tvIp, 'الجلسة اتقفلت — الشاشة فضلت مقفولة', watch);
         return;
@@ -368,7 +384,7 @@ class TvPowerService {
       }
       if (tv.refusesDlna(tvIp)) break;
     }
-    // Still nothing after five seconds: keep a slower rhythm going so a
+    // Still nothing after a few seconds: keep a slower rhythm going so a
     // slow-booting panel eventually gets there on its own.
     for (var i = 0; i < 4; i++) {
       await Future<void>.delayed(const Duration(seconds: 2));
@@ -439,7 +455,10 @@ class TvPowerService {
     // anyway. The screen now refuses it, and says so in its own history
     // instead of quietly undoing the sale.
     tv.markScreenClosed(tvIp);
-    tv.stopPushing();
+    // Only this screen's own refresh loop is stopped. Stopping every wall's
+    // loop meant darkening one screen took the rest of the café's screens
+    // out of the game with it — and each screen is now dark on its own.
+    tv.stopPushingScreen(tvIp);
     _lastResult = 'الشاشة بتتغمّض';
     _endTiming();
     tv.noteCommand(tvIp, 'إغلاق', 'بتتغمّض', tookMs: _lastTookMs);
@@ -450,21 +469,26 @@ class TvPowerService {
   Future<void> _blankOut(String tvIp) async {
     final tv = TvDisplayService.instance;
     final watch = Stopwatch()..start();
-    final netcast = await _netcastPower(2);
-    if (netcast) {
-      _blanked(tvIp, 'الشاشة اتقفلت', watch);
-      return;
-    }
-    // A screen that answers 500 will not answer on the third try either.
-    // Say so once, and let the cashier close the session knowing the TV
-    // still needs the remote.
-    for (var i = 0; i < 2; i++) {
+    // The old NetCast ports are closed on this firmware, and waiting for them
+    // to time out was a whole second of nothing before the screen was even
+    // asked to go dark. It is tried alongside the picture now, not in front
+    // of it — and if the picture lands first, the answer is already in.
+    final netcast = _netcastPower(2);
+    for (var i = 0; i < 3; i++) {
       if (await tv.pushBlack(tvIp)) {
         _blanked(tvIp, 'الشاشة اتغمّضت', watch);
         return;
       }
       if (tv.refusesDlna(tvIp)) break;
-      await Future<void>.delayed(const Duration(seconds: 2));
+      // Short, not long. The screen either took the picture in the first
+      // moments or it is not going to take it in the next two seconds
+      // either, and the cashier is watching the screen, not the app.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    }
+    // Still nothing: the old road may be the answer after all.
+    if (await netcast) {
+      _blanked(tvIp, 'الشاشة اتقفلت', watch);
+      return;
     }
     _blanked(tvIp, 'الشاشة رفضت الأمر — اقفلها بالريموت', watch, ok: false);
   }
