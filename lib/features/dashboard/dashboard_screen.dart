@@ -326,13 +326,21 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           ),
           const SizedBox(height: AppSpacing.sm),
           LayoutBuilder(builder: (context, constraints) {
-            final columns = constraints.maxWidth > 1400
+            // Square cards, clean grid
+            final width = constraints.maxWidth;
+            final columns = width >= 900
                 ? 6
-                : constraints.maxWidth > 1100
+                : width >= 700
                     ? 5
-                    : constraints.maxWidth > 800
+                    : width >= 500
                         ? 4
-                        : 3;
+                        : width >= 360
+                            ? 3
+                            : 2;
+            final spacing = AppSpacing.xs;
+            final totalSpacing = spacing * (columns - 1);
+            final itemWidth = (width - totalSpacing) / columns;
+            final itemHeight = itemWidth * 1.0;
             return GridView.count(
               crossAxisCount: columns,
               shrinkWrap: true,
@@ -361,7 +369,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 final deviceMode = _modeForDevice(d.device.id);
                 return GestureDetector(
                   onTap: session != null ? () => _selectEntry(session) : null,
-                  child: DeviceCard(
+                    child: DeviceCard(
                     compact: true,
                     device: model,
                     queuedSince: endedAt,
@@ -1103,6 +1111,218 @@ class _PackagePickerDialog extends StatelessWidget {
               ),
               const SizedBox(height: AppSpacing.sm),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The popup that opens on tapping a device card: live session facts
+/// (state, collected time, orders) on top, the wall screen open/close
+/// row, and the full inline card underneath for adding time / starting
+/// an open session with every property of the normal card.
+class _DeviceDetailDialog extends StatelessWidget {
+  const _DeviceDetailDialog({
+    required this.device,
+    required this.session,
+    required this.model,
+    this.endedAt,
+    required this.ordersTotal,
+    required this.selectedMinutes,
+    required this.selectedAmount,
+    required this.selectedMode,
+    required this.hourlyRate,
+    required this.multiHourlyRate,
+    required this.onSetMode,
+    required this.onSetDuration,
+    required this.onSetOpenTime,
+    required this.onSetAmount,
+    required this.onStart,
+    this.onPause,
+    this.onResume,
+    this.onOrder,
+    this.onCheckout,
+    this.onSwitchMode,
+    this.onExtendCustom,
+    required this.onWake,
+    required this.onSleep,
+  });
+
+  final DeviceWithType device;
+  final SessionBoardEntry? session;
+  final DeviceUiModel model;
+  final DateTime? endedAt;
+  final double ordersTotal;
+  final int? selectedMinutes;
+  final double? selectedAmount;
+  final String selectedMode;
+  final double hourlyRate;
+  final double multiHourlyRate;
+  final ValueChanged<String> onSetMode;
+  final ValueChanged<int> onSetDuration;
+  final ValueChanged<bool> onSetOpenTime;
+  final ValueChanged<double?> onSetAmount;
+  final VoidCallback onStart;
+  final VoidCallback? onPause;
+  final VoidCallback? onResume;
+  final VoidCallback? onOrder;
+  final VoidCallback? onCheckout;
+  final VoidCallback? onSwitchMode;
+  final VoidCallback? onExtendCustom;
+  final VoidCallback onWake;
+  final VoidCallback onSleep;
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Container(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          decoration: BoxDecoration(
+            color: AppColors.bgElevated,
+            borderRadius: AppRadius.largeR,
+            border: Border.all(color: AppColors.glassBorderPurple),
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.sports_esports_rounded,
+                        color: AppColors.accentPrimary, size: 22),
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(model.name,
+                          style: AppTypography.sectionTitle),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.close_rounded,
+                          color: AppColors.textSecondary),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                _infoRow('الحالة', model.status.labelAr()),
+                if (model.customerName != null)
+                  _infoRow('العميل', model.customerName!),
+                if (model.elapsed != null)
+                  _infoRow('الوقت المنقضي', model.elapsed!),
+                if (model.remaining != null)
+                  _infoRow('الوقت المتبقي', model.remaining!),
+                if (model.timeCost != null)
+                  _infoRow('تحصيل الوقت', model.timeCost!),
+                if (ordersTotal > 0)
+                  _infoRow('تحصيل الطلبات',
+                      'EGP ${ordersTotal.toStringAsFixed(2)}'),
+                const SizedBox(height: AppSpacing.md),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _screenButton(
+                        label: 'فتح الشاشة',
+                        icon: Icons.tv_rounded,
+                        onTap: onWake,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _screenButton(
+                        label: 'قفل/إطفاء الشاشة',
+                        icon: Icons.tv_off_rounded,
+                        onTap: onSleep,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Divider(color: AppColors.glassBorder, height: 1),
+                const SizedBox(height: AppSpacing.md),
+                DeviceCard(
+                  compact: false,
+                  device: model,
+                  queuedSince: endedAt,
+                  selectedMinutes: selectedMinutes,
+                  selectedAmount: selectedAmount,
+                  selectedMode: selectedMode,
+                  hourlyRate: hourlyRate,
+                  multiHourlyRate: multiHourlyRate,
+                  onSelectMode: onSetMode,
+                  onSelectDuration: onSetDuration,
+                  onSelectOpenTime: onSetOpenTime,
+                  onAmountChanged: onSetAmount,
+                  onStart: onStart,
+                  onPause: onPause,
+                  onResume: onResume,
+                  onOrder: onOrder,
+                  onCheckout: onCheckout,
+                  onSwitchMode: onSwitchMode,
+                  onExtend: onExtendCustom,
+                  onExtendCustom: onExtendCustom,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(label,
+                style: const TextStyle(
+                    fontSize: 12, color: AppColors.textTertiary)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _screenButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: AppRadius.smallR,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+        decoration: BoxDecoration(
+          color: AppColors.glassFill,
+          borderRadius: AppRadius.smallR,
+          border: Border.all(color: AppColors.glassBorder),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 18, color: AppColors.accentPrimary),
+            const SizedBox(height: 4),
+            Text(label,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    fontSize: 11, color: AppColors.textSecondary)),
           ],
         ),
       ),

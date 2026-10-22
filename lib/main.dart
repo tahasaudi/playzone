@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
@@ -26,6 +27,11 @@ void main() async {
   // Opens the window channel the app uses for F11 full-screen toggling
   // (the shortcut itself lives in AppShell).
   await windowManager.ensureInitialized();
+  // Phone builds stay portrait; on the till this is a no-op.
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
   runApp(const ProviderScope(child: PlayZoneApp()));
 }
 

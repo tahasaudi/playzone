@@ -6,6 +6,7 @@ import '../../core/database/app_database.dart';
 import '../../core/database/daos/device_dao.dart';
 import '../../core/database/daos/session_dao.dart';
 import '../../core/database/database_provider.dart';
+import '../../core/sync/sync_config.dart';
 import '../../core/tv/tv_mac_index.dart';
 import '../../core/tv/tv_power_service.dart';
 import '../../core/tv/tv_display_service.dart';
@@ -387,8 +388,11 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
             (name2 == null || name2.trim().isEmpty) ? null : name2.trim(),
         extras: extras,
       );
-    } else {
+    } else if (SyncRuntime.role != SyncRole.client) {
       // First run: remember the detected TV so the push starts on its own.
+      // A phone deliberately does nothing here — it would write its OWN
+      // address as the TV's and, on the next sync, hand the till a screen
+      // that lives in a pocket.
       setIp(state.ip);
       setEnabled(true);
     }

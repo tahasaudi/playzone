@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../window/window_state.dart';
+import '../sync/sync_config.dart';
 import 'hard_lock.dart';
 import 'tv_power_service.dart';
 import 'tv_screen_report.dart';
@@ -183,8 +184,10 @@ class TvDisplayService {
   ///
   /// Every command path checks this before doing anything, so that turning it
   /// off means the whole feature is inert rather than merely hidden from the
-  /// settings page.
-  static bool get tvAllowed => _allowedByEnvironment;
+  /// settings page. Two independent locks must both be open: the environment
+  /// switch that keeps a development machine off the café's walls, and the
+  /// in-app wall-network setting (which also keeps a phone mirror from pushing).
+  static bool get tvAllowed => _allowedByEnvironment && kWallPushAllowed;
 
   /// A snapshot of every screen, judged and described in plain Arabic.
   ///
@@ -1135,7 +1138,7 @@ class TvDisplayService {
 
   /// A single SOAP push, for callers that manage their own timing.
   Future<bool> pushOnceNow() async {
-    if (kHardLockWallNetwork) return false;
+    if (!tvAllowed) return false;
     return _pushOnce(_currentTvIp);
   }
 

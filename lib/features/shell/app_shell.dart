@@ -50,6 +50,8 @@ import '../../core/tv/tv_power_service.dart';
 import '../../core/tv/tv_screen_report.dart';
 import '../../core/tv/tv_ssap_service.dart';
 import '../../core/ir/ir_box_repository.dart';
+import '../../core/sync/remote_session_hook.dart';
+import '../../core/sync/sync_service.dart';
 import '../../data/repositories/device_repository.dart';
 import '../../data/repositories/session_repository.dart';
 import 'sidebar.dart';
@@ -88,6 +90,27 @@ class _AppShellState extends ConsumerState<AppShell> {
     _macTimer?.cancel();
     _shortcutsFocusNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_bootSync());
+  }
+
+  /// Reads what this machine is (till, mirror, or on its own) and starts
+  /// the matching side of the LAN sync.
+  ///
+  /// The rebuild afterwards is the point: the wall-network switch and the
+  /// role both land in plain statics, and the block below that decides
+  /// whether the screens are driven reads them on every build. Without a
+  /// rebuild the first build of the launch would keep the values they had
+  /// before the settings were read — which is "blocked" and "no sync" — and
+  /// nothing would start until somebody changed route.
+  Future<void> _bootSync() async {
+    final db = ref.read(appDatabaseProvider);
+    await SyncService.instance.start(db);
+    if (mounted) setState(() {});
   }
 
   void _openDrawer() => _scaffoldKey.currentState?.openDrawer();
@@ -406,6 +429,20 @@ class _AppShellState extends ConsumerState<AppShell> {
     TvDisplayService.configSummary = () => tvConfig.enabled
         ? 'on | ${tvConfig.slots.map((s) => '${s.ip.trim()}->${s.deviceId ?? "UNBOUND"}').join(" | ")}'
         : 'off';
+
+    // A session the phone opened wakes the wall exactly like a start at the
+    // till: hand the machine's screen back to its console (HDMI-CEC) and
+    // fire the IR "power" for a screen on a box. Wired here because this is
+    // the only layer that knows both the TV slots and the IR links; the
+    // sync server calls it the moment the session arrives, so the screen
+    // comes on in the same request instead of a cycle later.
+    RemoteSessionHook.onRemoteSession = (deviceId) async {
+      final ip = ref.read(tvConfigProvider).screenFor(deviceId);
+      if (ip != null) TvPowerService.instance.turnOn(ip);
+      final box =
+          ref.read(irBoxRepositoryProvider).boxFor(deviceId, ref.read(irBoxLinksProvider));
+      if (box != null) await box.send('power');
+    };
 
     // Tell the TV layer who each screen is, by name, and whether the machine
     // behind it is busy. That is what lets a sleeping panel be reported as the
