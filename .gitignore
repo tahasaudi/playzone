@@ -58,3 +58,10 @@ tool/*_local.dart
 *.key
 webos_key*.txt
 
+
+# --- vision_service: local camera config, secrets and evidence -------------
+vision_service/config.yaml
+vision_service/.env
+vision_service/.venv/
+vision_service/logs/
+vision_service/*.pt
