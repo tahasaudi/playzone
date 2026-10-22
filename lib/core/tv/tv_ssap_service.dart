@@ -209,11 +209,18 @@ class TvSsapService {
     final session = await _SsapSession.open(ip, clientKey: clientKey);
     final outcome = await session.register(wait: knownTimeout);
     if (outcome.paired) return session;
-    // A key the television no longer knows is worse than no key at all: it
-    // would ask for permission again and again. So it is put away, and the
-    // next press of the button starts the asking over.
     await session.close();
-    await forget(ip);
+    // A key the television no longer knows is worse than no key at all: it
+    // would ask for permission again and again. So it is put away — but only
+    // when the screen actually said so.
+    //
+    // Silence is not a refusal. A screen in standby, a screen whose controller
+    // is busy coming up, a screen on the far side of a bad cable — none of
+    // them answer, and none of them have forgotten the key. Forgetting on
+    // silence is what loses a shop's pairing overnight and makes the staff go
+    // round five screens with a remote in the morning, so silence keeps the
+    // key and the next press tries again.
+    if (outcome.needsPin) await forget(ip);
     return null;
   }
 
@@ -353,6 +360,172 @@ class TvSsapService {
     }
   }
 
+  /// The service that last answered a screen's own screen command.
+  ///
+  /// Two names exist for the same thing, one per firmware generation, and
+  /// asking the wrong one first costs a round trip and a 404. Once a screen
+  /// has answered on one of them, that is the one it is asked on.
+  final Map<String, String> _screenService = {};
+
+  static const _screenServices = [
+    'ssap://com.webos.service.tvpower/power',
+    'ssap://com.webos.service.tv.power',
+  ];
+
+  /// Puts the panel itself to sleep, and wakes it again, without switching the
+  /// television off.
+  ///
+  /// This is LG's own "Screen Off": the sound keeps playing, the console keeps
+  /// its handshake, and the picture comes back in the same blink it went away
+  /// in. It is one sentence on a socket that is already open, answered in
+  /// milliseconds — nothing like handing the screen a black photograph over
+  /// DLNA, which makes the television leave what it was showing, find our
+  /// picture, and fetch it.
+  ///
+  /// Two service names exist and which one answers depends on the firmware:
+  /// `tvpower/power/…` on webOS 5 and later, `tv.power/…` on 4.x. Both are
+  /// tried, and whichever answers is the one that worked.
+  ///
+  /// Returns whether the screen did it. A screen that has not been let in says
+  /// nothing at all, and the caller falls back to the photograph.
+  Future<bool> setScreenOn(String ip, bool on) async {
+    final address = ip.trim();
+    if (keyFor(address) == null) {
+      _note(address, null, 'not let in');
+      return false;
+    }
+    final action = on ? 'turnOnScreen' : 'turnOffScreen';
+    final known = _screenService[address];
+    final order = [
+      if (known != null) known,
+      ..._screenServices.where((service) => service != known),
+    ];
+    for (final service in order) {
+      final short = service.contains('tvpower') ? 'tvpower' : 'tv.power';
+      // Asked twice, because these sockets sometimes answer nothing at all on
+      // the first try — the same silence that makes a volume command look
+      // refused. A wrong service, on the other hand, answers with an empty
+      // payload, and asking it again would only waste a round trip. On an
+      // open socket a second ask costs a few milliseconds; the photograph it
+      // saves us from costs seconds.
+      for (var attempt = 0; attempt < 2; attempt++) {
+        Map<String, dynamic>? answer;
+        try {
+          answer = await _ask(
+              address, '$service/$action', const {'standbyMode': 'active'});
+        } catch (error) {
+          // A socket that will not even open is not a service that does not
+          // exist: no other name for the command would reach the screen
+          // either, and trying it would spend another turn of the wheel on
+          // the same silence.
+          _note(address, null, 'screen $short: ${_reason(error)}');
+          return false;
+        }
+        if (answer == null) {
+          // Nothing at all came back, so the screen is asleep or gone. That is
+          // not this service's fault and not the other name's job: the button
+          // takes the other road now instead of waiting twice.
+          _note(address, null, 'screen $short: no answer');
+          return false;
+        }
+          final code = '${answer['errorCode'] ?? ''}';
+          final state = '${answer['state'] ?? ''}';
+          // The state in the answer is the truth, whatever the answer says
+          // about having done the work.
+          //
+          // A screen that is asked to go dark and answers
+          // `{"returnValue":false,"state":"Screen Off","errorCode":"-101",
+          // "errorText":"The current state must be 'Active'"}` is not
+          // refusing: it is already dark. LG calls that a failed state
+          // transition because the transition was never needed; the cashier
+          // calls it the screen going dark, which is what was asked for. It is
+          // read as the screen being dark and not as a refusal — refusing it
+          // sent the whole command down the slow road to arrive at the same
+          // darkness seconds later.
+          //
+          // Coming back on is the one answer this firmware gets wrong in the
+          // other direction: the first wake after a sleep reports "unknown
+          // error" and turns the screen on anyway, so that is believed too.
+          // "Active" is deliberately NOT taken as proof of being awake, because
+          // an older service name reports it even while the panel is dark — a
+          // wall reported as lit while it is black is worse than one slow
+          // command.
+          final ok = answer['returnValue'] == true ||
+              (!on && state == 'Screen Off') ||
+              (on && code == 'POWER_ERROR_0005');
+          if (ok) {
+            _screenService[address] = service;
+            _note(address, null, on ? 'screen: on' : 'screen: off');
+            // The television drops the control socket when its panel changes
+            // state, so the next press would pay for the whole secure
+            // handshake again — measured at up to two seconds, which is
+            // exactly the press that feels broken. It is reopened now, while
+            // nobody is waiting for it.
+            unawaited(_rewarm(address));
+            return true;
+          }
+          final why = code.isNotEmpty
+              ? code
+              : (answer.isEmpty ? 'empty' : 'no returnValue');
+          _note(address, null, 'screen $short: $why');
+          // An empty payload is this firmware saying "no such service", so
+          // the other name is the answer — not another go at this one.
+          if (answer.isEmpty) break;
+      }
+    }
+    return false;
+  }
+
+  /// Opens every paired screen's control socket before anyone presses
+  /// anything.
+  ///
+  /// The first command on a cold socket pays for the secure handshake, and on
+  /// this shop's walls that has been measured at close to two seconds on a
+  /// television that was busy with something else. Two seconds of a button
+  /// doing nothing is the difference between a program that works and a
+  /// program the staff distrust. Opening the sockets in the background at
+  /// startup moves that cost to a moment when nobody is waiting for it.
+  ///
+  /// One at a time, and slowly: five handshakes at once on a shop network is
+  /// exactly the crowd that makes a handshake take two seconds.
+  Future<void> warmUp() async {
+    for (final address in _keys.keys.toList()) {
+      try {
+        await _sessionFor(address);
+      } catch (_) {
+        // A screen that is off has no socket to warm. Its own button deals
+        // with that when it is pressed.
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+  }
+
+  /// Opens a screen's socket again a moment after its panel changed state.
+  ///
+  /// The socket is only touched when it is actually shut, and it is left alone
+  /// long enough for the panel to finish moving — a press that arrives in the
+  /// meantime finds the socket it already had.
+  Future<void> _rewarm(String ip) async {
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    final open = _sessions[ip.trim()];
+    if (open != null && open.isOpen) return;
+    try {
+      await _sessionFor(ip);
+    } catch (_) {
+      // The panel may still be coming up. The next press will try again.
+    }
+  }
+
+  /// Sends one command and hands back whatever the screen says, word for
+  /// word.
+  ///
+  /// Meant for the tools and for diagnosing a screen whose answers do not fit
+  /// the named methods. The program's own paths keep their own methods, so
+  /// that what a button does is written down in one place.
+  Future<Map<String, dynamic>?> askRaw(String ip, String uri,
+          [Map<String, dynamic>? body]) =>
+      _ask(ip, uri, body);
+
   /// The level last heard from a screen, if it was heard recently.
   int? _freshLevel(String ip) {
     final level = _levels[ip.trim()];
@@ -484,7 +657,11 @@ class _SsapSession {
     try {
       socket = await WebSocket.connect('wss://$ip:${TvSsapService.port}',
               customClient: client)
-          .timeout(const Duration(seconds: 10));
+          // A handshake on the shop's own network is a fraction of a second.
+          // Ten seconds was a wall of blank waiting on a screen whose
+          // controller is off — long enough to look like the program had
+          // died, and long enough to be the whole of the cashier's patience.
+          .timeout(const Duration(seconds: 3));
     } catch (_) {
       client.close(force: true);
       rethrow;

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'hard_lock.dart';
 import 'tv_display_service.dart';
 import 'tv_mac_index.dart';
+import 'tv_ssap_service.dart';
 
 /// Controls the LG TV's wall screen, so a session can switch it on and off.
 ///
@@ -355,6 +356,12 @@ class TvPowerService {
     // the whole burst before asking the panel anything was a second and a
     // half of the button doing nothing at all.
     unawaited(_sendMagicPacket());
+    // LG's own "Screen On" goes out alongside: a panel that was put to sleep
+    // with the screen command comes back with one sentence, and the picture
+    // the customer was watching is already there. The release below still
+    // runs, because that is what hands the wall back to its console when a
+    // photograph was what darkened it.
+    final screenOn = TvSsapService.instance.setScreenOn(tvIp, true);
     // A screen whose endpoint is not known yet cannot be told anything, and
     // every other path has already started the looking. Waiting a bounded
     // moment for that is what turns a command that could not be sent at all
@@ -397,6 +404,12 @@ class TvPowerService {
         return;
       }
       if (tv.refusesDlna(tvIp)) break;
+    }
+    // The release never took, but the panel itself may have been woken — and
+    // a wall the customer can see is the thing that was asked for.
+    if (await screenOn) {
+      _done(tvIp, 'الشاشة رجعت', watch);
+      return;
     }
     _done(tvIp, 'الشاشة اتفتحت', watch);
   }
@@ -469,12 +482,29 @@ class TvPowerService {
   Future<void> _blankOut(String tvIp) async {
     final tv = TvDisplayService.instance;
     final watch = Stopwatch()..start();
+    final screenOff = TvSsapService.instance.setScreenOn(tvIp, false);
     // The old NetCast ports are closed on this firmware, and waiting for them
     // to time out was a whole second of nothing before the screen was even
     // asked to go dark. It is tried alongside the picture now, not in front
     // of it — and if the picture lands first, the answer is already in.
     final netcast = _netcastPower(2);
-    for (var i = 0; i < 3; i++) {
+    // LG's own "Screen Off": the panel goes dark in a blink, the sound keeps
+    // playing, and the console keeps its handshake. Same darkness as the
+    // photograph, reached by one sentence on an open socket instead of a
+    // source change and a download.
+    if (await screenOff) {
+      // Whatever wakes this panel next must find the dark already waiting for
+      // it, so the picture it would fetch is the black one and not the old
+      // board.
+      await tv.blank(tvIp: tvIp);
+      _blanked(tvIp, 'الشاشة اتغمّضت', watch);
+      return;
+    }
+    // Two rounds, not three: one `pushBlack` already tries the picture three
+    // times over. A screen that has not taken it by the second round is a
+    // screen that needs the remote, and making the cashier watch a fourth and
+    // fifth attempt does not change that.
+    for (var i = 0; i < 2; i++) {
       if (await tv.pushBlack(tvIp)) {
         _blanked(tvIp, 'الشاشة اتغمّضت', watch);
         return;

@@ -40,6 +40,7 @@ import '../search/global_search_dialog.dart';
 import '../tv/tv_broadcaster.dart';
 import '../tv/tv_mode_screen.dart';
 import '../tv/tv_screens_page.dart';
+import '../../core/database/database_provider.dart';
 import '../../core/database/daos/device_dao.dart';
 import '../../core/database/daos/session_dao.dart';
 
@@ -47,6 +48,7 @@ import '../../core/window/window_state.dart';
 import '../../core/tv/tv_display_service.dart';
 import '../../core/tv/tv_power_service.dart';
 import '../../core/tv/tv_screen_report.dart';
+import '../../core/tv/tv_ssap_service.dart';
 import '../../core/ir/ir_box_repository.dart';
 import '../../data/repositories/device_repository.dart';
 import '../../data/repositories/session_repository.dart';
@@ -448,6 +450,20 @@ class _AppShellState extends ConsumerState<AppShell> {
       // question like "what was the program doing?" has an answer even while
       // the picture server is down — which is exactly when it is asked.
       tv.startStatusFile();
+      // The screens' control keys, read once at startup instead of only when
+      // the screens panel is opened.
+      //
+      // Every direct command to a screen — its volume, and its own "screen
+      // off" — goes down that socket, and a socket without a key is a socket
+      // the television ignores. Reading them here is what lets a wall go dark
+      // the moment a session's minutes run out, with nobody having opened the
+      // panel first: a screen that is only darkable by hand is a screen that
+      // stays lit all night.
+      unawaited(TvSsapService.instance
+          .load(ref.read(appDatabaseProvider).settingsDao)
+          // And their sockets opened behind that, so the first press of the
+          // evening is answered like the hundredth.
+          .then((_) => TvSsapService.instance.warmUp()));
       // Cheap and idempotent: only binds the port when the server is down.
       // A restart can leave the old copy's sockets behind for a moment, and
       // until they clear the port cannot be taken, so the opening is tried

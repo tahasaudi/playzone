@@ -461,13 +461,38 @@ class TvDisplayService {
           return;
         }
         final watch = Stopwatch()..start();
-        final ok = request.uri.path == '/dim'
-            ? await pushBlack(want)
-            : await releaseToInput(want, force: true);
+        var route = '';
+        bool ok;
+        if (request.uri.path == '/dim') {
+          // The same two steps the cashier's button takes, so the number
+          // being measured is the number they feel: the screen's own off
+          // command first, the photograph as the fallback.
+          ok = await TvSsapService.instance.setScreenOn(want, false);
+          route = ok ? 'screen' : 'photo';
+          if (ok) {
+            await blank(tvIp: want);
+          } else {
+            ok = await pushBlack(want);
+          }
+        } else {
+          // And the same two halves for waking one: the screen's own on
+          // command, then the release that hands the panel back to its
+          // console. Measuring only the release was measuring half a button —
+          // and it left the screens dark, so the next dim found them already
+          // off and looked like a refusal.
+          final lit = await TvSsapService.instance.setScreenOn(want, true);
+          route = lit ? 'screen' : 'release';
+          final released = await releaseToInput(want, force: true);
+          // The button is "is the picture back", and either half answers it:
+          // a panel that was put to sleep by its own screen command is already
+          // showing its console again, and the release has nothing to undo.
+          ok = lit || released;
+        }
         watch.stop();
         res.statusCode = HttpStatus.ok;
         res.write('screen=$want action=${request.uri.path.substring(1)} '
-            'ok=$ok tookMs=${watch.elapsedMilliseconds}\n'
+            'ok=$ok tookMs=${watch.elapsedMilliseconds}'
+            '${route.isEmpty ? '' : ' route=$route'}\n'
             'lastResult=${_log(want).lastResult ?? "none"}\n'
             'controlUrl=${hasControlUrlFor(want) ? _controlCache[want]?.$1 ?? "none" : "none"}\n');
         await res.close();
@@ -809,7 +834,7 @@ class TvDisplayService {
     // which is the whole difference between a button that feels instant and
     // one that feels broken.
     var ok = await _soap(hit.$1, 'Stop', '<InstanceID>0</InstanceID>',
-        lenient: true);
+        lenient: true, replyMs: 1200);
     if (!ok) {
       // The panel moved its renderer to another port, or it was restarted and
       // came back somewhere else. The cached address is dead, so wait for the
@@ -820,7 +845,7 @@ class TvDisplayService {
           await _refreshControlUrl(tvIp, startLookup: false, timeoutMs: 1500);
       if (fresh != null) {
         ok = await _soap(fresh, 'Stop', '<InstanceID>0</InstanceID>',
-            lenient: true);
+            lenient: true, replyMs: 1200);
       }
     }
     watch.stop();
@@ -1810,14 +1835,31 @@ class TvDisplayService {
       // there to let the set settle. `_awaitFetch` below is what actually
       // decides whether the picture landed, so the pause bought nothing an
       // already-guaranteed ordering did not.
-      final setFuture = _soap(
-          ctl,
-          'SetAVTransportURI',
-          '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
-              '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
-      final playFuture = _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
-      await Future.wait([setFuture, playFuture]);
-      if (await _awaitFetch(tvIp, before, 900)) {
+      // Three tries, each more insistent than the last, and none of them
+      // waited on.
+      //
+      // The panel's reply is not the proof that the picture landed — the panel
+      // coming back for the picture is. So each try writes the command, gives
+      // the reply a short leash, and spends its time watching for the fetch
+      // instead. Waiting on a reply that may never come was the five seconds
+      // the cashier spent looking at a screen that still showed the game.
+      bool landed = false;
+      for (var attempt = 0; attempt < 3 && !landed; attempt++) {
+        // A stop is only sent on the last try, where the screen is genuinely
+        // holding on to something else. Sending it earlier is sending the one
+        // command that hands the wall back to its console — the opposite of
+        // darkening it.
+        if (attempt == 2) {
+          await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>', replyMs: 600);
+          await _settle(ctl, tvIp, 500);
+        }
+        final sending = _sendStill(ctl, uri, meta);
+        landed = await _awaitFetch(tvIp, before, attempt == 1 ? 700 : 900);
+        // Let the command finish before the next try, so one panel is not
+        // handed three pictures at the same moment.
+        await sending;
+      }
+      if (landed) {
         _lastPushAt = DateTime.now();
         markReached(tvIp);
         final log = _log(tvIp);
@@ -1827,34 +1869,6 @@ class TvDisplayService {
         log.lastCommandAt = DateTime.now();
         log.lastCommand = 'عرض الصورة';
         log.lastResult = 'الصورة اتبعتت';
-        return true;
-      }
-
-      // Nothing arrived, so this is a real failure and a second try is owed.
-      // The retry is the only place a `Stop` is sent, because that is the one
-      // situation where the screen is genuinely holding on to something else
-      // and needs to be let go of before it can be given something else. It is
-      // also the only situation where the stop is worth its risk, because by
-      // now the first attempt has already failed — so the worst the stop can do
-      // is leave the screen as it already found it.
-      await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-      await _settle(ctl, tvIp, 1200);
-      await _soap(
-          ctl,
-          'SetAVTransportURI',
-          '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
-              '<CurrentURIMetaData>$meta</CurrentURIMetaData>');
-      await _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
-      if (await _awaitFetch(tvIp, before, 900)) {
-        _lastPushAt = DateTime.now();
-        markReached(tvIp);
-        final log = _log(tvIp);
-        log.refusedAt = null;
-        _dlnaRefused.remove(tvIp);
-        log.lastOk = true;
-        log.lastCommandAt = DateTime.now();
-        log.lastCommand = 'عرض الصورة';
-        log.lastResult = 'الصورة اتبعتت (محاولة تانية)';
         return true;
       }
 
@@ -1868,6 +1882,24 @@ class TvDisplayService {
     } finally {
       _pushing.remove(tvIp);
     }
+  }
+
+  /// Hands a screen one still picture, in order, without waiting on replies.
+  ///
+  /// `Set` points the renderer at the picture and `Play` is what puts it on
+  /// the wall, so the two are chained rather than raced: a `Play` that arrives
+  /// first plays whatever the screen already had. Neither reply is waited on
+  /// beyond its leash — these panels answer 500 while working perfectly well,
+  /// and the fetch tells the truth either way.
+  Future<void> _sendStill(String ctl, String uri, String meta) async {
+    await _soap(
+        ctl,
+        'SetAVTransportURI',
+        '<InstanceID>0</InstanceID><CurrentURI>$uri</CurrentURI>'
+            '<CurrentURIMetaData>$meta</CurrentURIMetaData>',
+        replyMs: 600);
+    await _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>',
+        replyMs: 600);
   }
 
   /// Waits for a part-way renderer to come to rest before we hand it a new
@@ -1895,7 +1927,11 @@ class TvDisplayService {
     // never coming would add a dead pause to every single push.
     var askedOnce = false;
     for (var waited = 0; waited < budgetMs; waited += 300) {
-      final (status, payload, _) = await _soapRaw(ctl, 'GetTransportInfo', '');
+      // Asked with a short leash: the answer is a convenience, and a panel
+      // that will not answer must not hold up the picture behind five seconds
+      // of silence.
+      final (status, payload, _) =
+          await _soapRaw(ctl, 'GetTransportInfo', '', replyMs: 400);
       if (status != null && status < 400) {
         askedOnce = true;
         final state =
@@ -2477,9 +2513,19 @@ class TvDisplayService {
   /// [reached] separates "we got no answer" from "we could not even connect".
   /// The two need opposite handling: a silent panel is usually asleep, while
   /// a refused connection means the address itself is suspect.
+  /// [replyMs] is how long the panel is given to answer.
+  ///
+  /// A television holds a SOAP call open for as long as it likes and
+  /// sometimes never answers at all. Five seconds of that is five seconds of a
+  /// screen still showing the game on a command the cashier is watching, so
+  /// the caller decides how long the answer is worth waiting for. A late
+  /// answer changes nothing: the command was delivered the moment the request
+  /// was written, and what the panel actually did is read from the picture it
+  /// comes back for, not from what it says.
   Future<(int?, String, bool)> _soapRaw(
       String controlUrl, String action, String body,
-      {String service = 'urn:schemas-upnp-org:service:AVTransport:1'}) async {
+      {String service = 'urn:schemas-upnp-org:service:AVTransport:1',
+      int replyMs = 5000}) async {
     final xml = _soapEnvelope.replaceAll('%BODY%',
         '<u:$action xmlns:u="$service"><InstanceID>0</InstanceID>$body</u:$action>');
     try {
@@ -2488,7 +2534,7 @@ class TvDisplayService {
           .set(HttpHeaders.contentTypeHeader, 'text/xml; charset="utf-8"');
       req.headers.set('SOAPACTION', '"$service#$action"');
       req.add(utf8.encode(xml));
-      final res = await req.close().timeout(const Duration(seconds: 5));
+      final res = await req.close().timeout(Duration(milliseconds: replyMs));
       // Read the body even on failure: a bare "HTTP 500" says nothing, while
       // the UPnP fault inside says exactly what went wrong. 716 means the
       // panel could not fetch our image (a network problem on this PC);
@@ -2506,9 +2552,10 @@ class TvDisplayService {
 
   Future<bool> _soap(String controlUrl, String action, String body,
       {String service = 'urn:schemas-upnp-org:service:AVTransport:1',
-      bool lenient = false}) async {
+      bool lenient = false,
+      int replyMs = 5000}) async {
     final (status, payload, reached) =
-        await _soapRaw(controlUrl, action, body, service: service);
+        await _soapRaw(controlUrl, action, body, service: service, replyMs: replyMs);
     final host = Uri.tryParse(controlUrl)?.host ?? '';
     if (reached && host.isNotEmpty) markReached(host);
     if (status == null) {
