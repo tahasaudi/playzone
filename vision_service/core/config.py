@@ -30,6 +30,9 @@ DEFAULTS = {
         "imgsz": 480,
         "labels": [],
     },
+    # كاميرات المحل اللي بتتعرض في شبكة واحدة (زرار «كاميرات المحل»).
+    # كل كاميرا: name + source (رابط RTSP أو رقم كاميرا USB) + roi اختياري.
+    "shop": {"cameras": []},
     # ربط صنف الموديل (bottle / cup / ...) بأسماء المنتجات في PlayZone.
     "products": {},
     "pos": {
@@ -111,8 +114,22 @@ def _camera_source(value):
     return text
 
 
+def load_env(base_dir: str | os.PathLike | None = None) -> None:
+    """يقرا ``.env`` (بيانات الكاميرا/تليجرام) قبل توسيع المتغيرات."""
+    env_file = Path(base_dir or service_root()) / ".env"
+    if not env_file.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(env_file, override=False)
+
+
 def load_config(path: str | None = None) -> dict:
     root = service_root()
+    # لازم قبل _expand عشان ${CAM_USER} و ${CAM_PASS} يتلاقوا.
+    load_env(root)
     config_path = Path(path) if path else None
 
     if config_path is None:
@@ -145,6 +162,28 @@ def load_config(path: str | None = None) -> dict:
             for point in camera["roi"]
             if isinstance(point, (list, tuple)) and len(point) >= 2
         ]
+
+    cameras = []
+    for index, entry in enumerate(cfg.get("shop", {}).get("cameras") or [], start=1):
+        if not isinstance(entry, dict):
+            continue
+        source = _camera_source(entry.get("source"))
+        if source in ("", None):
+            continue
+        roi = entry.get("roi") or []
+        cameras.append(
+            {
+                "name": str(entry.get("name") or f"Camera {index}").strip(),
+                "source": source,
+                "roi": [
+                    [int(point[0]), int(point[1])]
+                    for point in roi
+                    if isinstance(point, (list, tuple)) and len(point) >= 2
+                ],
+                "reconnect_seconds": float(entry.get("reconnect_seconds") or 5.0),
+            }
+        )
+    cfg["shop"]["cameras"] = cameras
 
     pos = cfg["pos"]
     pos["mode"] = str(pos.get("mode") or "local").strip().lower()

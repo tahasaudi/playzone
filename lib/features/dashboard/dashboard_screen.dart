@@ -21,6 +21,7 @@ import '../../data/repositories/package_repository.dart';
 import '../../core/utils/esc_handler_provider.dart';
 import '../../core/ir/ir_box_repository.dart';
 import '../../core/tv/tv_power_service.dart';
+import '../../core/vision/vision_launcher.dart';
 import '../tv/tv_mode_screen.dart';
 import '../devices/device_card.dart';
 import '../devices/session_details_panel.dart';
@@ -169,9 +170,75 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         Positioned(
           left: AppSpacing.md,
           bottom: AppSpacing.md,
-          child: _searchButton(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _shopCamerasButton(),
+              const SizedBox(height: AppSpacing.sm),
+              _searchButton(),
+            ],
+          ),
         ),
       ],
+    );
+  }
+
+  /// يفتح نافذة كاميرات المحل (كل الكاميرات + الموديل شغال عليها).
+  ///
+  /// النافذة شغل بايثون منفصل، فالبرنامج بيفضل شغال زي ما هو، ولو حصل خطأ
+  /// (مجلد الخدمة أو Python مش موجود) بتظهر رسالة بالمشكلة نفسها.
+  Future<void> _openShopCameras() async {
+    final result = await VisionLauncher.openShopCameras();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(result.message),
+        backgroundColor:
+            result.ok ? AppColors.glassFillStrong : AppColors.danger,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Widget _shopCamerasButton() {
+    return Tooltip(
+      message: 'كاميرات المحل',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: _openShopCameras,
+          child: Ink(
+            height: 44,
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [
+                  AppColors.accentGradientStart,
+                  AppColors.accentGradientEnd,
+                ],
+              ),
+              borderRadius: BorderRadius.circular(22),
+              boxShadow: AppShadows.card,
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.videocam_rounded, size: 20, color: Colors.white),
+                SizedBox(width: AppSpacing.sm),
+                Text(
+                  'كاميرات المحل',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 

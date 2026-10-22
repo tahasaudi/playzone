@@ -62,6 +62,37 @@ python main.py --video test.mp4 --once 200   # تجربة على فيديو
 python main.py --verbose
 ```
 
+## كاميرات المحل (زرار في البرنامج)
+
+زرار **«كاميرات المحل»** في الشاشة الرئيسية بيفتح نافذة فيها كل الكاميرات
+المعرّفة في `shop.cameras`، والموديل شغال على كل واحدة، والكاميرا اللي مش
+واصلة بتظهر `OFFLINE` وتعيد المحاولة لوحدها.
+
+1. حط بيانات الدخول في `.env` (مش في `config.yaml`):
+
+   ```
+   CAM_USER=admin
+   CAM_PASS=......
+   ```
+
+2. عرّف الكاميرات:
+
+   ```yaml
+   shop:
+     cameras:
+       - name: "Camera 1"
+         source: "rtsp://${CAM_USER}:${CAM_PASS}@192.168.1.2:554/Streaming/Channels/101"
+   ```
+
+3. من غير البرنامج:
+
+   ```powershell
+   python demo.py --shop
+   ```
+
+مسار Hikvision: `/Streaming/Channels/101` للقناة 1 و `/201` للقناة 2.
+مسار Dahua: `/cam/realmonitor?channel=1&subtype=0`.
+
 ## الملفات الناتجة
 
 - `logs/vision.log` — كل حاجة حصلت

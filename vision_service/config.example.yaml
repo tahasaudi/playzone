@@ -36,6 +36,23 @@ model:
     - pizza
     - hot dog
 
+# كاميرات المحل — زرار «كاميرات المحل» في البرنامج بيفتح شبكة فيها كل كاميرا
+# والموديل شغال عليها. حط اليوزر والباسورد في .env (مش هنا):
+#   CAM_USER=admin
+#   CAM_PASS=...
+# ولو الكاميرا بتطلب باسورد في الرابط، ${CAM_USER} و ${CAM_PASS} بيتستبدلوا
+# تلقائيًا. مسار Hikvision: /Streaming/Channels/101 (قناة 1)، /201 (قناة 2)...
+# مسار Dahua: /cam/realmonitor?channel=1&subtype=0
+shop:
+  cameras:
+    - name: "Camera 1"
+      source: "rtsp://${CAM_USER}:${CAM_PASS}@192.168.1.2:554/Streaming/Channels/101"
+    - name: "Camera 2"
+      source: "rtsp://${CAM_USER}:${CAM_PASS}@192.168.1.2:554/Streaming/Channels/201"
+    # كاميرا USB (ويب كام) كمان لو عايز تجرب من غير شبكة:
+    # - name: "Webcam"
+    #   source: "0"
+
 # ربط صنف الموديل بأسماء المنتجات الفعلية في قاعدة PlayZone.
 # لو الصنف مش موجود هنا، الخدمة بتدور على اسم الصنف نفسه (bottle/cup...).
 # ضيف/عدّل حسب منتجات الكافيه عندك.
