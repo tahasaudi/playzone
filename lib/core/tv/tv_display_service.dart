@@ -646,7 +646,7 @@ class TvDisplayService {
       // simply off must not turn into a 7,000-port sweep.
       final fresh =
           await _refreshControlUrl(tvIp, startLookup: false, timeoutMs: 1500);
-      if (fresh != null && fresh != hit.$1) {
+      if (fresh != null) {
         ok = await _soap(fresh, 'Stop', '<InstanceID>0</InstanceID>');
       }
     }
@@ -1271,7 +1271,7 @@ class TvDisplayService {
       // The panel may have moved its renderer to another port. Look for the
       // new address and stop it there, otherwise the film keeps running.
       final fresh = await _refreshControlUrl(key);
-      if (fresh != null && fresh != ctl) {
+      if (fresh != null) {
         ctl = fresh;
         stopped = await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
       }
