@@ -72,7 +72,11 @@ class _TvBroadcasterState extends ConsumerState<TvBroadcaster> {
     final signature = _boardSignature();
     if (signature == _lastSignature) return;
     try {
-      final image = await boundary.toImage(pixelRatio: 1);
+      // The board is laid out at 1280×720 and photographed at 1.5×, so the
+      // panel receives a 1920×1080 picture — the size these televisions are
+      // actually built for. Photographed at 1:1 it would arrive upscaled and
+      // soft, which is the one thing a wall of this size must not be.
+      final image = await boundary.toImage(pixelRatio: 1.5);
       final data = await image.toByteData(format: ui.ImageByteFormat.png);
       image.dispose();
       if (data == null) return;

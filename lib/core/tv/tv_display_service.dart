@@ -9,6 +9,7 @@ import '../window/window_state.dart';
 import 'hard_lock.dart';
 import 'tv_power_service.dart';
 import 'tv_screen_report.dart';
+import 'video_probe.dart';
 
 /// Pushes a still image to an LG (webOS) TV over DLNA / UPnP AVTransport.
 ///
@@ -51,6 +52,9 @@ class TvDisplayService {
   final Map<String, String> _videoUrls = {};
   final Set<String> _videoScreens = {};
   final Map<String, String> _videoContentTypes = {};
+
+  /// The shape of each playing file, read from its own header.
+  final Map<String, VideoInfo> _videoInfo = {};
 
   /// One counter **per screen**, each seeded from the clock so a restarted
   /// program never re-offers an address a panel has already cached.
@@ -633,7 +637,16 @@ class TvDisplayService {
       return false;
     }
     final watch = Stopwatch()..start();
-    final ok = await _soap(hit.$1, 'Stop', '<InstanceID>0</InstanceID>');
+    var ok = await _soap(hit.$1, 'Stop', '<InstanceID>0</InstanceID>');
+    if (!ok) {
+      // The panel moved its renderer to another port, or it was restarted and
+      // came back somewhere else. The cached address is dead, so look for the
+      // new one and try once more before telling the cashier it failed.
+      final fresh = await _refreshControlUrl(tvIp);
+      if (fresh != null && fresh != hit.$1) {
+        ok = await _soap(fresh, 'Stop', '<InstanceID>0</InstanceID>');
+      }
+    }
     watch.stop();
     if (ok) {
       _lastPushAt = DateTime.now();
@@ -735,10 +748,23 @@ class TvDisplayService {
     }
   }
 
-  /// A 1280×720 frame naming one screen, for the "عرّفني" button.
+  /// The shape the wall is drawn at, and served in.
+  ///
+  /// 1920×1080 is what these panels are built for. A 1280×720 frame upscaled
+  /// onto one of them comes out soft, and soft on a wall of this size reads as
+  /// "cheap" from across the room — so the picture is drawn at the size the
+  /// television can actually show, and the panel gets it as it is.
+  static const double boardWidth = 1920;
+  static const double boardHeight = 1080;
+
+  /// A frame naming one screen, for the "عرّفني" button.
   static Future<Uint8List> _buildIdentifyFrame(
       String name, String ip, String? mac) async {
-    const double w = 1280, h = 720;
+    const double w = boardWidth, h = boardHeight;
+    // The layout was drawn for a 1280×720 frame; the frame is now 1920×1080,
+    // so everything on it is scaled by the same factor and the text lands
+    // exactly where it used to, only sharper.
+    const double k = w / 1280;
     final recorder = ui.PictureRecorder();
     final canvas = ui.Canvas(recorder, const ui.Rect.fromLTWH(0, 0, w, h));
     // A colour no wall normally shows, so it reads as "somebody asked for
@@ -749,15 +775,15 @@ class TvDisplayService {
     void line(String text, double y, double size, ui.Color color) {
       final builder = ui.ParagraphBuilder(ui.ParagraphStyle(
         textAlign: ui.TextAlign.center,
-        fontSize: size,
+        fontSize: size * k,
         fontWeight: ui.FontWeight.w700,
       ))
         ..pushStyle(ui.TextStyle(
-            color: color, fontSize: size, fontWeight: ui.FontWeight.w700))
+            color: color, fontSize: size * k, fontWeight: ui.FontWeight.w700))
         ..addText(text);
       final paragraph = builder.build()
         ..layout(const ui.ParagraphConstraints(width: w));
-      canvas.drawParagraph(paragraph, ui.Offset(0, y));
+      canvas.drawParagraph(paragraph, ui.Offset(0, y * k));
     }
 
     line(name, 120, 82, const ui.Color(0xFFFFFFFF));
@@ -923,16 +949,17 @@ class TvDisplayService {
 
   final Set<String> _warming = {};
 
-  /// A 1280×720 black PNG, built once and reused for the whole "off" state.
+  /// A black PNG the size of the wall, built once and reused for the whole
+  /// "off" state.
   static Uint8List? _black;
 
   static Future<Uint8List> _buildBlackFrame() async {
-    const rect = ui.Rect.fromLTWH(0, 0, 1280, 720);
+    const rect = ui.Rect.fromLTWH(0, 0, boardWidth, boardHeight);
     final recorder = ui.PictureRecorder();
     ui.Canvas(recorder, rect)
         .drawRect(rect, ui.Paint()..color = const ui.Color(0xFF000000));
     final picture = recorder.endRecording();
-    final image = await picture.toImage(1280, 720);
+    final image = await picture.toImage(boardWidth.toInt(), boardHeight.toInt());
     final data = await image.toByteData(format: ui.ImageByteFormat.png);
     image.dispose();
     picture.dispose();
@@ -1037,6 +1064,19 @@ class TvDisplayService {
   /// Whether this screen is currently playing a video file.
   bool isPlayingVideo(String tvIp) => _videoScreens.contains(tvIp.trim());
 
+  /// What is playing on this screen, as read from the file's own header.
+  VideoInfo? videoInfoFor(String tvIp) => _videoInfo[tvIp.trim()];
+
+  /// Screens that were showing the session cards when their film started.
+  ///
+  /// Starting a film tears the card loop down for that wall, so by the time
+  /// "ارجع للعبة" is pressed the answer to "what was it showing before?" is
+  /// no longer in the timers. It is written down here instead, because the way
+  /// back is not the same for both kinds of wall: a wall that was showing the
+  /// cards goes back to the cards, and a wall that was handed to a console
+  /// goes back to the console.
+  final Map<String, bool> _videoWasPushing = {};
+
   /// Play a local video file on a single screen. Returns true if the command
   /// was accepted. The TV pulls the file directly from this PC over LAN.
   Future<bool> playVideoFile(String tvIp, File file, {String? contentType}) async {
@@ -1053,9 +1093,13 @@ class TvDisplayService {
       _lastError = 'التلفزيون $key مش راد على استعلام DLNA';
       return false;
     }
+    // Remember what this wall was showing before the film took it over.
+    _videoWasPushing[key] = _pushTimers.containsKey(key);
     _videoFiles[key] = file;
     _videoUrls.remove(key);
     _videoContentTypes[key] = contentType ?? _contentTypeForFile(file.path);
+    final info = await probeVideo(file);
+    if (info != null) _videoInfo[key] = info;
     _videoScreens.add(key);
     stopPushingScreen(key);
     _overrides.remove(key);
@@ -1078,22 +1122,14 @@ class TvDisplayService {
         '</item></DIDL-Lite>';
 
     _log(key).lastPushedUri = uri;
-    await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    final setFuture = _soap(
-        ctl,
-        'SetAVTransportURI',
-        '<InstanceID>0</InstanceID><CurrentURI>${_escapeXml(uri)}</CurrentURI>'
-            '<CurrentURIMetaData>${_escapeXml(didl)}</CurrentURIMetaData>');
-    final playFuture =
-        _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
-    await Future.wait([setFuture, playFuture]);
-    _lastPushAt = DateTime.now();
-    markReached(key, state: 'PLAYING');
-    noteCommand(key, 'تشغيل فيلم', 'بيلعب الآن', ok: true);
-    return true;
-  }
 
+    final (okPlay, okSet) = await _startPlayback(ctl, key, uri, didl);
+
+    _lastPushAt = DateTime.now();
+    markReached(key, state: okPlay ? 'PLAYING' : 'UNKNOWN');
+    noteCommand(key, 'تشغيل فيلم', okPlay ? 'بيلعب الآن' : 'تم الإرسال', ok: okPlay);
+    return okPlay || okSet;
+  }
   /// Play a direct video URL on a single screen.
   Future<bool> playVideoUrl(String tvIp, String url, {String? contentType}) async {
     if (!tvAllowed) return false;
@@ -1130,33 +1166,182 @@ class TvDisplayService {
         '</item></DIDL-Lite>';
 
     _log(key).lastPushedUri = uri;
+
+    final (okPlay, okSet) = await _startPlayback(ctl, key, uri, didl);
+
+    _lastPushAt = DateTime.now();
+    markReached(key, state: okPlay ? 'PLAYING' : 'UNKNOWN');
+    noteCommand(key, 'تشغيل فيلم (لينك)', okPlay ? 'بيلعب الآن' : 'تم الإرسال', ok: okPlay);
+    return okPlay || okSet;
+  }
+
+  /// Hands a URI to the renderer and gets it moving.
+  ///
+  /// The panel answers `Play` with "transition not available" while it is
+  /// still busy with the URI it was given a moment earlier. Asking again a
+  /// second later is enough to get it going, and the URI stays where it is,
+  /// so there is no need to set it twice. Only when that fails as well do we
+  /// start the whole thing over from a stopped panel.
+  Future<(bool okPlay, bool okSet)> _startPlayback(
+    String ctl,
+    String key,
+    String uri,
+    String didl,
+  ) async {
+    // Put the renderer in a state it will accept a new URI from.
     await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    final setFuture = _soap(
+    await _settle(ctl, key, 1500);
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+
+    var okSet = await _soap(
         ctl,
         'SetAVTransportURI',
         '<InstanceID>0</InstanceID><CurrentURI>${_escapeXml(uri)}</CurrentURI>'
             '<CurrentURIMetaData>${_escapeXml(didl)}</CurrentURIMetaData>');
-    final playFuture =
-        _soap(ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
-    await Future.wait([setFuture, playFuture]);
-    _lastPushAt = DateTime.now();
-    markReached(key, state: 'PLAYING');
-    noteCommand(key, 'تشغيل فيلم (لينك)', 'بيلعب الآن', ok: true);
-    return true;
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    var okPlay = await _soap(
+        ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
+    if (!okPlay) {
+      // The panel is still moving to the URI it was just handed. Wait it out
+      // and ask again — same URI, same metadata, just a fresh ask.
+      for (var attempt = 0; attempt < 4 && !okPlay; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 1200));
+        okPlay = await _soap(
+            ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
+      }
+    }
+    if (!okPlay) {
+      // Still refused: start over from a panel that is fully stopped.
+      await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
+      await _settle(ctl, key, 1800);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      okSet = await _soap(
+          ctl,
+          'SetAVTransportURI',
+          '<InstanceID>0</InstanceID><CurrentURI>${_escapeXml(uri)}</CurrentURI>'
+              '<CurrentURIMetaData>${_escapeXml(didl)}</CurrentURIMetaData>');
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      okPlay = await _soap(
+          ctl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
+    }
+    return (okPlay, okSet);
   }
 
-  /// Stop video playback and return this screen to game cards/console as normal.
+  /// Stops the film and hands this wall back to whatever it was showing.
+  ///
+  /// Two ways back, and the wall decides which one it gets. A wall that was
+  /// showing the session cards goes back to the cards; a wall that had been
+  /// handed to a console goes back to the console, which is the game. Which
+  /// of the two it was is remembered when the film starts, because starting
+  /// the film is what tore the card loop down.
+  ///
+  /// The stop is sent, then the panel is asked where it is, and it is asked
+  /// again after a pause — a renderer that is still moving refuses the stop
+  /// with UPnP 701 and keeps the film running, and a wall that keeps running
+  /// a film is the exact thing this button exists to undo. The answer comes
+  /// from the television, not from the fact that we sent a command: a command
+  /// that was refused has to be reported as a refusal.
   Future<bool> stopVideo(String tvIp) async {
     final key = tvIp.trim();
+    if (key.isEmpty) return false;
+    final wasShowingCards = _videoWasPushing.remove(key) ?? false;
     _videoFiles.remove(key);
     _videoUrls.remove(key);
     _videoContentTypes.remove(key);
+    _videoInfo.remove(key);
     _videoScreens.remove(key);
-    if (key.isNotEmpty) {
-      await releaseToInput(key);
+
+    var ctl = await _findControlUrl(key);
+    if (ctl == null) {
+      noteCommand(
+        key,
+        'ارجع للعبة',
+        'ما عرفناش الشاشة — دووس «ابحث عن الشاشة»',
+        ok: false,
+      );
+      return false;
     }
+
+    var stopped = await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
+    if (!stopped) {
+      // The panel may have moved its renderer to another port. Look for the
+      // new address and stop it there, otherwise the film keeps running.
+      final fresh = await _refreshControlUrl(key);
+      if (fresh != null && fresh != ctl) {
+        ctl = fresh;
+        stopped = await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
+      }
+    }
+    // Give the panel room to come to rest, then ask it where it is. The
+    // answer is what decides whether the film is really over.
+    await _settle(ctl, key, 1500);
+    var state = await _transportState(ctl);
+    if (state != null && !state.contains('STOPPED')) {
+      // Still moving, or still playing: stop it again and wait it out.
+      await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
+      await _settle(ctl, key, 1800);
+      state = await _transportState(ctl);
+    }
+    final reallyStopped = state == null ? stopped : state.contains('STOPPED');
+    if (!reallyStopped) {
+      noteCommand(
+        key,
+        'ارجع للعبة',
+        'الشاشة رفضت وقف الفيلم',
+        ok: false,
+      );
+      return false;
+    }
+    markReached(key, state: 'STOPPED');
+
+    if (wasShowingCards) {
+      // The cards were what this wall was showing before the film; put them
+      // back rather than handing the wall to a console that is not playing.
+      startPushing(tvIp: key);
+      noteCommand(key, 'ارجع للعبة', 'رجعنا لبطاقات اللعب', ok: true);
+      return true;
+    }
+    // The console. A stop is what hands the panel back to its input, which is
+    // the game on the HDMI cable.
+    await releaseToInput(key, force: true);
+    noteCommand(key, 'ارجع للعبة', 'رجعت للبلايستيشن', ok: true);
     return true;
+  }
+
+  /// Looks for a screen's renderer address again, after a command to it failed.
+  ///
+  /// The port a television serves its renderer on is picked fresh on every
+  /// boot, so a screen that rebooted looks exactly like a screen that is off.
+  /// The old address is dead in that case and every command to it is lost, so
+  /// a failure has to be followed by a fresh look — not just by a retry on the
+  /// same dead door. Waits a few seconds for the new address to turn up and
+  /// hands it back, or null when the screen really is gone.
+  Future<String?> _refreshControlUrl(String tvIp, {int timeoutMs = 4000}) async {
+    final before = _controlCache[tvIp]?.$1;
+    if (!_warming.contains(tvIp)) {
+      // A manual re-look must not be held back by the discovery cooldown:
+      // the whole point is that the address we have is wrong.
+      unawaited(warmUp(tvIp: tvIp, force: true));
+    }
+    final deadline = DateTime.now().add(Duration(milliseconds: timeoutMs));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      final now = _controlCache[tvIp]?.$1;
+      if (now != null && now != before) return now;
+    }
+    return null;
+  }
+
+  /// Asks a renderer where it is right now. Null when it will not say.
+  Future<String?> _transportState(String controlUrl) async {    final (status, payload, _) =
+        await _soapRaw(controlUrl, 'GetTransportInfo', '');
+    if (status == null || status >= 400) return null;
+    return RegExp(r'<CurrentTransportState>([^<]*)</CurrentTransportState>')
+            .firstMatch(payload)
+            ?.group(1)
+            ?.trim()
+            .toUpperCase();
   }
 
   String _contentTypeForFile(String path) {
@@ -1188,6 +1373,11 @@ class TvDisplayService {
   }
 
   Future<bool> _pushOnce(String tvIp) async {
+    // A wall that is playing a film is not a wall that wants a still picture.
+    // Pushing one would cut the film off mid-scene, and the film is the thing
+    // the customer asked for. The wall gets its picture back when the film is
+    // stopped.
+    if (_videoScreens.contains(tvIp.trim())) return false;
     // The guard is per screen and covers the WHOLE cycle (discovery
     // included), otherwise every tick would kick off a full port scan and
     // one screen's push would cancel the other's.
@@ -1934,7 +2124,11 @@ class TvDisplayService {
       _servedAtProbe[tvIp] = served;
       if (state != null &&
           state.toUpperCase().contains('PLAYING') &&
-          log.showingOurs == false) {
+          log.showingOurs == false &&
+          // A wall playing a film is *supposed* to be pulling something other
+          // than our picture. Saying "nobody fetched our picture" about it
+          // every fifteen seconds is noise, not a fault.
+          !isPlayingVideo(tvIp)) {
         log.note(
           'الشاشة بتقول إنها شغالة بس ماحدش جاب الصورة بتاعتنا',
         );

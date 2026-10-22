@@ -12,6 +12,7 @@ import '../../core/theme/app_tokens.dart';
 import '../../core/tv/tv_display_service.dart';
 import '../../core/tv/tv_power_service.dart';
 import '../../core/tv/tv_screen_report.dart';
+import '../../core/tv/video_probe.dart';
 import '../../data/repositories/device_repository.dart';
 import 'tv_mode_screen.dart';
 
@@ -424,10 +425,29 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
       _say('الملف مش موجود');
       return;
     }
+    // What the file itself is. The television pulls the file byte for byte, so
+    // this — and nothing the program does — decides how big and how sharp the
+    // picture on the wall is. Saying it out loud is the difference between
+    // "the screen is broken" and "this file is 352 by 240".
+    final info = await probeVideo(f);
+    if (info != null && !info.isFullWidth) {
+      _say('الملف ${info.label} — مش بيل الشاشة، '
+          'هيبان جنبين سودا. ابحث عن نسخة عريضة (16:9).');
+    } else if (info != null) {
+      _say('الملف ${info.label} — هيملا الشاشة ✅');
+    }
     _say('بنشغل الفيلم على $name… بص على الشاشة');
     final ok = await TvDisplayService.instance
         .playVideoFile(ip.trim(), f);
-    _say(ok ? 'الفيلم شغال الآن ✅' : 'ماقدرتش أشغّل الفيلم — شوف اللوج');
+    if (!mounted) return;
+    if (!ok) {
+      _say('ماقدرتش أشغّل الفيلم — شوف اللوج');
+    } else if (info != null && info.isFourThree) {
+      _say('الفيلم شغال ✅ — بس دقته ${info.width}×${info.height}، '
+          'مش هتبان حلوة على شاشة كبيرة');
+    } else {
+      _say('الفيلم شغال الآن ✅');
+    }
   }
 
   Future<void> _stopMovie(String ip, String name) async {
@@ -436,8 +456,9 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
       return;
     }
     _say('بنرجّع $name للعبة…');
-    await TvDisplayService.instance.stopVideo(ip.trim());
-    _say('رجعنا للعرض العادي ✅');
+    final ok = await TvDisplayService.instance.stopVideo(ip.trim());
+    if (!mounted) return;
+    _say(ok ? 'رجعت $name للعبة ✅' : 'الشاشة ما رجعتش — شوف اللوج');
   }
 
   @override
