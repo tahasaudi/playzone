@@ -268,7 +268,7 @@ class DeviceCard extends StatelessWidget {
     // before the session starts (the Spacers spread the slack evenly).
     // الضغط بين البلوكات. في الكارت المضغوط أقل شوية من الكارت الكبير، لكن
     // مش ضيق أوي: الارتفاع ثابت من الشبكة والمساحة كلها محسوبة.
-    final gap = compact ? 12.0 : AppSpacing.lg;
+    final gap = compact ? 8.0 : AppSpacing.lg;
     final card = GlassCard(
       hoverable: true,
       padding: _pad,
@@ -306,7 +306,10 @@ class DeviceCard extends StatelessWidget {
             Center(child: _screenToggleChip()),
             SizedBox(height: gap),
           ],
-          if (!compact && onSelectDuration != null) ...[
+          // The two durations sit on the card itself, compact card included:
+          // the cashier picks 60 or 30 with one tap and the money below fills
+          // itself in, instead of having to type the amount by hand.
+          if (onSelectDuration != null) ...[
             _durationChips(),
             SizedBox(height: gap),
           ],
@@ -496,7 +499,7 @@ class DeviceCard extends StatelessWidget {
         color: AppColors.glassBorder,
       );
 
-  /// 60 / 30 / 15 minutes, sized to stay inside the compact card.
+  /// 60 / 30 minutes, sized to stay inside the compact card.
   Widget _durationChips() {
     const chips = [60, 30];
     return Row(
@@ -506,7 +509,7 @@ class DeviceCard extends StatelessWidget {
             child: GestureDetector(
               onTap: () => onSelectDuration!(chips[i]),
               child: Container(
-                padding: EdgeInsets.symmetric(vertical: compact ? 5 : 8),
+                padding: EdgeInsets.symmetric(vertical: compact ? 4 : 8),
                 decoration: BoxDecoration(
                   color: selectedMinutes == chips[i]
                       ? AppColors.accentPrimary.withOpacity(0.25)
@@ -519,7 +522,7 @@ class DeviceCard extends StatelessWidget {
                   ),
                 ),
                 child: Text(
-                  '${chips[i]}',
+                  '${chips[i]} د',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: compact ? 12 : 14,
@@ -1001,6 +1004,20 @@ class _MoneyFieldState extends State<_MoneyField> {
       amount == null ? '' : amount.round().toString();
 
   @override
+  void initState() {
+    super.initState();
+    // «EGP» is drawn by us (not by InputDecoration), so the box tells us the
+    // instant it stops being empty — or the instant the cashier taps it. The
+    // framework hint used to sit there while the cashier typed.
+    _controller.addListener(_onTextChanged);
+    _focus.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   void didUpdateWidget(covariant _MoneyField oldWidget) {
     super.didUpdateWidget(oldWidget);
     // Never clobber the cashier's keystrokes: only mirror the value from
@@ -1018,6 +1035,8 @@ class _MoneyFieldState extends State<_MoneyField> {
 
   @override
   void dispose() {
+    _controller.removeListener(_onTextChanged);
+    _focus.removeListener(_onTextChanged);
     _controller.dispose();
     _focus.dispose();
     super.dispose();
@@ -1025,30 +1044,49 @@ class _MoneyFieldState extends State<_MoneyField> {
 
   @override
   Widget build(BuildContext context) {
+    final idle = _controller.text.trim().isEmpty && !_focus.hasFocus;
     return SizedBox(
       width: 70,
       height: 38,
-      child: TextField(
-        controller: _controller,
-        focusNode: _focus,
-        textAlign: TextAlign.center,
-        keyboardType: TextInputType.number,
-        onChanged: (raw) => widget.onChanged?.call(double.tryParse(raw.trim())),
-        style: TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w700,
-            color: AppColors.textPrimary,
-            fontFeatures: const [FontFeature.tabularFigures()]),
-        decoration: InputDecoration(
-          isDense: true,
-          contentPadding: EdgeInsets.zero,
-          hintText: 'EGP',
-          hintStyle:
-              const TextStyle(fontSize: 11, color: AppColors.textTertiary),
-          filled: false,
-          border: InputBorder.none,
-          enabledBorder: InputBorder.none,
-          focusedBorder: InputBorder.none,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _focus.requestFocus,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            if (idle)
+              const IgnorePointer(
+                child: Text('EGP',
+                    style: TextStyle(
+                        fontSize: 11, color: AppColors.textTertiary)),
+              ),
+            // Positioned.fill: inside a Stack the field would otherwise shrink
+            // to the width of its (empty) text and stop answering taps.
+            Positioned.fill(
+              child: TextField(
+                controller: _controller,
+                focusNode: _focus,
+                textAlign: TextAlign.center,
+                keyboardType: TextInputType.number,
+                onTap: _focus.requestFocus,
+                onChanged: (raw) =>
+                    widget.onChanged?.call(double.tryParse(raw.trim())),
+                style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary,
+                    fontFeatures: const [FontFeature.tabularFigures()]),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  contentPadding: EdgeInsets.zero,
+                  filled: false,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
