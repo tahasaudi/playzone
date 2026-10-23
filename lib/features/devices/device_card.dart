@@ -498,7 +498,7 @@ class DeviceCard extends StatelessWidget {
 
   /// 60 / 30 / 15 minutes, sized to stay inside the compact card.
   Widget _durationChips() {
-    const chips = [60, 30, 15];
+    const chips = [60, 30];
     return Row(
       children: [
         for (var i = 0; i < chips.length; i++) ...[
@@ -575,9 +575,10 @@ class DeviceCard extends StatelessWidget {
             children: [
               Expanded(
                 child: PrimaryButton(
-                    label: compact ? 'تحصيل' : 'تحصيل',
+                    label: 'تحصيل',
                     icon: Icons.point_of_sale_rounded,
                     expand: true,
+                    compact: compact,
                     onPressed: onCheckout),
               ),
               if (onExtend != null) ...[
@@ -586,6 +587,7 @@ class DeviceCard extends StatelessWidget {
                   child: SecondaryButton(
                       label: compact ? '＋ وقت' : 'كمّل وقت',
                       icon: Icons.more_time_rounded,
+                      compact: compact,
                       onPressed: onExtend),
                 ),
               ],
@@ -652,7 +654,9 @@ class DeviceCard extends StatelessWidget {
               (onExtendCustom != null || onToggleScreen != null)) ...[
             const SizedBox(height: AppSpacing.xs),
             Center(
-              child: Row(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (onToggleScreen != null) _screenToggleChip(),
@@ -663,7 +667,7 @@ class DeviceCard extends StatelessWidget {
                       onTap: onExtendCustom,
                       child: Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 4),
+                            horizontal: 8, vertical: 4),
                         decoration: BoxDecoration(
                           color: AppColors.accentPrimary.withOpacity(0.15),
                           borderRadius: AppRadius.smallR,
@@ -685,7 +689,8 @@ class DeviceCard extends StatelessWidget {
                         ),
                       ),
                     ),
-                ],
+                  ],
+                ),
               ),
             ),
           ],
@@ -731,27 +736,59 @@ class DeviceCard extends StatelessWidget {
             _costRow('الإجمالي', _sumCost(), emphasize: true),
           ],
           SizedBox(height: compact ? AppSpacing.xs : AppSpacing.sm),
-          Row(
-            children: [
-              Expanded(
-                  child: SecondaryButton(
-                      label: compact ? 'طلب' : 'طلب',
-                      icon: Icons.add_shopping_cart_rounded,
-                      onPressed: onOrder)),
-              const SizedBox(width: 6),
-              Expanded(
-                  child: SecondaryButton(
-                      label: compact ? 'إيقاف' : 'إيقاف',
-                      icon: Icons.pause_rounded,
-                      onPressed: onPause)),
-              const SizedBox(width: 6),
-              Expanded(
-                  child: PrimaryButton(
-                      label: compact ? 'تحصيل' : 'تحصيل',
-                      expand: true,
-                      onPressed: onCheckout)),
-            ],
-          ),
+          if (compact) ...[
+            // 3 أزرار في صف واحد على كارت 213px بتسيب 15px للنص فالكلمة بتتقص.
+            // صفين: طلب/إيقاف فوق، و«تحصيل» لوحدها بعرض الكارت — كل الكلمات
+            // كاملة والزرار الأساسي أكبر.
+            Row(
+              children: [
+                Expanded(
+                    child: SecondaryButton(
+                        label: 'طلب',
+                        icon: Icons.add_shopping_cart_rounded,
+                        compact: true,
+                        onPressed: onOrder)),
+                const SizedBox(width: 6),
+                Expanded(
+                    child: SecondaryButton(
+                        label: 'إيقاف',
+                        icon: Icons.pause_rounded,
+                        compact: true,
+                        onPressed: onPause)),
+              ],
+            ),
+            const SizedBox(height: 6),
+            PrimaryButton(
+                label: 'تحصيل',
+                icon: Icons.point_of_sale_rounded,
+                expand: true,
+                compact: true,
+                onPressed: onCheckout),
+          ] else
+            Row(
+              children: [
+                Expanded(
+                    child: SecondaryButton(
+                        label: 'طلب',
+                        icon: Icons.add_shopping_cart_rounded,
+                        compact: compact,
+                        onPressed: onOrder)),
+                const SizedBox(width: 6),
+                Expanded(
+                    child: SecondaryButton(
+                        label: 'إيقاف',
+                        icon: Icons.pause_rounded,
+                        compact: compact,
+                        onPressed: onPause)),
+                const SizedBox(width: 6),
+                Expanded(
+                    child: PrimaryButton(
+                        label: 'تحصيل',
+                        expand: true,
+                        compact: compact,
+                        onPressed: onCheckout)),
+              ],
+            ),
         ],
       ),
     );
@@ -767,7 +804,7 @@ class DeviceCard extends StatelessWidget {
     return GestureDetector(
       onTap: onToggleScreen,
       child: Container(
-        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
           color: dark
               ? AppColors.glassFill
@@ -788,6 +825,8 @@ class DeviceCard extends StatelessWidget {
             const SizedBox(width: 4),
             Text(
               dark ? 'الشاشة مقفولة' : 'الشاشة مفتوحة',
+              maxLines: 1,
+              softWrap: false,
               style: TextStyle(
                 fontSize: 11,
                 color:

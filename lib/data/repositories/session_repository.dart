@@ -202,7 +202,7 @@ final oneSecondTickerProvider = StreamProvider<int>((ref) {
 
 /// The quick duration buttons on the Dashboard, in the order the cashier
 /// reads them. Null duration = open-ended (per-second) session.
-const List<int?> quickDurations = [60, 30, 15, 7];
+const List<int?> quickDurations = [60, 30];
 
 /// The café's default session length. Every device starts on this, and the
 /// cashier can override it per machine from the card's own duration chips.

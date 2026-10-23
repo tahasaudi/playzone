@@ -12,12 +12,17 @@ class PrimaryButton extends StatefulWidget {
     required this.onPressed,
     this.icon,
     this.expand = false,
+    this.compact = false,
   });
 
   final String label;
   final VoidCallback? onPressed;
   final IconData? icon;
   final bool expand;
+
+  /// على كارت الجهاز المضغوط (3 أزرار في صف) المساحة ضيقة جدًا، فبنشيل
+  /// الأيقونة ونصغّر الحشو والخط — عشان كلمة «تحصيل» تظهر كاملة مش مقطوعة.
+  final bool compact;
 
   @override
   State<PrimaryButton> createState() => _PrimaryButtonState();
@@ -43,9 +48,9 @@ class _PrimaryButtonState extends State<PrimaryButton> {
         child: AnimatedContainer(
           duration: AppTheme.pressDuration,
           width: widget.expand ? double.infinity : null,
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.sm,
-            vertical: 14,
+          padding: EdgeInsets.symmetric(
+            horizontal: widget.compact ? 4 : AppSpacing.sm,
+            vertical: widget.compact ? 10 : 14,
           ),
           decoration: BoxDecoration(
             gradient: disabled ? null : AppColors.primaryButtonGradient,
@@ -69,21 +74,24 @@ class _PrimaryButtonState extends State<PrimaryButton> {
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (widget.icon != null) ...[
+              if (widget.icon != null && !widget.compact) ...[
                 Icon(widget.icon,
                     size: 18,
                     color: disabled ? AppColors.textTertiary : Colors.white),
                 const SizedBox(width: 8),
               ],
               Flexible(
-                child: Text(
-                  widget.label,
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 1,
-                  style: TextStyle(
-                    color: disabled ? AppColors.textTertiary : Colors.white,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 14,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    widget.label,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                    style: TextStyle(
+                      color: disabled ? AppColors.textTertiary : Colors.white,
+                      fontWeight: FontWeight.w600,
+                      fontSize: widget.compact ? 12 : 14,
+                    ),
                   ),
                 ),
               ),
@@ -102,11 +110,15 @@ class SecondaryButton extends StatefulWidget {
     required this.label,
     required this.onPressed,
     this.icon,
+    this.compact = false,
   });
 
   final String label;
   final VoidCallback? onPressed;
   final IconData? icon;
+
+  /// نفس فكرة PrimaryButton.compact: مساحة ضيقة على الكارت المصغّر.
+  final bool compact;
 
   @override
   State<SecondaryButton> createState() => _SecondaryButtonState();
@@ -126,9 +138,9 @@ class _SecondaryButtonState extends State<SecondaryButton> {
         onTap: widget.onPressed,
         child: AnimatedContainer(
           duration: AppTheme.hoverDuration,
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.sm,
-            vertical: 12,
+          padding: EdgeInsets.symmetric(
+            horizontal: widget.compact ? 4 : AppSpacing.sm,
+            vertical: widget.compact ? 10 : 12,
           ),
           decoration: BoxDecoration(
             color: _hovering ? AppColors.glassFillStrong : AppColors.glassFill,
@@ -139,19 +151,22 @@ class _SecondaryButtonState extends State<SecondaryButton> {
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (widget.icon != null) ...[
+              if (widget.icon != null && !widget.compact) ...[
                 Icon(widget.icon, size: 16, color: AppColors.textSecondary),
                 const SizedBox(width: 6),
               ],
               Flexible(
-                child: Text(
-                  widget.label,
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 1,
-                  style: const TextStyle(
-                    color: AppColors.textPrimary,
-                    fontWeight: FontWeight.w500,
-                    fontSize: 14,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    widget.label,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontWeight: FontWeight.w500,
+                      fontSize: widget.compact ? 12 : 14,
+                    ),
                   ),
                 ),
               ),
