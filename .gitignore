@@ -58,10 +58,10 @@ tool/*_local.dart
 *.key
 webos_key*.txt
 
-# --- vision_service: local camera config, secrets and evidence -------------
-vision_service/config.yaml
+# --- vision_service: local secrets and evidence ----------------------------
+# .env فيه باسورد الكاميرا — مينفعش يتسحب على GitHub (المستودع عام).
+# config.yaml بيتسحب مع المشروع (مفيش باسورد جوّاه، بيستخدم ${CAM_PASS}).
 vision_service/.env
 vision_service/.venv/
 vision_service/logs/
-vision_service/*.pt
 

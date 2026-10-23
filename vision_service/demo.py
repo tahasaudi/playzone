@@ -214,9 +214,15 @@ def main():
 
     detector = FridgeDetector(
         weights=resolve_path(cfg["model"]["weights"], cfg["_base_dir"]),
-        conf_thres=args.conf if args.conf is not None else cfg["model"]["conf_threshold"],
+        conf_thres=(
+            args.conf
+            if args.conf is not None
+            else (0.30 if args.shop else cfg["model"]["conf_threshold"])
+        ),
         iou_thres=cfg["model"].get("iou_threshold", 0.45),
-        keep_labels=cfg["model"].get("labels") or [],
+        # في شبكة «كاميرات المحل» نعرض كل اللي الموديل شايفه (مش أصناف
+        # التلاجة بس) عشان تشوف الذكاء الاصطناعي شغال على كل كاميرا.
+        keep_labels=[] if args.shop else (cfg["model"].get("labels") or []),
         imgsz=args.imgsz or cfg["model"].get("imgsz", 480),
     )
 

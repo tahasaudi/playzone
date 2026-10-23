@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -34,6 +35,8 @@ from core.tracker import ZoneTracker  # noqa: E402
 
 LOG = logging.getLogger("vision")
 _stop = False
+# الموديل مش آمن للاستخدام من أكتر من ثريد في نفس الوقت.
+_MODEL_LOCK = threading.Lock()
 
 
 def _handle_signal(signum, _frame):
@@ -131,12 +134,12 @@ def aliases_for(cfg, label):
     return []
 
 
-def save_evidence(detector, frame, detections, roi, evidence_dir, label):
+def save_evidence(detector, frame, detections, roi, evidence_dir, label, tag=""):
     try:
         Path(evidence_dir).mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         safe_label = "".join(ch if ch.isalnum() else "_" for ch in str(label))[:40]
-        path = str(Path(evidence_dir) / f"{stamp}_{safe_label}.jpg")
+        path = str(Path(evidence_dir) / f"{stamp}_{tag}{safe_label}.jpg")
         cv2.imwrite(path, detector.annotate(frame, detections, roi))
         return path
     except Exception as error:  # noqa: BLE001
@@ -144,10 +147,12 @@ def save_evidence(detector, frame, detections, roi, evidence_dir, label):
         return None
 
 
-def handle_frame(frame, cfg, detector, pos, alerts, tracker, show=False):
+def handle_frame(frame, cfg, detector, pos, alerts, tracker, show=False, roi=None, tag=""):
     """يعالج إطار واحد؛ يرجّع عدد التنبيهات اللي اتبعتت."""
-    roi = cfg["camera"].get("roi")
-    detections = detector.detect(frame)
+    if roi is None:
+        roi = cfg["camera"].get("roi")
+    with _MODEL_LOCK:
+        detections = detector.detect(frame)
     inside = [item for item in detections if detector.is_inside_roi(item["bbox"], roi)]
     labels = {item["label"] for item in inside}
 
@@ -155,7 +160,7 @@ def handle_frame(frame, cfg, detector, pos, alerts, tracker, show=False):
     if not fired:
         if show:
             cv2.imshow("PlayZone - Fridge", detector.annotate(frame, inside, roi))
-        return 0
+        return 0, len(inside)
 
     window = cfg["pos"].get("check_window_seconds", 90)
     sent = 0
@@ -168,38 +173,55 @@ def handle_frame(frame, cfg, detector, pos, alerts, tracker, show=False):
 
         note = f"احتمال: {' / '.join(aliases[:5])}" if aliases else None
         image_path = save_evidence(
-            detector, frame, inside, roi, cfg["alerts"]["evidence_dir"], label
+            detector, frame, inside, roi, cfg["alerts"]["evidence_dir"], label, tag
         )
         alerts.send(label, image_path=image_path, note=note)
         sent += 1
 
     if show:
         cv2.imshow("PlayZone - Fridge", detector.annotate(frame, inside, roi))
-    return sent
+    return sent, len(inside)
 
 
-def run(cfg, args):
+def _camera_targets(cfg, args):
+    """قائمة الكاميرات اللي هنشتغل عليها: [(اسم, مصدر, ROI)]."""
+    if args.source:
+        return [("main", args.source, cfg["camera"].get("roi"))]
+
+    if args.shop:
+        targets = []
+        for index, entry in enumerate(
+            cfg.get("shop", {}).get("cameras") or [], start=1
+        ):
+            if not isinstance(entry, dict):
+                continue
+            source = entry.get("source")
+            if not source:
+                continue
+            targets.append(
+                (
+                    str(entry.get("name") or f"Camera {index}"),
+                    source,
+                    entry.get("roi") or [],
+                )
+            )
+        if targets:
+            return targets
+        LOG.warning("مفيش shop.cameras في الإعدادات — هرجع لكاميرا واحدة")
+
+    return [("main", cfg["camera"]["source"], cfg["camera"].get("roi"))]
+
+
+def run_single(cfg, args, detector, pos, alerts, name, source, roi):
     camera = cfg["camera"]
-    source = args.source if args.source is not None else camera["source"]
     video_mode = is_video_file(source)
     fps = max(0.5, float(camera.get("fps") or 4.0))
     interval = 1.0 / fps
     reconnect = max(1.0, float(camera.get("reconnect_seconds") or 5.0))
     min_motion = float(cfg.get("runtime", {}).get("min_motion", 0) or 0)
-
-    detector = FridgeDetector(
-        weights=resolve_path(cfg["model"]["weights"], cfg["_base_dir"]),
-        conf_thres=cfg["model"].get("conf_threshold", 0.55),
-        iou_thres=cfg["model"].get("iou_threshold", 0.45),
-        keep_labels=cfg["model"].get("labels") or [],
-        imgsz=cfg["model"].get("imgsz", 480),
-    )
-    pos = PosClient(cfg["pos"], cfg["_base_dir"])
-    alerts = AlertManager(cfg, cfg["_base_dir"])
-
-    if args.dry_run or args.no_telegram:
-        cfg["alerts"].setdefault("telegram", {})["enabled"] = False
-        LOG.info("وضع التجربة: تنبيهات تليجرام متوقفة (السجل والصور شغالين)")
+    tag = "" if name in ("", "main") else "".join(
+        ch if ch.isalnum() else "_" for ch in str(name)
+    )[:20] + "_"
 
     tracker = ZoneTracker(
         min_hits=cfg["alerts"]["min_hits"],
@@ -207,19 +229,20 @@ def run(cfg, args):
     )
 
     LOG.info(
-        "بدء الرصد | المصدر=%s | fps=%.1f | ROI=%s | قاعدة=%s | كولداون=%.0f ث",
+        "[%s] بدء الرصد | المصدر=%s | fps=%.1f | ROI=%s",
+        name,
         source,
         fps,
-        camera.get("roi") or "كل الكادر",
-        pos.database if pos.mode == "local" else pos.mode,
-        cfg["alerts"]["cooldown_seconds"],
+        roi or "كل الكادر",
     )
 
     capture = None
     previous_gray = None
     processed = 0
     alerts_sent = 0
+    detections_seen = 0
     last_sample = 0.0
+    last_status = time.monotonic()
     retry_at = 0.0
 
     while not _stop:
@@ -231,7 +254,8 @@ def run(cfg, args):
             capture = open_camera(source)
             if not capture.isOpened():
                 LOG.warning(
-                    "الكاميرا مش راضية تفتح (%s) — محاولة تانية بعد %.0f ث",
+                    "[%s] الكاميرا مش راضية تفتح (%s) — محاولة تانية بعد %.0f ث",
+                    name,
                     source,
                     reconnect,
                 )
@@ -241,7 +265,7 @@ def run(cfg, args):
                 if args.once:
                     break
                 continue
-            LOG.info("الكاميرا اتوصلت: %s", source)
+            LOG.info("[%s] الكاميرا اتوصلت: %s", name, source)
             try:
                 capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except cv2.error:
@@ -251,9 +275,9 @@ def run(cfg, args):
         ok, frame = capture.read()
         if not ok or frame is None:
             if video_mode:
-                LOG.info("خلص الفيديو (%s)", source)
+                LOG.info("[%s] خلص الفيديو (%s)", name, source)
                 break
-            LOG.warning("انقطعت الصورة — بعيد الاتصال بالكاميرا")
+            LOG.warning("[%s] انقطعت الصورة — بعيد الاتصال بالكاميرا", name)
             capture.release()
             capture = None
             previous_gray = None
@@ -269,22 +293,35 @@ def run(cfg, args):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if min_motion > 0 and previous_gray is not None:
             diff = cv2.absdiff(gray, previous_gray)
-            motion = cv2.mean(diff, mask=roi_mask(frame.shape, camera.get("roi")))[0]
+            motion = cv2.mean(diff, mask=roi_mask(frame.shape, roi))[0]
             if motion < min_motion:
                 previous_gray = gray
                 continue
         previous_gray = gray
 
-        alerts_sent += handle_frame(
-            frame, cfg, detector, pos, alerts, tracker, show=args.show
+        sent_now, seen_now = handle_frame(
+            frame, cfg, detector, pos, alerts, tracker, show=args.show,
+            roi=roi, tag=tag,
         )
+        alerts_sent += sent_now
+        detections_seen += seen_now
         processed += 1
+
+        if time.monotonic() - last_status >= 60:
+            last_status = time.monotonic()
+            LOG.info(
+                "[%s] شغالة | إطارات=%d | كشوف=%d | تنبيهات=%d",
+                name,
+                processed,
+                detections_seen,
+                alerts_sent,
+            )
 
         if args.show and (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
             LOG.info("اتقفلت نافذة المعاينة")
             break
         if args.once and processed >= args.once:
-            LOG.info("خلصت %d إطار (--once)", processed)
+            LOG.info("[%s] خلصت %d إطار (--once)", name, processed)
             break
 
     if capture is not None:
@@ -292,8 +329,63 @@ def run(cfg, args):
     if args.show:
         cv2.destroyAllWindows()
 
-    LOG.info("الخدمة وقفت | إطارات=%d | تنبيهات=%d", processed, alerts_sent)
+    LOG.info(
+        "[%s] الخدمة وقفت | إطارات=%d | تنبيهات=%d", name, processed, alerts_sent
+    )
     return 0
+
+
+def run_parallel(cfg, args, detector, pos, alerts, targets):
+    """يشغّل الموديل على كل الكاميرات مع بعض (كاميرا = ثريد)."""
+    LOG.info("تشغيل الموديل على %d كاميرات مع بعض", len(targets))
+    errors = []
+
+    def worker(name, source, roi):
+        try:
+            run_single(cfg, args, detector, pos, alerts, name, source, roi)
+        except Exception as error:  # noqa: BLE001 - كاميرا واحدة متوقعش الباقي
+            LOG.exception("[%s] الكاميرا وقعت: %s", name, error)
+            errors.append(name)
+
+    threads = []
+    for name, source, roi in targets:
+        thread = threading.Thread(
+            target=worker,
+            args=(name, source, roi),
+            name=f"cam-{name}",
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+
+    while any(thread.is_alive() for thread in threads):
+        for thread in threads:
+            thread.join(0.5)
+
+    LOG.info("كل الكاميرات وقفت | %d/%d", len(targets) - len(errors), len(targets))
+    return 0 if not errors else 1
+
+
+def run(cfg, args):
+    detector = FridgeDetector(
+        weights=resolve_path(cfg["model"]["weights"], cfg["_base_dir"]),
+        conf_thres=cfg["model"].get("conf_threshold", 0.55),
+        iou_thres=cfg["model"].get("iou_threshold", 0.45),
+        keep_labels=cfg["model"].get("labels") or [],
+        imgsz=cfg["model"].get("imgsz", 480),
+    )
+    pos = PosClient(cfg["pos"], cfg["_base_dir"])
+    alerts = AlertManager(cfg, cfg["_base_dir"])
+
+    if args.dry_run or args.no_telegram:
+        cfg["alerts"].setdefault("telegram", {})["enabled"] = False
+        LOG.info("وضع التجربة: تنبيهات تليجرام متوقفة (السجل والصور شغالين)")
+
+    targets = _camera_targets(cfg, args)
+    if len(targets) == 1:
+        name, source, roi = targets[0]
+        return run_single(cfg, args, detector, pos, alerts, name, source, roi)
+    return run_parallel(cfg, args, detector, pos, alerts, targets)
 
 
 def build_parser():
@@ -302,6 +394,11 @@ def build_parser():
     )
     parser.add_argument("--config", help="مسار config.yaml (الافتراضي: config.yaml)")
     parser.add_argument("--source", help="كاميرا/فيديو بدل اللي في الإعدادات")
+    parser.add_argument(
+        "--shop",
+        action="store_true",
+        help="شغّل الموديل على كل كاميرات المحل (shop.cameras) مع بعض",
+    )
     parser.add_argument("--video", dest="source", help="اختصار لتجربة على ملف فيديو")
     parser.add_argument("--once", type=int, default=0, help="يقف بعد N إطار معالَج")
     parser.add_argument(

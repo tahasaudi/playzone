@@ -1,0 +1,93 @@
+﻿# PlayZone — رصد الثلاجة بالكاميرا
+#
+# انسخ الملف ده لـ config.yaml وعدّل الكاميرا والـROI وربط الأصناف.
+# القيم اللي تحت كلها افتراضية آمنة: لو حاجة ناقصة الخدمة بتكمل وتكتب تحذير.
+
+camera:
+  # كاميرا USB: "0" — كاميرا IP: رابط RTSP
+  source: "rtsp://${CAM_USER}:${CAM_PASS}@192.168.1.2:554/Streaming/channels/101"
+  # عدد الإطارات اللي بتتعالج في الثانية (مش لازم تساوي fps الكاميرا)
+  fps: 4
+  reconnect_seconds: 5
+  # مضلّع منطقة الرصد بإحداثيات الصورة الأصلية.
+  # عدّلها من صورة الكاميرا الحقيقية — سيبها [] عشان ترصد الكادر كله.
+  roi: []
+
+model:
+  # أول تشغيل بينزّل الأوزان (~6MB) ويحتاج إنترنت مرة واحدة.
+  weights: "yolo11n.pt"
+  conf_threshold: 0.55
+  iou_threshold: 0.45
+  # أصناف COCO اللي تهمنا في ثلاجة كافيه. سيبها [] لكل الأصناف.
+  labels:
+    - bottle
+    - cup
+    - wine glass
+    - sandwich
+    - banana
+    - apple
+    - orange
+    - carrot
+    - cake
+    - donut
+    - pizza
+    - hot dog
+
+# كاميرات المحل — زرار «كاميرات المحل» في البرنامج بيفتح شبكة فيها كل كاميرا
+# والموديل شغال عليها. اليوزر والباسورد في .env (CAM_USER / CAM_PASS).
+shop:
+  cameras:
+    - name: "كاميرا 101"
+      source: "rtsp://${CAM_USER}:${CAM_PASS}@192.168.1.2:554/Streaming/channels/101"
+    - name: "كاميرا 201"
+      source: "rtsp://${CAM_USER}:${CAM_PASS}@192.168.1.2:554/Streaming/channels/201"
+    - name: "كاميرا 301"
+      source: "rtsp://${CAM_USER}:${CAM_PASS}@192.168.1.2:554/Streaming/channels/301"
+    - name: "كاميرا 401"
+      source: "rtsp://${CAM_USER}:${CAM_PASS}@192.168.1.2:554/Streaming/channels/401"
+
+# ربط صنف الموديل بأسماء المنتجات الفعلية في قاعدة PlayZone.
+# لو الصنف مش موجود هنا، الخدمة بتدور على اسم الصنف نفسه (bottle/cup...).
+# ضيف/عدّل حسب منتجات الكافيه عندك.
+products:
+  bottle: [مياه, مياة, بيبسي, كولا, كوكاكولا, سفن, عصير, مشروب, ريد بُل, ريدبول, water, pepsi, cola, juice, red bull]
+  cup: [قهوة, شاي, نسكافيه, كابتشينو, لاتيه, coffee, tea, latte]
+  wine glass: [عصير, juice]
+  sandwich: [ساندوتش, توست, برجر, sandwich, toast, burger]
+  cake: [كيك, حلوى, cake]
+  donut: [دونات, donut]
+  pizza: [بيتزا, pizza]
+  hot dog: [هوت دوج, hot dog]
+  banana: [موز, banana]
+  apple: [تفاح, apple]
+  orange: [برتقال, orange]
+
+pos:
+  # local = قراءة مباشرة من playzone.sqlite (الافتراضي)
+  # http  = نظام كاشير خارجي بيوفر /sales/recent
+  # off   = كل رصد بيتبعت تنبيه من غير فحص كاشير
+  mode: local
+  # فاضي = %APPDATA%\PlayZone\PlayZone\playzone.sqlite
+  database: ""
+  check_window_seconds: 90
+  base_url: ""
+  api_key: ""
+
+alerts:
+  telegram:
+    enabled: true
+    # الأفضل تحطهم في .env بدل هنا
+    bot_token: ""
+    chat_id: ""
+  log_to_file: true
+  # نفس المنتج ميتكررش قبل كده (ثانية)
+  cooldown_seconds: 180
+  # عدد إطارات متتالية لازم المنتج يظهر فيها قبل التنبيه
+  min_hits: 3
+  evidence_dir: "logs/evidence"
+
+runtime:
+  # فرق الصورة اللي يعتبر "حركة" — 0 = من غير فلتر (أثقل على المعالج)
+  min_motion: 2.0
+  # حفظ صورة برضه لو المنتج مسجّل على الكاشير (للمراجعة)
+  save_sold: false
