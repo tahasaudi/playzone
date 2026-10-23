@@ -57,6 +57,7 @@ products:
 
 ```powershell
 python main.py --dry-run              # من غير تليجرام (سجل + صور بس)
+python main.py --shop                 # الموديل على كل كاميرات المحل مع بعض
 python main.py --show                 # نافذة معاينة، q للخروج
 python main.py --video test.mp4 --once 200   # تجربة على فيديو
 python main.py --verbose
