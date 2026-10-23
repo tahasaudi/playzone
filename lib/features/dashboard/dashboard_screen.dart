@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -42,6 +43,98 @@ class DashboardScreen extends ConsumerStatefulWidget {
 
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   SessionBoardEntry? _selectedEntry;
+
+  /// مفتاح تخزين أرقام الكروت (المدة + المبلغ + فردي/مالتي) في الإعدادات.
+  ///
+  /// الأرقام دي كانت في الذاكرة بس، فأي restart للبرنامج (تحديث أو نشر)
+  /// كان بيمسحها من كل كارت. دلوقتي بتتحفظ وبتترجع زي ما هي.
+  static const _cardInputsKey = 'dashboard_card_inputs';
+  Timer? _saveInputsTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreCardInputs();
+  }
+
+  @override
+  void dispose() {
+    _saveInputsTimer?.cancel();
+    super.dispose();
+  }
+
+  /// بترجع آخر أرقام كتبها الكاشير على الكروت قبل آخر restart.
+  Future<void> _restoreCardInputs() async {
+    try {
+      final raw =
+          await ref.read(appDatabaseProvider).settingsDao.getValue(_cardInputsKey);
+      if (!mounted || raw == null || raw.isEmpty) return;
+      final data = jsonDecode(raw);
+      if (data is! Map) return;
+
+      final durations = <int, int>{};
+      final amounts = <int, double>{};
+      final modes = <int, String>{};
+
+      final d = data['durations'];
+      if (d is Map) {
+        d.forEach((k, v) {
+          final id = int.tryParse('$k');
+          final minutes = v is num ? v.toInt() : int.tryParse('$v');
+          if (id != null && minutes != null) durations[id] = minutes;
+        });
+      }
+      final a = data['amounts'];
+      if (a is Map) {
+        a.forEach((k, v) {
+          final id = int.tryParse('$k');
+          final amount = v is num ? v.toDouble() : double.tryParse('$v');
+          if (id != null && amount != null && amount > 0) amounts[id] = amount;
+        });
+      }
+      final m = data['modes'];
+      if (m is Map) {
+        m.forEach((k, v) {
+          final id = int.tryParse('$k');
+          if (id != null && (v == 'single' || v == 'multi')) modes[id] = '$v';
+        });
+      }
+
+      if (durations.isEmpty && amounts.isEmpty && modes.isEmpty) return;
+      // ما نكتبش فوق أي اختيار بدأه الكاشير قبل ما التحميل يخلص
+      if (ref.read(deviceDurationsProvider).isEmpty &&
+          ref.read(deviceAmountsProvider).isEmpty &&
+          ref.read(deviceModesProvider).isEmpty) {
+        ref.read(deviceDurationsProvider.notifier).state = durations;
+        ref.read(deviceAmountsProvider.notifier).state = amounts;
+        ref.read(deviceModesProvider.notifier).state = modes;
+      }
+    } catch (_) {
+      // قيمة قديمة أو تالفة مايوقفش البرنامج
+    }
+  }
+
+  /// بتحفظ أرقام الكروت بعد آخر تعديل (بمهلة قصيرة عشان الكتابة في خانة
+  /// الفلوس ماتعملش حفظ لكل حرف).
+  void _scheduleSaveInputs() {
+    _saveInputsTimer?.cancel();
+    _saveInputsTimer = Timer(const Duration(milliseconds: 600), () async {
+      if (!mounted) return;
+      try {
+        final payload = jsonEncode({
+          'durations': ref.read(deviceDurationsProvider),
+          'amounts': ref.read(deviceAmountsProvider),
+          'modes': ref.read(deviceModesProvider),
+        });
+        await ref
+            .read(appDatabaseProvider)
+            .settingsDao
+            .setValue(_cardInputsKey, payload);
+      } catch (_) {
+        // فشل الحفظ مش بيوقف الشغل
+      }
+    });
+  }
 
   /// The machines' order on the board, and on the screens page: straight by the
   /// number they are numbered with in the room. One function for both, so the
@@ -562,6 +655,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       amounts[d.device.id] = (rate / 60) * minutes;
     }
     ref.read(deviceAmountsProvider.notifier).state = amounts;
+    _scheduleSaveInputs();
   }
 
   /// The cashier typed money: keep the amount, and work the minutes back
@@ -584,6 +678,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       amounts[d.device.id] = amount;
     }
     ref.read(deviceAmountsProvider.notifier).state = amounts;
+    _scheduleSaveInputs();
   }
 
   /// فردي ↔ مالتي: the same money is re-priced at the other rate, so the
@@ -594,7 +689,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       d.device.id: mode,
     };
     final amount = ref.read(deviceAmountsProvider)[d.device.id];
-    if (amount != null && amount > 0) _setDeviceAmount(d, amount);
+    if (amount != null && amount > 0) {
+      _setDeviceAmount(d, amount);
+    } else {
+      _scheduleSaveInputs();
+    }
   }
 
   /// "＋ وقت": the cashier types minutes OR money and the session gets

@@ -356,11 +356,8 @@ class DeviceCard extends StatelessWidget {
         ],
       ),
     );
-    // Before a session starts the list card gets a taller fixed box, so
-    // it reads as one big obvious tap target (the Spacers center the start
-    // button in the extra room). The popup card sizes itself as before.
-    // Balanced height for phone: compact cards reasonable height
-    if (compact) return SizedBox(height: 130, child: card);
+    // الارتفاع يتحكم فيه من شبكة الداشبورد (mainAxisExtent) عشان كل الكروت
+    // تظل متساوية ومفيش زرار ولا أرقام يختفوا أو يخرجوا بره الكارت
     return card;
   }
 
