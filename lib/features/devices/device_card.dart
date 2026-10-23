@@ -240,44 +240,19 @@ class DeviceCard extends StatelessWidget {
         Icon(device.type.icon,
             size: compact ? 14 : 18, color: AppColors.accentSecondary),
         SizedBox(width: compact ? 4 : 6),
+        // الاسم لوحده في السطر. شارة «مكتب» كانت متراكبة فوقه هنا فكانت
+        // بتغطيه — مكانها فوق اللوجو في السايدبار، مش على اسم الجهاز.
         Expanded(
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              Text('${device.type.labelAr} — ${device.name}',
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 1,
-                  textAlign: TextAlign.center,
-                  style: compact
-                      ? const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary)
-                      : AppTypography.cardTitle),
-              Positioned.fill(
-                child: Align(
-                  alignment: Alignment.center,
-                  child: Container(
-                    padding: EdgeInsets.symmetric(
-                        horizontal: compact ? 6 : 8, vertical: compact ? 2 : 3),
-                    decoration: BoxDecoration(
-                      color: AppColors.accentPrimary.withOpacity(0.18),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: AppColors.glassBorderPurple),
-                    ),
-                    child: Text(
-                      'مكتب',
-                      style: TextStyle(
-                        fontSize: compact ? 9 : 11,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
+          child: Text('${device.type.labelAr} — ${device.name}',
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+              textAlign: TextAlign.center,
+              style: compact
+                  ? const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary)
+                  : AppTypography.cardTitle),
         ),
         const SizedBox(width: AppSpacing.sm),
         StatusBadge(status: device.status, compact: true),
@@ -291,9 +266,9 @@ class DeviceCard extends StatelessWidget {
     // always sits at the end with fresh clearance under it. The list card
     // gets a guaranteed minimum height so it reads as a big tap target
     // before the session starts (the Spacers spread the slack evenly).
-    // الضغط بين البلوكات. في الكارت المضغوط لازم يفضل صغير: الكارت عنده
-    // ارتفاع ثابت من الشبكة، ولو المسافات كبرت الزراير بتطلع بره الكارت.
-    final gap = compact ? AppSpacing.sm : AppSpacing.lg;
+    // الضغط بين البلوكات. في الكارت المضغوط أقل شوية من الكارت الكبير، لكن
+    // مش ضيق أوي: الارتفاع ثابت من الشبكة والمساحة كلها محسوبة.
+    final gap = compact ? 12.0 : AppSpacing.lg;
     final card = GlassCard(
       hoverable: true,
       padding: _pad,

@@ -402,35 +402,21 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         : width >= 360
                             ? 3
                             : 2;
-            final spacing = AppSpacing.xs;
-            final totalSpacing = spacing * (columns - 1);
-            final itemWidth = (width - totalSpacing) / columns;
-            final itemHeight = itemWidth * 1.0;
-            return GridView.count(
-              crossAxisCount: columns,
+            return GridView.builder(
+              itemCount: devices.length,
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: AppSpacing.sm,
-              crossAxisSpacing: AppSpacing.sm,
-// Taller than wide so the card breathes: header, mode
-              // toggles, the minutes + money row and the start button
-              // each get their own space.
-              //
-              // 0.65 rather than 0.7: a RUNNING card now carries the same two mode
-              // chips an empty card does, which is one row taller. The chips were
-              // not squeezed or restyled to make it fit - the row was given the room it
-              // needs, because a card that measures its own controls differently
-              // depending on whether somebody is playing is worse than a card that
-              // is a few pixels taller.
-              //
-              // 0.55 rather than 0.65: on a 1370px window the grid is six
-              // columns wide, which left the empty card 262px tall while its
-              // own controls needed ~300 — the start button was painting
-              // outside the card. 0.55 gives that row ~310px at the same width,
-              // and the compact spacing above keeps the card under that even
-              // when the window is narrowed to five columns.
-              childAspectRatio: 0.55,
-              children: devices.map((d) {
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                mainAxisSpacing: AppSpacing.sm,
+                crossAxisSpacing: AppSpacing.sm,
+                // ارتفاع ثابت للكارت (نفس ارتفاعه على شاشة المكتب تقريبًا)،
+                // مش محسوب من عرض النافذة. لما كان بيتحسب من العرض، تضييق
+                // النافذة كان بيقصّ الكارت وزرار البدء بيطلع بره حدوده.
+                mainAxisExtent: 268,
+              ),
+              itemBuilder: (context, index) {
+                final d = devices[index];
                 final session = sessionByDevice[d.device.id];
                 final model =
                     _toUiModel(d.device, d.type, session, ordersBySession);
@@ -492,7 +478,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                             : () => _openExtendDialog(session),
                   ),
                 );
-              }).toList(),
+              },
             );
           }),
         ],
