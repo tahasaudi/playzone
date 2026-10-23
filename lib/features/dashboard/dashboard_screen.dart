@@ -410,10 +410,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 crossAxisCount: columns,
                 mainAxisSpacing: AppSpacing.sm,
                 crossAxisSpacing: AppSpacing.sm,
-                // ارتفاع ثابت للكارت (نفس ارتفاعه على شاشة المكتب تقريبًا)،
-                // مش محسوب من عرض النافذة. لما كان بيتحسب من العرض، تضييق
-                // النافذة كان بيقصّ الكارت وزرار البدء بيطلع بره حدوده.
-                mainAxisExtent: 268,
+                // ارتفاع ثابت لكافة حالات الكارت عشان مفيش حاجة تختفي
+                // ولا الأزرار ولا الأرقام تخرج بره الكارت
+                mainAxisExtent: 290,
               ),
               itemBuilder: (context, index) {
                 final d = devices[index];
