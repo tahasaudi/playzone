@@ -135,6 +135,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: AppSpacing.sm),
+              Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: _shopCamerasButton(),
+              ),
+              const SizedBox(height: AppSpacing.sm),
               devicesAsync.when(
                 loading: () => const Padding(
                   padding: EdgeInsets.symmetric(vertical: AppSpacing.xl),
@@ -170,14 +175,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         Positioned(
           left: AppSpacing.md,
           bottom: AppSpacing.md,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _shopCamerasButton(),
-              const SizedBox(height: AppSpacing.sm),
-              _searchButton(),
-            ],
-          ),
+          child: _searchButton(),
         ),
       ],
     );
@@ -424,7 +422,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               // needs, because a card that measures its own controls differently
               // depending on whether somebody is playing is worse than a card that
               // is a few pixels taller.
-              childAspectRatio: 0.65,
+              //
+              // 0.55 rather than 0.65: on a 1370px window the grid is six
+              // columns wide, which left the empty card 262px tall while its
+              // own controls needed ~300 — the start button was painting
+              // outside the card. 0.55 gives that row ~310px at the same width,
+              // and the compact spacing above keeps the card under that even
+              // when the window is narrowed to five columns.
+              childAspectRatio: 0.55,
               children: devices.map((d) {
                 final session = sessionByDevice[d.device.id];
                 final model =

@@ -291,7 +291,9 @@ class DeviceCard extends StatelessWidget {
     // always sits at the end with fresh clearance under it. The list card
     // gets a guaranteed minimum height so it reads as a big tap target
     // before the session starts (the Spacers spread the slack evenly).
-    final gap = compact ? AppSpacing.lg : AppSpacing.lg;
+    // الضغط بين البلوكات. في الكارت المضغوط لازم يفضل صغير: الكارت عنده
+    // ارتفاع ثابت من الشبكة، ولو المسافات كبرت الزراير بتطلع بره الكارت.
+    final gap = compact ? AppSpacing.sm : AppSpacing.lg;
     final card = GlassCard(
       hoverable: true,
       padding: _pad,
