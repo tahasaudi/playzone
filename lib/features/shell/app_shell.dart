@@ -36,6 +36,7 @@ import '../inventory/stock_count_screen.dart';
 import '../suppliers/suppliers_screen.dart';
 import '../partnership/partnership_screen.dart';
 import '../reports/protected_screen.dart';
+import '../notifications/fridge_alerts_screen.dart';
 import '../search/global_search_dialog.dart';
 import '../tv/tv_broadcaster.dart';
 import '../tv/tv_mode_screen.dart';
@@ -615,6 +616,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         return const ProtectedScreen();
       case 'backup':
         return const BackupScreen();
+      case 'fridge_alerts':
+        return const FridgeAlertsScreen();
       default:
         return Center(
           child: Text(
@@ -683,6 +686,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         return 'النسخ الاحتياطي';
       case 'screens':
         return 'شاشات الكافيه';
+      case 'fridge_alerts':
+        return 'إشعارات';
       default:
         return 'الرئيسية';
     }
@@ -746,6 +751,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         return 'نسخ آمنة من قاعدة البيانات';
       case 'screens':
         return 'كل شاشة باسمها وحالتها لحظيًا';
+      case 'fridge_alerts':
+        return 'تنبيهات سحب منتجات التلاجة من غير تسجيل';
       default:
         return 'مساء الخير 👋 — F1';
     }

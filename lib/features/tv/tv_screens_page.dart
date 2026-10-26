@@ -720,6 +720,106 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
     }
   }
 
+  Future<void> _playYoutube(String ip, String name) async {
+    if (ip.trim().isEmpty) {
+      _say('اكتب عنوان الشاشة الأول');
+      return;
+    }
+
+    final controller = TextEditingController();
+    final url = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: AppColors.bgElevated,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.medium),
+            side: const BorderSide(color: AppColors.glassBorder),
+          ),
+          title: const Text(
+            'شغل يوتيوب على الشاشة',
+            style: TextStyle(color: AppColors.textPrimary),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'حط رابط يوتيوب كامل هنا',
+                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                keyboardType: TextInputType.url,
+                style: const TextStyle(color: AppColors.textPrimary),
+                decoration: InputDecoration(
+                  hintText: 'https://www.youtube.com/watch?v=...',
+                  hintStyle: const TextStyle(color: AppColors.textTertiary),
+                  filled: true,
+                  fillColor: AppColors.bgElevated,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.small),
+                    borderSide: const BorderSide(color: AppColors.glassBorder),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.small),
+                    borderSide: const BorderSide(color: AppColors.glassBorder),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.small),
+                    borderSide: const BorderSide(color: AppColors.accentPrimary),
+                  ),
+                ),
+                onSubmitted: (value) =>
+                    Navigator.of(context).pop(value.trim()),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text(
+                'إلغاء',
+                style: TextStyle(color: AppColors.textSecondary),
+              ),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.accentPrimary,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('شغل'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (url == null || url.isEmpty || !mounted) return;
+
+    final uri = Uri.tryParse(url);
+    if (uri == null ||
+        (!uri.host.contains('youtube.com') &&
+            !uri.host.contains('youtu.be') &&
+            !uri.host.contains('youtube-nocookie.com'))) {
+      _say('الرابط ده مش رابط يوتيوب صحيح');
+      return;
+    }
+
+    _say('بنشغل يوتيوب على $name… بص على الشاشة');
+    final ok = await TvDisplayService.instance.playVideoUrl(ip.trim(), url);
+    if (!mounted) return;
+
+    if (!ok) {
+      _say('ماقدرتش أشغّل يوتيوب — شوف اللوج');
+    } else {
+      _say('يوتيوب شغال الآن ✅');
+    }
+  }
+
   Future<void> _stopMovie(String ip, String name) async {
     if (ip.trim().isEmpty) {
       _say('اكتب عنوان الشاشة الأول');
@@ -940,6 +1040,7 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
       onProbe: () => _probe(ip, identity.name),
       onSearch: () => _search(ip, identity.name),
       onPlayMovie: () => _playMovie(ip, identity.name),
+      onPlayYoutube: () => _playYoutube(ip, identity.name),
       onStopMovie: () => _stopMovie(ip, identity.name),
       onVolumeUp: () => _volume(ip, identity.name, 5),
       onVolumeDown: () => _volume(ip, identity.name, -5),
@@ -1279,6 +1380,7 @@ class _ScreenPanel extends StatelessWidget {
     required this.onProbe,
     required this.onSearch,
     required this.onPlayMovie,
+    required this.onPlayYoutube,
     required this.onStopMovie,
     required this.onVolumeUp,
     required this.onVolumeDown,
@@ -1310,6 +1412,7 @@ class _ScreenPanel extends StatelessWidget {
   final VoidCallback onProbe;
   final VoidCallback onSearch;
   final VoidCallback onPlayMovie;
+  final VoidCallback onPlayYoutube;
   final VoidCallback onStopMovie;
   final VoidCallback onVolumeUp;
   final VoidCallback onVolumeDown;
@@ -1669,6 +1772,11 @@ class _ScreenPanel extends StatelessWidget {
                   label: 'ابحث عن الشاشة',
                   icon: Icons.wifi_find_rounded,
                   onTap: onSearch),
+              const SizedBox(width: 6),
+              _ActionChip(
+                  label: 'شغل يوتيوب',
+                  icon: Icons.smart_display_rounded,
+                  onTap: onPlayYoutube),
               const SizedBox(width: 6),
               _ActionChip(
                   label: 'شغل فيلم',

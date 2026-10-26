@@ -44,6 +44,18 @@ class AppTopBar extends ConsumerWidget {
             onTap: onMenuTap,
           ),
           const SizedBox(width: AppSpacing.sm),
+          _TopIconButton(
+            icon: Icons.notifications_active_rounded,
+            tooltip: 'إشعارات',
+            onTap: () => onNavigate?.call('fridge_alerts'),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          _TopIconButton(
+            icon: Icons.notifications_active_rounded,
+            tooltip: 'إشعارات',
+            onTap: () => onNavigate?.call('fridge_alerts'),
+          ),
+          const SizedBox(width: AppSpacing.sm),
 
           // Quick jumps: the two screens the staff live in. One click
           // instead of opening the drawer (or remembering F1 / F2).
@@ -135,6 +147,14 @@ class AppTopBar extends ConsumerWidget {
           ),
 
           const SizedBox(width: AppSpacing.md),
+
+          // إشعارات رؤية الثلاجة
+          _TopIconButton(
+            icon: Icons.notifications_active_rounded,
+            tooltip: 'إشعارات',
+            onTap: () => onNavigate?.call('fridge_alerts'),
+          ),
+          const SizedBox(width: AppSpacing.sm),
 
           // Close-shift icon — spec: an icon on the home screen to close
           // the shift. Only shown to whoever has that permission.

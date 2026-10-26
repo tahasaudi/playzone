@@ -29,6 +29,7 @@ import '../devices/session_details_panel.dart';
 import '../devices/checkout_modal.dart';
 import '../devices/session_order_modal.dart';
 import '../tv/screens_popup.dart';
+import '../shell/app_shell.dart';
 
 /// Dashboard screen. Devices AND their live sessions come from the real
 /// database; the timer/cost update every second, billed per second, and
@@ -228,9 +229,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: AppSpacing.sm),
-              Align(
-                alignment: AlignmentDirectional.centerEnd,
-                child: _shopCamerasButton(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  _notificationsButton(),
+                  const SizedBox(width: AppSpacing.sm),
+                  _shopCamerasButton(),
+                ],
               ),
               const SizedBox(height: AppSpacing.sm),
               devicesAsync.when(
@@ -287,6 +292,46 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         backgroundColor:
             result.ok ? AppColors.glassFillStrong : AppColors.danger,
         behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Widget _notificationsButton() {
+    return Tooltip(
+      message: 'إشعارات',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: () {
+            ref.read(activeRouteProvider.notifier).state = 'fridge_alerts';
+          },
+          child: Ink(
+            height: 44,
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+            decoration: BoxDecoration(
+              color: AppColors.glassFillStrong.withOpacity(0.9),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: AppColors.glassBorderPurple),
+              boxShadow: AppShadows.card,
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.notifications_active_rounded, size: 20, color: AppColors.accentSecondary),
+                SizedBox(width: AppSpacing.sm),
+                Text(
+                  'إشعارات',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

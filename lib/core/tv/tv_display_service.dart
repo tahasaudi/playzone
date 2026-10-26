@@ -1514,6 +1514,40 @@ class TvDisplayService {
     if (!tvAllowed) return false;
     final key = tvIp.trim();
     if (key.isEmpty || url.trim().isEmpty) return false;
+
+    // Try to resolve direct stream for YouTube using yt-dlp if available
+    String playUrl = url.trim();
+    final uri = Uri.tryParse(playUrl);
+    if (uri != null &&
+        (uri.host.contains('youtube.com') ||
+            uri.host.contains('youtu.be') ||
+            uri.host.contains('youtube-nocookie.com'))) {
+      final ytdlp = await _getYtDlpPath();
+      if (ytdlp != null) {
+        try {
+          final deno = 'C:\\Users\\miza\\deno\\deno.exe';
+          final args = <String>[
+            if (File(deno).existsSync()) ...['--js-runtimes', 'deno:$deno'],
+            if (File(deno).existsSync()) ...['--remote-components', 'ejs:github'],
+            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            '-g',
+            playUrl,
+          ];
+          final res = await Process.run(ytdlp, args);
+          if (res.exitCode == 0) {
+            final out = (res.stdout as String).trim();
+            final lines = out.split(RegExp(r'\r?\n')).where((e) => e.trim().isNotEmpty).toList();
+            if (lines.isNotEmpty) {
+              // Use first video URL if available, else first line
+              playUrl = lines.first.trim();
+            }
+          }
+        } catch (e) {
+          _lastError = 'yt-dlp: $e';
+        }
+      }
+    }
+
     final self = await resolveLocalAddress(forHost: key);
     if (self == null) {
       _lastError = 'ما قدرتش أعرف IP الجهاز على الشبكة';
@@ -1525,14 +1559,14 @@ class TvDisplayService {
       return false;
     }
     _videoFiles.remove(key);
-    _videoUrls[key] = url.trim();
+    _videoUrls[key] = playUrl;
     _videoContentTypes[key] = contentType ?? 'video/mp4';
     _videoScreens.add(key);
     stopPushingScreen(key);
     _overrides.remove(key);
     unblank(tvIp: key);
 
-    final uri = _videoUriFor(self, key);
+    final proxyUri = _videoUriFor(self, key);
     final proto = _videoProtocolFor(_videoContentTypes[key]!);
     final didl =
         '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
@@ -1541,17 +1575,41 @@ class TvDisplayService {
         '<item id="0" parentID="-1" restricted="1">'
         '<dc:title>PlayZone Video</dc:title>'
         '<upnp:class>object.item.videoItem</upnp:class>'
-        '<res protocolInfo="$proto">$uri</res>'
+        '<res protocolInfo="$proto">$proxyUri</res>'
         '</item></DIDL-Lite>';
 
-    _log(key).lastPushedUri = uri;
+    _log(key).lastPushedUri = proxyUri;
 
-    final (okPlay, okSet) = await _startPlayback(ctl, key, uri, didl);
+    final (okPlay, okSet) = await _startPlayback(ctl, key, proxyUri, didl);
 
     _lastPushAt = DateTime.now();
     markReached(key, state: okPlay ? 'PLAYING' : 'UNKNOWN');
     noteCommand(key, 'تشغيل فيلم (لينك)', okPlay ? 'بيلعب الآن' : 'تم الإرسال', ok: okPlay);
     return okPlay || okSet;
+  }
+
+  Future<String?> _getYtDlpPath() async {
+    final candidates = [
+      'C:\\Users\\miza\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\yt-dlp.exe',
+      'C:\\Users\\miza\\yt-dlp.exe',
+      'yt-dlp.exe',
+      'yt-dlp',
+    ];
+    for (final c in candidates) {
+      if (c.contains('\\') || c.contains('/')) {
+        if (File(c).existsSync()) return c;
+      } else {
+        // try to find in PATH
+        try {
+          final res = await Process.run('where', [c]);
+          if (res.exitCode == 0) {
+            final out = (res.stdout as String).trim().split(RegExp(r'\r?\n')).first.trim();
+            if (out.isNotEmpty) return out;
+          }
+        } catch (_) {}
+      }
+    }
+    return null;
   }
 
   /// Hands a URI to the renderer and gets it moving.
