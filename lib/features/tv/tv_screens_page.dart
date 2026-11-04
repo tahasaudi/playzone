@@ -630,8 +630,17 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
             break;
           }
         }
-        // Keep what this screen answers with, so it can be recognised again.
-        await notifier.setStoredMacs(slot.index, candidates.join(','));
+        // Remember only the MACs that actually answered at this screen's
+        // address. Unioning every candidate (including ones that belonged to
+        // a different screen and were only ever there by accident) is how one
+        // screen's list grew to contain another screen's MACs and then stole
+        // its address on the next discovery run.
+        final matchedMacs = <String>{};
+        for (final mac in candidates) {
+          if (foundIp != null && byMac[mac] == foundIp) matchedMacs.add(mac);
+        }
+        final toStore = matchedMacs.isNotEmpty ? matchedMacs : candidates;
+        await notifier.setStoredMacs(slot.index, toStore.join(','));
 
         if (foundIp == null || foundIp == current) continue;
         final result = await notifier.saveSlot(slot.index, ip: foundIp);
@@ -1052,6 +1061,17 @@ class _TvScreensPageState extends ConsumerState<TvScreensPage> {
         TvPowerService.instance.turnOff(ip);
         _say('بتغمّض ${identity.name}');
       },
+      nonLg: slot.nonLg,
+      onToggleNonLg: ip.isEmpty
+          ? null
+          : () async {
+              final next = !slot.nonLg;
+              await notifier.setNonLgFor(key, next);
+              if (!mounted) return;
+              _say(next
+                  ? 'واعدنا ${identity.name} شاشة غير LG — DLNA بس بدون أوامر LG'
+                  : 'واعدنا ${identity.name} شاشة LG — أوامر LG شغالة');
+            },
     );
   }
 
@@ -1386,6 +1406,8 @@ class _ScreenPanel extends StatelessWidget {
     required this.onVolumeDown,
     required this.onOpen,
     required this.onClose,
+    this.nonLg = false,
+    this.onToggleNonLg,
   });
 
   final int index;
@@ -1418,6 +1440,11 @@ class _ScreenPanel extends StatelessWidget {
   final VoidCallback onVolumeDown;
   final VoidCallback onOpen;
   final VoidCallback onClose;
+
+  /// Whether the shop marked this television as a non-LG set (ATA and the
+  /// like): plain DLNA only.
+  final bool nonLg;
+  final VoidCallback? onToggleNonLg;
 
   @override
   Widget build(BuildContext context) {
@@ -1462,6 +1489,43 @@ class _ScreenPanel extends StatelessWidget {
                           tooltip: 'عدّل اسم الشاشة',
                           onTap: onEditName,
                         ),
+                        if (onToggleNonLg != null) ...[
+                          const SizedBox(width: 6),
+                          // The brand switch: an ATA (or any non-LG) set
+                          // answers plain DLNA only, so marking it here is
+                          // what stops the power path from talking LG's
+                          // own socket at it — seconds of nothing, every
+                          // press.
+                          GestureDetector(
+                            onTap: onToggleNonLg,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: nonLg
+                                    ? AppColors.accentPrimary
+                                        .withValues(alpha: 0.22)
+                                    : Colors.transparent,
+                                borderRadius: AppRadius.smallR,
+                                border: Border.all(
+                                  color: nonLg
+                                      ? AppColors.glassBorderPurple
+                                      : AppColors.glassBorder,
+                                ),
+                              ),
+                              child: Text(
+                                nonLg ? 'غير LG (ATA)' : 'شاشة LG',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: nonLg
+                                      ? AppColors.accentSecondary
+                                      : AppColors.textTertiary,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                     const SizedBox(height: 4),

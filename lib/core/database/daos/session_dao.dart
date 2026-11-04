@@ -295,6 +295,176 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
     await noteEvent(entry.session.id, 'extend', note: '$minutes');
   }
 
+  /// تنقيص وقت من جلسة (يخصم دقائق/أو يحطها timeup لو صفر)
+  Future<void> reduce(SessionBoardEntry entry, int minutes) async {
+    if (minutes <= 0) return;
+    final session = entry.session;
+    final isTimed = (session.plannedMinutes ?? 0) > 0 && session.timeUpAt != null;
+    if (!isTimed || session.timeUpAt == null) return;
+    final now = DateTime.now();
+    final newPlanned = ((session.plannedMinutes ?? 0) - minutes).clamp(0, 1000000);
+    final newTimeUp = session.timeUpAt!.subtract(Duration(minutes: minutes));
+    if (newPlanned <= 0 || newTimeUp.isBefore(now)) {
+      // يصير وقت انتهى ويُقفل
+      final f = _freeze(entry.session, entry.device, entry.type);
+      await (update(sessions)..where((s) => s.id.equals(session.id))).write(
+        SessionsCompanion(
+          plannedMinutes: const Value(0),
+          timeUpAt: Value(now),
+          segmentStartAt: const Value(null),
+          pausedAt: const Value(null),
+          status: const Value('timeup'),
+          endTime: Value(now),
+          updatedAt: Value(now),
+          accumulatedCost: Value(f.accumulated),
+          singleCost: Value(f.single),
+          multiCost: Value(f.multi),
+        ),
+      );
+      await (update(devices)..where((d) => d.id.equals(entry.device.id))).write(
+        DevicesCompanion(
+            status: const Value('available'), updatedAt: Value(now)),
+      );
+      await noteEvent(session.id, 'reduce', note: '$minutes');
+      return;
+    }
+    await (update(sessions)..where((s) => s.id.equals(session.id))).write(
+      SessionsCompanion(
+        plannedMinutes: Value(newPlanned),
+        timeUpAt: Value(newTimeUp),
+        updatedAt: Value(now),
+      ),
+    );
+    await noteEvent(session.id, 'reduce', note: '$minutes');
+  }
+
+  /// نقل وقت من جلسة لأخرى: لو toSession غير موجود نبدأ جلسة جديدة على جهاز toDeviceId
+  /// لكن هنا بنعالج غالبًا بنقل بين جلسات شغالة
+  Future<void> transferMinutes({
+    required SessionBoardEntry from,
+    required SessionBoardEntry to,
+    required int minutes,
+  }) async {
+    if (minutes <= 0) return;
+    // اخصم من from
+    await reduce(from, minutes);
+    final now = DateTime.now();
+    // أضف لـ to
+    final toTimed = (to.session.plannedMinutes ?? 0) > 0 && to.session.timeUpAt != null;
+    if (to.session.status == 'active' && toTimed && to.session.timeUpAt != null) {
+      final base = to.session.timeUpAt!.isAfter(now) ? to.session.timeUpAt! : now;
+      await (update(sessions)..where((s) => s.id.equals(to.session.id))).write(
+        SessionsCompanion(
+          plannedMinutes: Value((to.session.plannedMinutes ?? 0) + minutes),
+          timeUpAt: Value(base.add(Duration(minutes: minutes))),
+          updatedAt: Value(now),
+        ),
+      );
+      if (to.session.pausedAt == null && to.session.segmentStartAt == null) {
+        await (update(sessions)..where((s) => s.id.equals(to.session.id))).write(
+          SessionsCompanion(segmentStartAt: Value(now), status: const Value('active')),
+        );
+        await (update(devices)..where((d) => d.id.equals(to.device.id))).write(
+          DevicesCompanion(status: const Value('active'), updatedAt: Value(now)),
+        );
+      } else if (to.session.status != 'active') {
+        await (update(sessions)..where((s) => s.id.equals(to.session.id))).write(
+          SessionsCompanion(
+              segmentStartAt: Value(now),
+              pausedAt: const Value(null),
+              status: const Value('active'),
+              updatedAt: Value(now)),
+        );
+        await (update(devices)..where((d) => d.id.equals(to.device.id))).write(
+          DevicesCompanion(status: const Value('active'), updatedAt: Value(now)),
+        );
+      }
+      await noteEvent(to.session.id, 'transfer_in', note: 'from:${from.device.name}:$minutes');
+      await noteEvent(from.session.id, 'transfer_out', note: 'to:${to.device.name}:$minutes');
+      return;
+    }
+    // لو to غير شغالة أو مفتوحة نبدأ جلسة جديدة بنسخ المود
+    final newId = await into(sessions).insert(SessionsCompanion.insert(
+      deviceId: to.device.id,
+      customerId: Value(to.session.customerId),
+      employeeId: Value(to.session.employeeId),
+      plannedMinutes: Value(minutes),
+      mode: Value(to.session.mode),
+      timeUpAt: Value(now.add(Duration(minutes: minutes))),
+      segmentStartAt: Value(now),
+      status: const Value('active'),
+    ));
+    await (update(devices)..where((d) => d.id.equals(to.device.id))).write(
+      DevicesCompanion(
+          status: const Value('active'), updatedAt: Value(now)),
+    );
+    await noteEvent(newId, 'transfer_in', note: 'from:${from.device.name}:$minutes');
+    await noteEvent(from.session.id, 'transfer_out', note: 'to:${to.device.name}:$minutes');
+  }
+
+  /// نقل وقت إلى جهاز فاضي (مفيهوش جلسة): خُصم من المصدر أولًا،
+  /// وبعدين فُتحت جلسة جديدة على الجهاز الهدف بالوقت المنقول
+  /// وبنفس المود والعميل والموظف بتوع الجلسة المصدر.
+  Future<void> transferMinutesToEmpty({
+    required SessionBoardEntry from,
+    required int toDeviceId,
+    required int minutes,
+  }) async {
+    if (minutes <= 0) return;
+    // اخصم من from (وقت أو فيزيائي زي reduce العادي)
+    await reduce(from, minutes);
+    final now = DateTime.now();
+    final newId = await into(sessions).insert(SessionsCompanion.insert(
+      deviceId: toDeviceId,
+      customerId: Value(from.session.customerId),
+      employeeId: Value(from.session.employeeId),
+      plannedMinutes: Value(minutes),
+      mode: Value(from.session.mode),
+      timeUpAt: Value(now.add(Duration(minutes: minutes))),
+      segmentStartAt: Value(now),
+      status: const Value('active'),
+    ));
+    await (update(devices)..where((d) => d.id.equals(toDeviceId))).write(
+      DevicesCompanion(status: const Value('active'), updatedAt: Value(now)),
+    );
+    await noteEvent(newId, 'transfer_in', note: 'from:${from.device.name}:$minutes');
+    await noteEvent(from.session.id, 'transfer_out', note: 'to:device#$toDeviceId:$minutes');
+  }
+
+  /// تبديل الوقت بين جلستين شغالين
+  Future<void> swapMinutes({
+    required SessionBoardEntry a,
+    required SessionBoardEntry b,
+  }) async {
+    final aTimed = (a.session.plannedMinutes ?? 0) > 0 && a.session.timeUpAt != null;
+    final bTimed = (b.session.plannedMinutes ?? 0) > 0 && b.session.timeUpAt != null;
+    if (!aTimed || a.session.timeUpAt == null) return;
+    if (!bTimed || b.session.timeUpAt == null) return;
+    final now = DateTime.now();
+    final leftA = a.session.timeUpAt!.difference(a.session.pausedAt ?? now).inMinutes;
+    final leftB = b.session.timeUpAt!.difference(b.session.pausedAt ?? now).inMinutes;
+    if (leftA <= 0 || leftB <= 0) return;
+    // اضبط كل واحدة بالثانية
+    final baseA = a.session.pausedAt ?? now;
+    final baseB = b.session.pausedAt ?? now;
+    await (update(sessions)..where((s) => s.id.equals(a.session.id))).write(
+      SessionsCompanion(
+        plannedMinutes: Value(leftB),
+        timeUpAt: Value(baseA.add(Duration(minutes: leftB))),
+        updatedAt: Value(now),
+      ),
+    );
+    await (update(sessions)..where((s) => s.id.equals(b.session.id))).write(
+      SessionsCompanion(
+        plannedMinutes: Value(leftA),
+        timeUpAt: Value(baseB.add(Duration(minutes: leftA))),
+        updatedAt: Value(now),
+      ),
+    );
+    await noteEvent(a.session.id, 'swap_time', note: 'with:${b.device.name}:${leftA}<-${leftB}');
+    await noteEvent(b.session.id, 'swap_time', note: 'with:${a.device.name}:${leftB}<-${leftA}');
+  }
+
   /// Every session whose deadline has already passed — polled by
   /// [SessionRepository] once a second so the flip happens on its own.
   Future<List<SessionBoardEntry>> dueForTimeUp() async {
@@ -305,6 +475,7 @@ class SessionDao extends DatabaseAccessor<AppDatabase> with _$SessionDaoMixin {
     ])
           ..where(sessions.status.equals('active') &
               sessions.timeUpAt.isNotNull() &
+              sessions.plannedMinutes.isBiggerThanValue(0) &
               sessions.timeUpAt.isSmallerOrEqualValue(DateTime.now())))
         .get();
     return rows

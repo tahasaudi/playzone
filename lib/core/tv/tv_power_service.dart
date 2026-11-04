@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'hard_lock.dart';
+import 'tv_brands.dart';
 import 'tv_display_service.dart';
 import 'tv_mac_index.dart';
 import 'tv_ssap_service.dart';
@@ -349,13 +351,28 @@ class TvPowerService {
   Future<void> _wakeThenRelease(String tvIp) async {
     final tv = TvDisplayService.instance;
     final watch = Stopwatch()..start();
-    // The wake-up goes out without holding the release back. The packet needs
-    // a moment to arrive and the panel needs a moment to come up, and the
-    // release can be asked on every one of those moments — a panel that is
-    // already awake can be handed back to its console at once. Waiting for
-    // the whole burst before asking the panel anything was a second and a
-    // half of the button doing nothing at all.
-    unawaited(_sendMagicPacket());
+    // A non-LG wall (ATA and the like) knows nothing of LG's own control
+    // socket: every sentence we send there is seconds of nothing followed by
+    // silence, and the cashier reads the whole pause as «الشاشة مش بتقبل
+    // أوامر». So the plain road only — wake packet, then hand our black
+    // frame back. What the set shows after that is its own remote's job.
+    if (TvBrands.isNonLg(tvIp)) {
+      unawaited(_sendMagicPacket());
+      // Our own dark frame comes off at once: the screen was ours to dim,
+      // and un-dimming it is ours to do.
+      for (final wait in const [0, 250, 600, 1200]) {
+        if (wait > 0) await Future<void>.delayed(Duration(milliseconds: wait));
+        if (tv.isScreenClosed(tvIp)) {
+          _done(tvIp, 'الجلسة اتقفلت — الشاشة فضلت مقفولة', watch);
+          return;
+        }
+        tv.unblank(tvIp: tvIp);
+        tv.stopPushingScreen(tvIp);
+        break;
+      }
+      _done(tvIp, 'الشاشة رجعت', watch);
+      return;
+    }
     // LG's own "Screen On" goes out alongside: a panel that was put to sleep
     // with the screen command comes back with one sentence, and the picture
     // the customer was watching is already there. The release below still
@@ -450,7 +467,7 @@ class TvPowerService {
   bool isScreenDark(String tvIp) =>
       TvDisplayService.instance.isScreenClosed(tvIp);
 
-  bool turnOff(String tvIp) {
+  bool turnOff(String tvIp, {Uint8List? dimImage}) {
     if (kHardLockWallNetwork) return true;
     // Same MAC-first anchor as [turnOn]: a screen that moved is still the same
     // screen, and this command belongs on its new address.
@@ -475,14 +492,43 @@ class TvPowerService {
     _lastResult = 'الشاشة بتتغمّض';
     _endTiming();
     tv.noteCommand(tvIp, 'إغلاق', 'بتتغمّض', tookMs: _lastTookMs);
-    unawaited(_blankOut(tvIp));
+    unawaited(_blankOut(tvIp, dimImage: dimImage));
     return true;
   }
 
-  Future<void> _blankOut(String tvIp) async {
+  Future<void> _blankOut(String tvIp, {Uint8List? dimImage}) async {
     final tv = TvDisplayService.instance;
     final watch = Stopwatch()..start();
-    final screenOff = TvSsapService.instance.setScreenOn(tvIp, false);
+    // A custom dim picture stays on the wall: keep pushing it so the panel
+    // does not go black the moment a single push's playback ends. No SSAP
+    // screen-off either, otherwise the panel would darken and hide it.
+    if (dimImage != null) {
+      tv.markScreenClosed(tvIp);
+      await tv.blank(tvIp: tvIp, image: dimImage);
+      tv.stopPushingScreen(tvIp);
+      tv.startPushing(tvIp: tvIp);
+      _blanked(tvIp, 'dimmed', watch);
+      return;
+    }
+    // A non-LG wall answers no LG socket and no NetCast port: asking both is
+    // two timeouts of nothing before the same picture is pushed anyway. So
+    // the dark frame goes down the one road this set does answer — and via
+    // the keep-trying pusher rather than a one-shot, because this set
+    // «رفضت» every single-shot push while it was still in PLAYING from the
+    // previous frame, and a retry loop is what actually got a picture onto
+    // it. blank() parks tomorrow's frame and startPushing() keeps asking:
+    // the wall goes dark on its own the moment the set takes the picture.
+    if (TvBrands.isNonLg(tvIp)) {
+      tv.markScreenClosed(tvIp);
+      await tv.blank(tvIp: tvIp, image: null);
+      tv.stopPushingScreen(tvIp);
+      tv.startPushing(tvIp: tvIp);
+      _blanked(tvIp, 'بتتغمّض', watch);
+      return;
+    }
+    final screenOff = dimImage == null
+        ? TvSsapService.instance.setScreenOn(tvIp, false)
+        : Future.value(false);
     // The old NetCast ports are closed on this firmware, and waiting for them
     // to time out was a whole second of nothing before the screen was even
     // asked to go dark. It is tried alongside the picture now, not in front
@@ -496,7 +542,7 @@ class TvPowerService {
       // Whatever wakes this panel next must find the dark already waiting for
       // it, so the picture it would fetch is the black one and not the old
       // board.
-      await tv.blank(tvIp: tvIp);
+      await tv.blank(tvIp: tvIp, image: dimImage);
       _blanked(tvIp, 'الشاشة اتغمّضت', watch);
       return;
     }
@@ -505,7 +551,7 @@ class TvPowerService {
     // screen that needs the remote, and making the cashier watch a fourth and
     // fifth attempt does not change that.
     for (var i = 0; i < 2; i++) {
-      if (await tv.pushBlack(tvIp)) {
+      if (await tv.pushBlack(tvIp, image: dimImage)) {
         _blanked(tvIp, 'الشاشة اتغمّضت', watch);
         return;
       }

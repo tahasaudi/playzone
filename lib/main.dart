@@ -27,6 +27,11 @@ void main() async {
   // Opens the window channel the app uses for F11 full-screen toggling
   // (the shortcut itself lives in AppShell).
   await windowManager.ensureInitialized();
+  // The café's monitors are 1366x768, while the Windows runner used to open
+  // at 1440x900 with no minimum — so the bottom of the window sat off-screen
+  // and the cashier had to drag it up every morning.
+  await windowManager.setMinimumSize(const Size(1024, 700));
+  await windowManager.maximize();
   // Phone builds stay portrait; on the till this is a no-op.
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,

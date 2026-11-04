@@ -1,0 +1,11 @@
+{
+  "id": "com.playzone.board",
+  "version": "1.0.0",
+  "vendor": "PlayZone",
+  "type": "web",
+  "main": "index.html",
+  "title": "PlayZone",
+  "icon": "icon-80x80.png",
+  "largeIcon": "icon-130x130.png",
+  "support360": false
+}

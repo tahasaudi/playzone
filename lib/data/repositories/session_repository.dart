@@ -79,6 +79,32 @@ class SessionRepository {
   Future<void> extend(SessionBoardEntry entry, int minutes) =>
       _db.sessionDao.extend(entry, minutes);
 
+  Future<void> reduce(SessionBoardEntry entry, int minutes) =>
+      _db.sessionDao.reduce(entry, minutes);
+
+  Future<void> transferMinutes({
+    required SessionBoardEntry from,
+    required SessionBoardEntry to,
+    required int minutes,
+  }) =>
+      _db.sessionDao.transferMinutes(from: from, to: to, minutes: minutes);
+
+  /// نقل وقت إلى جهاز فاضي: ينقص من المصدر ويفتح جلسة جديدة
+  /// على الجهاز الهدف بنفس مود الجلسة المصدر.
+  Future<void> transferMinutesToEmpty({
+    required SessionBoardEntry from,
+    required int toDeviceId,
+    required int minutes,
+  }) =>
+      _db.sessionDao.transferMinutesToEmpty(
+          from: from, toDeviceId: toDeviceId, minutes: minutes);
+
+  Future<void> swapMinutes({
+    required SessionBoardEntry a,
+    required SessionBoardEntry b,
+  }) =>
+      _db.sessionDao.swapMinutes(a: a, b: b);
+
   /// The wall going dark or lit, logged against whatever session that
   /// machine is running — if any.
   ///

@@ -129,6 +129,8 @@ class DeviceCard extends StatelessWidget {
     this.onToggleScreen,
     this.onExtend,
     this.onExtendCustom,
+    this.onReduceTime,
+    this.onTransferTime,
   });
 
   final DeviceUiModel device;
@@ -214,9 +216,12 @@ class DeviceCard extends StatelessWidget {
   /// minutes OR money), no need to wait for the clock to hit zero.
   final VoidCallback? onExtendCustom;
 
+  final VoidCallback? onReduceTime;
+  final VoidCallback? onTransferTime;
+
   EdgeInsets get _pad => compact
-      ? const EdgeInsets.all(AppSpacing.md)
-      : const EdgeInsets.all(AppSpacing.lg);
+      ? const EdgeInsets.all(AppSpacing.sm)
+      : const EdgeInsets.all(AppSpacing.md);
 
   @override
   Widget build(BuildContext context) {
@@ -647,55 +652,53 @@ class DeviceCard extends StatelessWidget {
                       fontWeight: FontWeight.w700,
                       color: AppColors.warning)),
             ),
-          // Top-up while the session is still running: the cashier types
-          // minutes OR money. Beside it, the wall screen's own switch.
-          // The two small switches a running card carries, side by side. They
-          // share the row rather than taking a row each, because a card that
-          // grows a line per control is a card that stops holding six machines
-          // on one screen.
-          if (compact &&
-              (onExtendCustom != null || onToggleScreen != null)) ...[
-            const SizedBox(height: AppSpacing.xs),
-            Center(
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Row(
-                mainAxisSize: MainAxisSize.min,
+          // أزرار إدارة الوقت + شاشة الحائط
+          if ((onExtendCustom != null ||
+              onToggleScreen != null ||
+              onReduceTime != null ||
+              onTransferTime != null)) ...[
+            const SizedBox(height: 2),
+            if (onToggleScreen != null) ...[
+              _screenToggleChip(),
+              const SizedBox(height: 2),
+            ],
+            if (onExtendCustom != null || onReduceTime != null) ...[
+              Row(
                 children: [
-                  if (onToggleScreen != null) _screenToggleChip(),
-                  if (onToggleScreen != null && onExtendCustom != null)
-                    const SizedBox(width: 6),
                   if (onExtendCustom != null)
-                    GestureDetector(
-                      onTap: onExtendCustom,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppColors.accentPrimary.withOpacity(0.15),
-                          borderRadius: AppRadius.smallR,
-                          border:
-                              Border.all(color: AppColors.glassBorderPurple),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.more_time_rounded,
-                                size: 13, color: AppColors.accentSecondary),
-                            SizedBox(width: 4),
-                            Text('＋ وقت',
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: AppColors.accentSecondary,
-                                    fontWeight: FontWeight.w600)),
-                          ],
-                        ),
+                    Expanded(
+                      child: _timeActionChip(
+                        icon: Icons.more_time_rounded,
+                        label: '＋ وقت',
+                        onTap: onExtendCustom,
                       ),
                     ),
-                  ],
-                ),
+                  if (onExtendCustom != null && onReduceTime != null)
+                    const SizedBox(width: 2),
+                  if (onReduceTime != null)
+                    Expanded(
+                      child: _timeActionChip(
+                        icon: Icons.remove_circle_outline_rounded,
+                        label: 'تنقيص وقت',
+                        onTap: onReduceTime,
+                      ),
+                    ),
+                ],
               ),
-            ),
+              const SizedBox(height: 2),
+            ],
+            if (onTransferTime != null)
+              Row(
+                children: [
+                  Expanded(
+                    child: _timeActionChip(
+                      icon: Icons.swap_horiz_rounded,
+                      label: 'نقل وقت',
+                      onTap: onTransferTime,
+                    ),
+                  ),
+                ],
+              ),
           ],
           if (device.mode != null && onSwitchModeTo != null) ...[
             const SizedBox(height: AppSpacing.xs),
@@ -730,12 +733,14 @@ class DeviceCard extends StatelessWidget {
           if (compact)
             ...[
               const SizedBox(height: AppSpacing.xs),
+              _costRow('وقت', device.timeCost ?? '—'),
+              _costRow('طلبات كافيه', device.ordersCost ?? '—'),
               _costRow('الإجمالي', _sumCost(), emphasize: true),
             ]
           else ...[
             const SizedBox(height: AppSpacing.xs),
-            _costRow('الوقت', device.timeCost ?? '—'),
-            _costRow('الطلبات', device.ordersCost ?? '—'),
+            _costRow('وقت', device.timeCost ?? '—'),
+            _costRow('طلبات كافيه', device.ordersCost ?? '—'),
             _costRow('الإجمالي', _sumCost(), emphasize: true),
           ],
           SizedBox(height: compact ? AppSpacing.xs : AppSpacing.sm),
@@ -798,31 +803,29 @@ class DeviceCard extends StatelessWidget {
   }
 
   /// The machine's wall screen, as a switch.
-  ///
-  /// Measured to sit beside "＋ وقت" with the same 4px the two mode chips use,
-  /// so the card's small controls all speak the same spacing rather than each
-  /// one arriving with its own idea of it.
   Widget _screenToggleChip() {
     final dark = device.wallScreenDark;
     return GestureDetector(
       onTap: onToggleScreen,
       child: Container(
+        height: 32,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
           color: dark
               ? AppColors.glassFill
-              : AppColors.accentPrimary.withOpacity(0.15),
+              : AppColors.accentPrimary.withOpacity(0.16),
           borderRadius: AppRadius.smallR,
           border: Border.all(
             color: dark ? AppColors.glassBorder : AppColors.glassBorderPurple,
           ),
         ),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize: MainAxisSize.max,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(
               dark ? Icons.visibility_off_rounded : Icons.tv_rounded,
-              size: 13,
+              size: 14,
               color: dark ? AppColors.textSecondary : AppColors.accentSecondary,
             ),
             const SizedBox(width: 4),
@@ -830,11 +833,53 @@ class DeviceCard extends StatelessWidget {
               dark ? 'الشاشة مقفولة' : 'الشاشة مفتوحة',
               maxLines: 1,
               softWrap: false,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 11,
                 color:
                     dark ? AppColors.textSecondary : AppColors.accentSecondary,
                 fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _timeActionChip({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onTap,
+    bool large = false,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: AppColors.accentPrimary.withOpacity(0.12),
+          borderRadius: AppRadius.smallR,
+          border: Border.all(color: AppColors.glassBorderPurple),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 14, color: AppColors.accentSecondary),
+            const SizedBox(width: 4),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                softWrap: false,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AppColors.accentSecondary,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],

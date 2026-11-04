@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import '../window/window_state.dart';
 import '../sync/sync_config.dart';
 import 'hard_lock.dart';
+import 'tv_brands.dart';
 import 'tv_power_service.dart';
 import 'tv_screen_report.dart';
 import 'tv_ssap_service.dart';
@@ -696,20 +697,26 @@ class TvDisplayService {
   /// wall took every other wall in the café down with it, and a screen that
   /// was dark on purpose came back to life the moment the next session
   /// published its cards.
-  Future<void> blank({String? tvIp}) async {
+  /// Optional image to paint instead of pure black when [tvIp] dims. Used for
+  /// screens that should show a custom picture while idle (e.g. screen 1).
+  final Set<Uint8List> _dimImages = <Uint8List>{};
+
+  Future<void> blank({String? tvIp, Uint8List? image}) async {
     _black ??= await _buildBlackFrame();
+    final frame = image ?? _black!;
+    if (image != null) _dimImages.add(image);
     final key = tvIp?.trim() ?? '';
     if (key.isEmpty) {
       // No single screen in mind: the shared board itself goes dark.
-      _image = _black;
-      _imageBytes = _black!.length;
+      _image = frame;
+      _imageBytes = frame.length;
       return;
     }
     // Recorded per screen: "is this wall dark?" has to be answerable for one
     // panel at a time, and one blanket flag made a screen that had just been
     // blacked out look dark even after a different one was woken back up.
     _blankedScreens.add(key);
-    _overrides[key] = _black!;
+    _overrides[key] = frame;
     _tvFetchedScreens.remove(key);
     // Its own address changes, so it comes back for the new frame instead of
     // answering from its cache.
@@ -730,7 +737,9 @@ class TvDisplayService {
     // Only the black frame is taken away. A screen that is showing its own
     // name keeps its name — that label is not the darkness.
     final current = _overrides[key];
-    if (current != null && _black != null && identical(current, _black)) {
+    if (current != null &&
+        ((_black != null && identical(current, _black)) ||
+            _dimImages.contains(current))) {
       _overrides.remove(key);
     }
     _blanked = _blankedScreens.isNotEmpty;
@@ -997,8 +1006,13 @@ class TvDisplayService {
   /// Paints the screen at [tvIp] black — our stand-in for "off", since this
   /// TV refuses a real network power-off. One push, no loop, so it is
   /// immediate.
-  Future<bool> pushBlack(String tvIp) async {
+  Future<bool> pushBlack(String tvIp, {Uint8List? image}) async {
     if (!tvAllowed) return false;
+    if (image != null) _dimImages.add(image);
+    // Force a fresh control URL: the TV rotates its AVTransport endpoint, and
+    // a stale one is what made the dim image (and YouTube) fail with 701.
+    _controlCache.remove(tvIp.trim());
+    _suspect.remove(tvIp.trim());
     // Claimed before anything else happens, including the blank. From this
     // moment the wall is paid for and dark, and any release already in flight
     // is no longer allowed to take it back.
@@ -1011,13 +1025,14 @@ class TvDisplayService {
       final found = await _findControlUrl(tvIp, allowSweep: false);
       if (found == null) {
         if (!_warming.contains(tvIp)) unawaited(warmUp(tvIp: tvIp));
-        await blank(tvIp: tvIp);
+        await blank(tvIp: tvIp, image: image);
         return false;
       }
     }
     // The dark frame is parked for this screen alone, before the push, so the
-    // picture the television pulls is the black one and not the shared board.
-    await blank(tvIp: tvIp);
+    // picture the television pulls is the black one (or the custom dim image)
+    // and not the shared board.
+    await blank(tvIp: tvIp, image: image);
     // The announcement is what stops an LG renderer answering "no" because it
     // has never heard of this PC — but it was sent on every single push, which
     // cost a socket and a moment's wait on a button people watch closely. Once
@@ -1029,7 +1044,7 @@ class TvDisplayService {
     watch.stop();
     if (ok) {
       markReached(tvIp);
-      noteCommand(tvIp, 'التحصيل', 'اتغمّضت (سودا)',
+      noteCommand(tvIp, 'التحصيل', 'اتغمّضت',
           tookMs: watch.elapsedMilliseconds);
     }
     return ok;
@@ -1514,40 +1529,12 @@ class TvDisplayService {
     if (!tvAllowed) return false;
     final key = tvIp.trim();
     if (key.isEmpty || url.trim().isEmpty) return false;
-
-    // Try to resolve direct stream for YouTube using yt-dlp if available
-    String playUrl = url.trim();
-    final uri = Uri.tryParse(playUrl);
-    if (uri != null &&
-        (uri.host.contains('youtube.com') ||
-            uri.host.contains('youtu.be') ||
-            uri.host.contains('youtube-nocookie.com'))) {
-      final ytdlp = await _getYtDlpPath();
-      if (ytdlp != null) {
-        try {
-          final deno = 'C:\\Users\\miza\\deno\\deno.exe';
-          final args = <String>[
-            if (File(deno).existsSync()) ...['--js-runtimes', 'deno:$deno'],
-            if (File(deno).existsSync()) ...['--remote-components', 'ejs:github'],
-            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            '-g',
-            playUrl,
-          ];
-          final res = await Process.run(ytdlp, args);
-          if (res.exitCode == 0) {
-            final out = (res.stdout as String).trim();
-            final lines = out.split(RegExp(r'\r?\n')).where((e) => e.trim().isNotEmpty).toList();
-            if (lines.isNotEmpty) {
-              // Use first video URL if available, else first line
-              playUrl = lines.first.trim();
-            }
-          }
-        } catch (e) {
-          _lastError = 'yt-dlp: $e';
-        }
-      }
-    }
-
+    // Force a fresh control URL (see pushBlack).
+    _controlCache.remove(key);
+    _suspect.remove(key);
+    // YouTube hands out a page, not a file. Resolve it to a direct stream
+    // before the television is told what to fetch.
+    final playUrl = await _resolvePlayableUrl(url.trim());
     final self = await resolveLocalAddress(forHost: key);
     if (self == null) {
       _lastError = 'ما قدرتش أعرف IP الجهاز على الشبكة';
@@ -1566,7 +1553,7 @@ class TvDisplayService {
     _overrides.remove(key);
     unblank(tvIp: key);
 
-    final proxyUri = _videoUriFor(self, key);
+    final uri = _videoUriFor(self, key);
     final proto = _videoProtocolFor(_videoContentTypes[key]!);
     final didl =
         '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"'
@@ -1575,12 +1562,12 @@ class TvDisplayService {
         '<item id="0" parentID="-1" restricted="1">'
         '<dc:title>PlayZone Video</dc:title>'
         '<upnp:class>object.item.videoItem</upnp:class>'
-        '<res protocolInfo="$proto">$proxyUri</res>'
+        '<res protocolInfo="$proto">$uri</res>'
         '</item></DIDL-Lite>';
 
-    _log(key).lastPushedUri = proxyUri;
+    _log(key).lastPushedUri = uri;
 
-    final (okPlay, okSet) = await _startPlayback(ctl, key, proxyUri, didl);
+    final (okPlay, okSet) = await _startPlayback(ctl, key, uri, didl);
 
     _lastPushAt = DateTime.now();
     markReached(key, state: okPlay ? 'PLAYING' : 'UNKNOWN');
@@ -1588,28 +1575,170 @@ class TvDisplayService {
     return okPlay || okSet;
   }
 
-  Future<String?> _getYtDlpPath() async {
-    final candidates = [
-      'C:\\Users\\miza\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\yt-dlp.exe',
-      'C:\\Users\\miza\\yt-dlp.exe',
-      'yt-dlp.exe',
-      'yt-dlp',
+  /// Turns a page link into something a television can actually fetch.
+  ///
+  /// YouTube does not serve a media file at the address the staff copy from
+  /// the browser, so the link has to be resolved to its direct stream first.
+  /// `yt-dlp` does that, and it is *looked for* rather than assumed: a copy
+  /// next to the program wins, then one in the PlayZone data folder, then
+  /// whatever is on PATH, then the usual Python installs. Nothing is written
+  /// down as one user's home directory — that only ever worked on the machine
+  /// it was typed on, and broke the moment the program moved.
+  Future<String> _resolvePlayableUrl(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !_isYoutubeHost(uri.host)) return url;
+    return await _resolveYoutubeStream(url) ?? url;
+  }
+
+  /// Whether [host] belongs to YouTube (including the short `youtu.be` links).
+  static bool _isYoutubeHost(String host) {
+    final h = host.toLowerCase();
+    return h == 'youtu.be' ||
+        h.endsWith('.youtu.be') ||
+        h == 'youtube.com' ||
+        h.endsWith('.youtube.com') ||
+        h.endsWith('.youtube-nocookie.com');
+  }
+
+  /// Direct streams already resolved, so a two-second refresh loop does not
+  /// spawn yt-dlp again for a link it resolved a moment ago. YouTube's
+  /// addresses expire, hence the half-hour ceiling.
+  final Map<String, (String, DateTime)> _resolvedStreams = {};
+
+  Future<String?> _resolveYoutubeStream(String url) async {
+    final cached = _resolvedStreams[url];
+    if (cached != null &&
+        DateTime.now().difference(cached.$2) < const Duration(minutes: 30)) {
+      return cached.$1;
+    }
+    final tool = await _findYtDlp();
+    if (tool == null) {
+      _lastError = 'محتاج yt-dlp عشان يشغّل لينك يوتيوب';
+      return null;
+    }
+    // YouTube signs its stream addresses with a JavaScript challenge. The
+    // solver script needs a JavaScript runtime, and without one yt-dlp gives
+    // up entirely ("Requested format is not available") — so the runtime is
+    // looked for first and named explicitly when it is found.
+    final runtime = await _findJsRuntime();
+    if (runtime == null) {
+      _lastError = 'محتاج deno أو node عشان يشغّل يوتيوب';
+    }
+    final args = <String>[
+      if (runtime != null) ...['--js-runtimes', '${runtime.$1}:${runtime.$2}'],
+      // Without this, yt-dlp still answers, but half the formats come back
+      // broken ("n challenge solving failed") and the television shows a
+      // black frame. yt-dlp caches the script after the first fetch, so this
+      // costs one download and nothing after that.
+      '--remote-components', 'ejs:github',
+      '--no-playlist',
+      // Prefer an mp4 the panel can decode; `best` alone can hand back a
+      // codec (AV1, VP9) that a webOS set refuses.
+      '-f', 'best[ext=mp4][vcodec^=avc1]/best[ext=mp4]/best',
+      '-g',
+      url,
+    ];
+    try {
+      final res = await Process.run(tool, args);
+      if (res.exitCode != 0) {
+        _lastError = 'yt-dlp: ${(res.stderr as String).trim()}';
+        return null;
+      }
+      final first = (res.stdout as String)
+          .split(RegExp(r'\r?\n'))
+          .map((e) => e.trim())
+          .firstWhere((e) => e.isNotEmpty, orElse: () => '');
+      if (first.isEmpty) {
+        _lastError = 'yt-dlp رجع لينك فاضي';
+        return null;
+      }
+      _resolvedStreams[url] = (first, DateTime.now());
+      return first;
+    } catch (e) {
+      _lastError = 'yt-dlp: $e';
+      return null;
+    }
+  }
+
+  /// Finds a JavaScript runtime for yt-dlp's challenge solver.
+  ///
+  /// Returns `(runtimeName, path)` — `deno` or `node` — or null when the
+  /// machine has neither. Same rule as [_findYtDlp]: nothing is hard-coded to
+  /// one user's home folder, the usual install spots are tried in order.
+  Future<(String, String)?> _findJsRuntime() async {
+    final exeDir = p.dirname(Platform.resolvedExecutable);
+    final appData = Platform.environment['APPDATA'];
+    final localAppData = Platform.environment['LOCALAPPDATA'];
+    final userProfile = Platform.environment['USERPROFILE'];
+    final deno = <String>[
+      p.join(exeDir, 'deno.exe'),
+      if (appData != null) p.join(appData, 'PlayZone', 'deno.exe'),
+      if (localAppData != null) p.join(localAppData, 'deno', 'deno.exe'),
+      if (userProfile != null) p.join(userProfile, '.deno', 'bin', 'deno.exe'),
+      if (userProfile != null) p.join(userProfile, 'deno', 'deno.exe'),
+    ];
+    for (final c in deno) {
+      if (await File(c).exists()) return ('deno', c);
+    }
+    final onPath = await _findOnPath('deno');
+    if (onPath != null) return ('deno', onPath);
+
+    final node = <String>[
+      p.join(exeDir, 'node.exe'),
+      if (appData != null) p.join(appData, 'PlayZone', 'node.exe'),
+      if (localAppData != null) p.join(localAppData, 'Programs', 'nodejs', 'node.exe'),
+      r'C:\Program Files\nodejs\node.exe',
+    ];
+    for (final c in node) {
+      if (await File(c).exists()) return ('node', c);
+    }
+    final nodePath = await _findOnPath('node');
+    if (nodePath != null) return ('node', nodePath);
+    return null;
+  }
+
+  /// Finds `yt-dlp` without hard-coding a user name.
+  Future<String?> _findYtDlp() async {
+    final exeDir = p.dirname(Platform.resolvedExecutable);
+    final appData = Platform.environment['APPDATA'];
+    final localAppData = Platform.environment['LOCALAPPDATA'];
+    final userProfile = Platform.environment['USERPROFILE'];
+    final candidates = <String>[
+      p.join(exeDir, 'yt-dlp.exe'),
+      if (appData != null) p.join(appData, 'PlayZone', 'yt-dlp.exe'),
+      if (localAppData != null)
+        p.join(localAppData, 'Programs', 'Python', 'Python311', 'Scripts',
+            'yt-dlp.exe'),
+      if (localAppData != null)
+        p.join(localAppData, 'Programs', 'Python', 'Python312', 'Scripts',
+            'yt-dlp.exe'),
+      if (userProfile != null)
+        p.join(userProfile, 'AppData', 'Local', 'Programs', 'Python',
+            'Python311', 'Scripts', 'yt-dlp.exe'),
+      if (appData != null)
+        p.join(appData, 'Python', 'Python311', 'Scripts', 'yt-dlp.exe'),
+      if (localAppData != null)
+        p.join(localAppData, 'Programs', 'Python', 'Scripts', 'yt-dlp.exe'),
     ];
     for (final c in candidates) {
-      if (c.contains('\\') || c.contains('/')) {
-        if (File(c).existsSync()) return c;
-      } else {
-        // try to find in PATH
-        try {
-          final res = await Process.run('where', [c]);
-          if (res.exitCode == 0) {
-            final out = (res.stdout as String).trim().split(RegExp(r'\r?\n')).first.trim();
-            if (out.isNotEmpty) return out;
-          }
-        } catch (_) {}
-      }
+      if (await File(c).exists()) return c;
     }
-    return null;
+    return _findOnPath('yt-dlp');
+  }
+
+  /// First match for [name] on PATH, or null.
+  Future<String?> _findOnPath(String name) async {
+    try {
+      final res = await Process.run('where', ['$name.exe']);
+      if (res.exitCode != 0) return null;
+      final line = (res.stdout as String)
+          .split(RegExp(r'\r?\n'))
+          .map((e) => e.trim())
+          .firstWhere((e) => e.isNotEmpty, orElse: () => '');
+      return line.isEmpty ? null : line;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Hands a URI to the renderer and gets it moving.
@@ -1625,10 +1754,13 @@ class TvDisplayService {
     String uri,
     String didl,
   ) async {
-    // Put the renderer in a state it will accept a new URI from.
-    await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-    await _settle(ctl, key, 1500);
-    await Future<void>.delayed(const Duration(milliseconds: 250));
+    // Do NOT send `Stop` first. On an idle renderer (NO_MEDIA_PRESENT) a
+    // leading `Stop` poisons the following `SetAVTransportURI` with UPnP 716
+    // ("Resource not found") and the panel never fetches the picture - which
+    // is exactly why a wall stayed black even though the address was right.
+    // Verified against a 65UP7500PVG: Set+Play alone -> 200/PLAYING, while
+    // Stop then Set+Play -> 716. So the set is issued straight away, and a
+    // stop is only used as a last resort below.
 
     var okSet = await _soap(
         ctl,
@@ -1649,9 +1781,9 @@ class TvDisplayService {
       }
     }
     if (!okPlay) {
-      // Still refused: start over from a panel that is fully stopped.
-      await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>');
-      await _settle(ctl, key, 1800);
+      // Still refused: wait it out and try once more, without a Stop (which
+      // would only re-trigger the 716 above).
+      await Future<void>.delayed(const Duration(milliseconds: 1800));
       await Future<void>.delayed(const Duration(milliseconds: 400));
       okSet = await _soap(
           ctl,
@@ -1905,17 +2037,32 @@ class TvDisplayService {
       // instead. Waiting on a reply that may never come was the five seconds
       // the cashier spent looking at a screen that still showed the game.
       bool landed = false;
+      // A non-LG set (ATA and the like) has no console behind DLNA to hand
+      // back — the LG rule "never open with Stop" is about HDMI-CEC handing
+      // the wall to the PlayStation, and that hand-off does not exist here.
+      // These sets sit in PLAYING from the previous frame and REJECT every
+      // SetAVTransportURI until playback is stopped, so for them the Stop
+      // goes FIRST: it is what un-sticks the renderer, and it costs nothing.
+      final nonLg = TvBrands.isNonLg(tvIp);
       for (var attempt = 0; attempt < 3 && !landed; attempt++) {
         // A stop is only sent on the last try, where the screen is genuinely
         // holding on to something else. Sending it earlier is sending the one
         // command that hands the wall back to its console — the opposite of
-        // darkening it.
-        if (attempt == 2) {
-          await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>', replyMs: 600);
-          await _settle(ctl, tvIp, 500);
+        // darkening it. On a non-LG set the first try leads with it, for the
+        // reason above.
+        if (attempt == 2 || (attempt == 0 && nonLg)) {
+          await _soap(ctl, 'Stop', '<InstanceID>0</InstanceID>',
+              replyMs: nonLg ? 400 : 600);
+          await _settle(ctl, tvIp, nonLg ? 350 : 500);
         }
         final sending = _sendStill(ctl, uri, meta);
-        landed = await _awaitFetch(tvIp, before, attempt == 1 ? 700 : 900);
+        // These Wi-Fi panels pull the picture one and a half seconds after
+        // the play — the LG windows were tuned on wired sets and closed
+        // before the fetch ever arrived, which is how a screen that was
+        // about to fetch kept reading as one that refused. A non-LG wall
+        // gets the wider window.
+        landed = await _awaitFetch(
+            tvIp, before, attempt == 1 ? (nonLg ? 1600 : 700) : (nonLg ? 1900 : 900));
         // Let the command finish before the next try, so one panel is not
         // handed three pictures at the same moment.
         await sending;

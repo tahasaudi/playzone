@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>PlayZone — معاينة شاشة الجدار</title>
+<style>
+  /* PlayZone wall-screen board mockup — what the Flutter TV app will render. */
+  :root {
+    --bg: #0e0b16;
+    --card: rgba(255, 255, 255, 0.045);
+    --border: rgba(167, 139, 250, 0.18);
+    --accent: #a78bfa;
+    --green: #4ade80;
+    --red: #f87171;
+    --text: #ede9fe;
+    --dim: rgba(237, 233, 254, 0.45);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+    color: var(--text);
+    overflow: hidden;
+  }
+  .tv {
+    width: 100%; height: 100%;
+    padding: 3.2vmin;
+    display: flex; flex-direction: column; gap: 2.4vmin;
+    background:
+      radial-gradient(120vmin 60vmin at 50% -20%, rgba(167,139,250,0.14), transparent 60%),
+      radial-gradient(90vmin 50vmin at 85% 110%, rgba(74,222,128,0.07), transparent 60%),
+      var(--bg);
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    flex: 0 0 auto;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 1.4vmin;
+    font-size: 3.4vmin; font-weight: 800; letter-spacing: 0.06em;
+  }
+  .brand .dot {
+    width: 2vmin; height: 2vmin; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 2vmin var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  .clock { font-size: 2.9vmin; font-weight: 700; color: var(--dim); direction: ltr; }
+  .grid {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 2.2vmin;
+    min-height: 0;
+  }
+  .card {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 2.4vmin;
+    padding: 2.6vmin;
+    display: flex; flex-direction: column;
+    justify-content: space-between;
+    backdrop-filter: blur(8px);
+  }
+  .card.live {
+    background: linear-gradient(160deg, rgba(167,139,250,0.16), rgba(167,139,250,0.04));
+    border-color: rgba(167, 139, 250, 0.55);
+    box-shadow: 0 0 6vmin rgba(167, 139, 250, 0.25);
+  }
+  .row1 { display: flex; align-items: center; justify-content: space-between; }
+  .name { font-size: 3.6vmin; font-weight: 800; }
+  .badge {
+    font-size: 2vmin; font-weight: 700;
+    padding: 0.7vmin 1.8vmin; border-radius: 99vmin;
+    background: rgba(74, 222, 128, 0.16); color: var(--green);
+    border: 1px solid rgba(74, 222, 128, 0.4);
+  }
+  .badge.warn { background: rgba(248,113,113,0.15); color: var(--red); border-color: rgba(248,113,113,0.45); }
+  .customer { font-size: 2.6vmin; color: var(--dim); margin-top: 1vmin; }
+  .timer {
+    font-size: 6.4vmin; font-weight: 800; direction: ltr;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    text-shadow: 0 0 3vmin rgba(167, 139, 250, 0.45);
+  }
+  .card.warn .timer { color: var(--red); text-shadow: 0 0 3vmin rgba(248,113,113,0.5); }
+  .meta { font-size: 2.2vmin; color: var(--dim); }
+  .card.off {
+    justify-content: center; align-items: center;
+    color: rgba(237, 233, 254, 0.35);
+  }
+  .off .empty { font-size: 3.6vmin; font-weight: 700; }
+  .off .hint { font-size: 2.2vmin; margin-top: 0.8vmin; }
+  footer {
+    flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 2.1vmin; color: var(--dim);
+  }
+  footer .ok { color: var(--green); }
+</style>
+</head>
+<body>
+  <div class="tv">
+    <header>
+      <div class="brand"><span class="dot"></span> بلاي زون</div>
+      <div class="clock" id="clock">11:24 م</div>
+    </header>
+
+    <div class="grid">
+      <div class="card live">
+        <div>
+          <div class="row1"><span class="name">PS4 - 6</span><span class="badge warn">شغالة</span></div>
+          <div class="customer">جلسة: أحمد</div>
+        </div>
+        <div class="timer">01:23:45</div>
+        <div class="meta">جهاز 6 · بدأت 10:01 م · فردّي</div>
+      </div>
+
+      <div class="card live">
+        <div>
+          <div class="row1"><span class="name">PS5 - 4</span><span class="badge">مسدود</span></div>
+          <div class="customer">جلسة: كريم</div>
+        </div>
+        <div class="timer">02:10:00</div>
+        <div class="meta">جهاز 4 · بدأت 9:14 م</div>
+      </div>
+
+      <div class="card off">
+        <div class="empty">فاضي</div>
+        <div class="hint">جاهز لأي عميل</div>
+      </div>
+
+      <div class="card off">
+        <div class="empty">فاضي</div>
+        <div class="hint">PS4 - 1</div>
+      </div>
+
+      <div class="card live warn">
+        <div>
+          <div class="row1"><span class="name">PS5 - 5</span><span class="badge warn">الوقت خلص تقريبًا</span></div>
+          <div class="customer">جلسة: مصطفى</div>
+        </div>
+        <div class="timer">00:02:11</div>
+        <div class="meta">جهاز 5 · بدأت 11:15 م</div>
+      </div>
+
+      <div class="card off">
+        <div class="empty">مظلمة</div>
+        <div class="hint">الشاشة مقفولة من البرنامج</div>
+      </div>
+    </div>
+
+    <footer>
+      <div><span class="ok">●</span> متصل بالكاشير (192.168.1.109)</div>
+      <div>PlayZone Wall · نسخة تجريبية</div>
+    </footer>
+  </div>
+
+<script>
+  // The clock ticks like the real app will, once per second.
+  const el = document.getElementById('clock');
+  setInterval(() => {
+    const d = new Date();
+    const h = d.getHours() % 12 || 12;
+    const m = String(d.getMinutes()).padStart(2, '0');
+    el.textContent = `${h}:${m} ${d.getHours() < 12 ? 'ص' : 'م'}`;
+  }, 1000);
+</script>
+</body>
+</html>

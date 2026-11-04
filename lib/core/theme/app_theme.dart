@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'app_colors.dart';
 
 class AppTheme {
@@ -16,8 +15,10 @@ class AppTheme {
         surface: AppColors.bgElevated,
         error: AppColors.danger,
       ),
-      // Arabic-first font. Falls back gracefully for Latin text too.
-      textTheme: GoogleFonts.tajawalTextTheme(base.textTheme).apply(
+      // Arabic-first font, bundled as an asset so it is the same on every
+      // machine with or without a network.
+      textTheme: base.textTheme.apply(
+        fontFamily: 'Tajawal',
         bodyColor: AppColors.textPrimary,
         displayColor: AppColors.textPrimary,
       ),

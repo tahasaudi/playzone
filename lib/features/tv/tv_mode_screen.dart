@@ -7,6 +7,7 @@ import '../../core/database/daos/device_dao.dart';
 import '../../core/database/daos/session_dao.dart';
 import '../../core/database/database_provider.dart';
 import '../../core/sync/sync_config.dart';
+import '../../core/tv/tv_brands.dart';
 import '../../core/tv/tv_mac_index.dart';
 import '../../core/tv/tv_power_service.dart';
 import '../../core/tv/tv_display_service.dart';
@@ -27,6 +28,7 @@ class TvScreenSlot {
     required this.ip,
     required this.name,
     this.deviceId,
+    this.nonLg = false,
   });
 
   /// Which setting keys this slot is stored under.
@@ -43,6 +45,11 @@ class TvScreenSlot {
 
   bool get isEmpty => ip.trim().isEmpty;
 
+  /// Marked as a non-LG screen (ATA and the like): plain DLNA only. The
+  /// power path skips LG's own control socket entirely for a screen with
+  /// this flag instead of burning seconds of nothing on it.
+  final bool nonLg;
+
   TvScreenIdentity get identity =>
       TvScreenIdentity(ip: ip.trim(), name: name, deviceId: deviceId);
 
@@ -50,6 +57,7 @@ class TvScreenSlot {
     String? ip,
     String? name,
     int? deviceId,
+    bool? nonLg,
     bool clearDevice = false,
   }) =>
       TvScreenSlot(
@@ -57,6 +65,7 @@ class TvScreenSlot {
         ip: ip ?? this.ip,
         name: name ?? this.name,
         deviceId: clearDevice ? null : (deviceId ?? this.deviceId),
+        nonLg: nonLg ?? this.nonLg,
       );
 }
 
@@ -76,6 +85,8 @@ class TvConfig {
     this.secondDeviceId,
     this.name = 'الشاشة الأولى (55 بوصة)',
     this.secondName = 'الشاشة التانية (65 بوصة)',
+    this.nonLg = false,
+    this.secondNonLg = false,
     this.extras = const <TvScreenSlot>[],
     this.loaded = false,
   });
@@ -109,6 +120,10 @@ class TvConfig {
   /// the counter: "الشاشة التانية" beats "192.168.1.31".
   final String name;
   final String secondName;
+
+  /// Marked as a non-LG screen (ATA and the like): plain DLNA only.
+  final bool nonLg;
+  final bool secondNonLg;
 
   /// Screens past the second. Held apart so the first two keep their original
   /// keys untouched — a café that was configured before had three screens
@@ -176,13 +191,15 @@ class TvConfig {
   /// screen on the page while its IP is being retyped, instead of making the
   /// panel vanish the moment the field is cleared.
   List<TvScreenSlot> get editSlots => [
-        TvScreenSlot(index: 0, ip: ip, name: name, deviceId: deviceId),
+        TvScreenSlot(
+            index: 0, ip: ip, name: name, deviceId: deviceId, nonLg: nonLg),
         if (hasSecond)
           TvScreenSlot(
             index: 1,
             ip: secondIp,
             name: secondName,
             deviceId: secondDeviceId,
+            nonLg: secondNonLg,
           ),
         ...extras,
       ];
@@ -222,6 +239,8 @@ class TvConfig {
     String? secondName,
     List<TvScreenSlot>? extras,
     bool? loaded,
+    bool? nonLg,
+    bool? secondNonLg,
     bool clearDevice = false,
     bool clearSecondDevice = false,
   }) =>
@@ -236,6 +255,8 @@ class TvConfig {
             clearSecondDevice ? null : (secondDeviceId ?? this.secondDeviceId),
         name: name ?? this.name,
         secondName: secondName ?? this.secondName,
+        nonLg: nonLg ?? this.nonLg,
+        secondNonLg: secondNonLg ?? this.secondNonLg,
         extras: extras ?? this.extras,
         loaded: loaded ?? this.loaded,
       );
@@ -352,6 +373,8 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     final device2 = await _db.settingsDao.getValue(secondDeviceKey);
     final name = await _db.settingsDao.getValue(nameKey);
     final name2 = await _db.settingsDao.getValue(secondNameKey);
+    final nonLg1 = await _db.settingsDao.getValue(nonLgKeyFor(0));
+    final nonLg2 = await _db.settingsDao.getValue(nonLgKeyFor(1));
 
     // Read the third screen onwards. Bounded by the same ceiling the UI uses,
     // and each screen read independently so one missing key does not cost the
@@ -362,6 +385,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
       if (eIp == null || eIp.trim().isEmpty) continue;
       final eDevice = await _db.settingsDao.getValue(deviceKeyFor(i));
       final eName = await _db.settingsDao.getValue(nameKeyFor(i));
+      final eNonLg = await _db.settingsDao.getValue(nonLgKeyFor(i));
       extras.add(TvScreenSlot(
         index: i,
         ip: eIp.trim(),
@@ -372,6 +396,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
             ? 'شاشة ${i + 1}'
             : eName.trim(),
         deviceId: _parseDevice(eDevice),
+        nonLg: eNonLg == '1',
       ));
     }
 
@@ -386,6 +411,8 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
         name: (name == null || name.trim().isEmpty) ? null : name.trim(),
         secondName:
             (name2 == null || name2.trim().isEmpty) ? null : name2.trim(),
+        nonLg: nonLg1 == '1',
+        secondNonLg: nonLg2 == '1',
         extras: extras,
       );
     } else if (SyncRuntime.role != SyncRole.client) {
@@ -396,7 +423,19 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
       setIp(state.ip);
       setEnabled(true);
     }
+    _primeBrands();
     state = state.copyWith(loaded: true);
+  }
+
+  /// Fills the shared brand table from the loaded screens, so the power path
+  /// knows which walls are non-LG before the first button press.
+  void _primeBrands() {
+    TvBrands.forgetAll();
+    TvBrands.setNonLg(state.ip, state.nonLg);
+    TvBrands.setNonLg(state.secondIp, state.secondNonLg);
+    for (final slot in state.extras) {
+      TvBrands.setNonLg(slot.ip, slot.nonLg);
+    }
   }
 
   static int? _parseDevice(String? raw) =>
@@ -415,6 +454,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     String? ip,
     String? name,
     int? deviceId,
+    bool? nonLg,
     bool clearDevice = false,
   }) async {
     // Refused before anything is written, so a rejected save cannot leave the
@@ -439,6 +479,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
       } else if (deviceId != null) {
         setDevice(deviceId);
       }
+      if (nonLg != null) setNonLgFor(0, nonLg);
       return null;
     }
     if (index == 1) {
@@ -449,6 +490,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
       } else if (deviceId != null) {
         setSecondDevice(deviceId);
       }
+      if (nonLg != null) setNonLgFor(1, nonLg);
       return null;
     }
 
@@ -464,6 +506,7 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
       deviceId: clearDevice
           ? null
           : (deviceId ?? (clearDevice ? null : existing?.deviceId)),
+      nonLg: nonLg ?? existing?.nonLg ?? false,
     );
     final next = [
       for (final s in state.extras)
@@ -475,8 +518,38 @@ class TvConfigNotifier extends StateNotifier<TvConfig> {
     await _db.settingsDao.setValue(nameKeyFor(index), updated.name);
     await _db.settingsDao
         .setValue(deviceKeyFor(index), updated.deviceId?.toString() ?? 'all');
+    if (nonLg != null) setNonLgFor(index, nonLg);
     return null;
   }
+
+  /// Saves the "غير LG" flag of one screen and syncs the shared brand
+  /// table in the same breath, so a saved screen is obeyed on the very
+  /// next button press — not after a restart.
+  Future<void> setNonLgFor(int index, bool nonLg) async {
+    if (index == 0) {
+      state = state.copyWith(nonLg: nonLg);
+      TvBrands.setNonLg(state.ip, nonLg);
+    } else if (index == 1) {
+      state = state.copyWith(secondNonLg: nonLg);
+      TvBrands.setNonLg(state.secondIp, nonLg);
+    } else {
+      final existing = state.extras.where((s) => s.index == index).firstOrNull;
+      if (existing != null) {
+        final updated = existing.copyWith(nonLg: nonLg);
+        state = state.copyWith(
+          extras: [
+            for (final s in state.extras)
+              if (s.index == index) updated else s,
+          ],
+        );
+        TvBrands.setNonLg(updated.ip, nonLg);
+      }
+    }
+    await _db.settingsDao.setValue('tv_non_lg_${index + 1}', nonLg ? '1' : '0');
+  }
+
+  /// Where one screen's "غير LG" flag is stored, numbered like the slots.
+  static String nonLgKeyFor(int index) => 'tv_non_lg_${index + 1}';
 
   /// Puts the screen at [index] onto [deviceId], swapping with whichever screen
   /// holds that device already.

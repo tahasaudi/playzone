@@ -39,3 +39,23 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Bundled, not fetched. The till is deliberately off the network, and
+  # `GoogleFonts` downloads at runtime — so on a fresh install with no
+  # internet the whole UI fell back to a system font and the Arabic looked
+  # different on every machine.
+  fonts:
+    - family: Tajawal
+      fonts:
+        - asset: assets/fonts/Tajawal-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Tajawal-Regular.ttf
+          weight: 500
+        - asset: assets/fonts/Tajawal-Regular.ttf
+          weight: 600
+        - asset: assets/fonts/Tajawal-Regular.ttf
+          weight: 700
+
+  # Custom dim image for screen 1 (cyber/snake metal).
+  assets:
+    - assets/dim/screen1.png

@@ -526,6 +526,10 @@ class _AppShellState extends ConsumerState<AppShell> {
                     AppTopBar(
                       title: _titleFor(activeRoute),
                       subtitle: _subtitleFor(activeRoute),
+                      // The badge used to be hardcoded to "offline", so a
+                      // till that was syncing fine still claimed it was not.
+                      // It now follows the sync layer it is describing.
+                      isOffline: !SyncService.instance.started,
                       onMenuTap: _openDrawer,
                       onNavigate: (route) =>
                           ref.read(activeRouteProvider.notifier).state = route,

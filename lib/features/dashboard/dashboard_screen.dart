@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_tokens.dart';
@@ -23,6 +25,7 @@ import '../../core/utils/esc_handler_provider.dart';
 import '../../core/ir/ir_box_repository.dart';
 import '../../core/tv/tv_power_service.dart';
 import '../../core/vision/vision_launcher.dart';
+import '../../core/tv/tv_display_service.dart';
 import '../tv/tv_mode_screen.dart';
 import '../devices/device_card.dart';
 import '../devices/session_details_panel.dart';
@@ -102,6 +105,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       }
 
       if (durations.isEmpty && amounts.isEmpty && modes.isEmpty) return;
+      // Anything written down for a machine that is not in a session is
+      // yesterday's card, not this morning's. Dropping it here is what keeps
+      // one machine's "مالتي" from coming back on every card after a restart.
+      final running = ref.read(activeSessionsProvider).valueOrNull;
+      if (running != null) {
+        final live = {for (final e in running) e.device.id};
+        durations.removeWhere((id, _) => !live.contains(id));
+        amounts.removeWhere((id, _) => !live.contains(id));
+        modes.removeWhere((id, _) => !live.contains(id));
+      }
       // ما نكتبش فوق أي اختيار بدأه الكاشير قبل ما التحميل يخلص
       if (ref.read(deviceDurationsProvider).isEmpty &&
           ref.read(deviceAmountsProvider).isEmpty &&
@@ -150,6 +163,25 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
   String _modeForDevice(int deviceId) =>
       ref.read(deviceModesProvider)[deviceId] ?? 'single';
+
+  /// Puts one machine's card back to its default once its session is over.
+  ///
+  /// The board remembers the cashier's last numbers across restarts, which is
+  /// what makes a restart mid-shift safe — but it also meant a machine left
+  /// on "مالتي" came back as "مالتي" the next morning, with yesterday's
+  /// minutes still typed in. A finished session has no numbers worth keeping.
+  void _resetDeviceInputs(int deviceId) {
+    ref.read(deviceModesProvider.notifier).state = {
+      ...ref.read(deviceModesProvider)
+    }..remove(deviceId);
+    ref.read(deviceDurationsProvider.notifier).state = {
+      ...ref.read(deviceDurationsProvider)
+    }..remove(deviceId);
+    ref.read(deviceAmountsProvider.notifier).state = {
+      ...ref.read(deviceAmountsProvider)
+    }..remove(deviceId);
+    _scheduleSaveInputs();
+  }
 
   /// Money (EGP) → the minutes it buys at [rate], or null (open-ended).
   int? _minutesFromAmount(double? amount, double rate) {
@@ -550,7 +582,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 crossAxisSpacing: AppSpacing.sm,
                 // ارتفاع ثابت لكافة حالات الكارت عشان مفيش حاجة تختفي
                 // ولا الأزرار ولا الأرقام تخرج بره الكارت
-                mainAxisExtent: 290,
+                mainAxisExtent: 385,
               ),
               itemBuilder: (context, index) {
                 final d = devices[index];
@@ -613,6 +645,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         session == null || session.session.status != 'active'
                             ? null
                             : () => _openExtendDialog(session),
+                    onReduceTime:
+                        session == null || session.session.status != 'active' || !session.isTimed
+                            ? null
+                            : () => _openReduceDialog(session),
+                    onTransferTime:
+                        session == null || session.session.status != 'active'
+                            ? null
+                            : () => _openTransferDialog(session),
                   ),
                 );
               },
@@ -741,6 +781,190 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
+  Future<void> _openReduceDialog(SessionBoardEntry entry) async {
+    final minutes = await showDialog<int>(
+      context: context,
+      builder: (_) => _ExtendTimeDialog(
+        sessionTitle: 'تنقيص وقت — ${entry.type.name} — ${entry.device.name}',
+        modeLabel: entry.session.mode == 'multi' ? 'مالتي' : 'فردي',
+        rate: _sessionRateFor(entry),
+        title: 'تنقيص وقت',
+        confirmLabel: 'تنقيص',
+      ),
+    );
+    if (minutes == null || minutes <= 0) return;
+    await ref.read(sessionRepositoryProvider).reduce(entry, minutes);
+  }
+
+  Future<void> _openTransferDialog(SessionBoardEntry entry) async {
+    final sessions = ref.read(activeSessionsProvider).value ?? const [];
+    final devicesWithTypes = ref.read(devicesWithTypeProvider).value ?? const [];
+    final runningOthers = sessions
+        .where((s) => s.device.id != entry.device.id)
+        .toList()
+      ..sort((a, b) => compareDeviceNumbers(a.device.name, b.device.name));
+
+    final activeDeviceIds = sessions.map((s) => s.device.id).toSet();
+    final emptyOthers = devicesWithTypes
+        .where((d) =>
+            d.device.id != entry.device.id &&
+            !activeDeviceIds.contains(d.device.id) &&
+            d.device.status == 'available')
+        .toList()
+      ..sort((a, b) => compareDeviceNumbers(a.device.name, b.device.name));
+
+    if (runningOthers.isEmpty && emptyOthers.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('مفيش أجهزة تانية لنقل الوقت ليها')),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    final prepared = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.bgElevated,
+        shape: RoundedRectangleBorder(
+            borderRadius: AppRadius.largeR,
+            side: const BorderSide(color: AppColors.glassBorderPurple)),
+        title: const Text('نقل وقت - قائمة جاهزة', style: AppTypography.sectionTitle),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'من: ${entry.type.name} — ${entry.device.name} (${entry.session.mode == 'multi' ? 'مالتي' : 'فردي'})',
+              style: AppTypography.secondary,
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            if (runningOthers.isNotEmpty) ...[
+              const Text('أجهزة شغالة:', style: AppTypography.secondary),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final s in runningOthers)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: AppColors.glassFill,
+                        borderRadius: AppRadius.smallR,
+                        border: Border.all(color: AppColors.glassBorder),
+                      ),
+                      child: Text(
+                        '${s.type.name} — ${s.device.name} • فاضل ${s.remainingMinutes?.toStringAsFixed(0) ?? '-'} د',
+                        style: const TextStyle(fontSize: 12, color: AppColors.textPrimary),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.sm),
+            ],
+            if (emptyOthers.isNotEmpty) ...[
+              const Text('أجهزة فاضية:', style: AppTypography.secondary),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final d in emptyOthers)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: AppColors.glassFill,
+                        borderRadius: AppRadius.smallR,
+                        border: Border.all(color: AppColors.glassBorder),
+                      ),
+                      child: Text(
+                        '${d.type.name} — ${d.device.name} • فاضي',
+                        style: const TextStyle(fontSize: 12, color: AppColors.textPrimary),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.sm),
+            ],
+            const SizedBox(height: AppSpacing.md),
+            const Text(
+              'عاوز أعرف منطق النقل الأول قبل ما ننفذ:\n١) نقل كمية دقائق لجهاز شغال أو لجهاز فاضي\n٢) تبديل الوقت المتبقي بين الاتنين بالكامل (يعمل بس بين جهازين عليهما جلسة شغالة)',
+              style: TextStyle(fontSize: 12, color: AppColors.textTertiary),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('متابعة'),
+          ),
+        ],
+      ),
+    );
+
+    if (prepared != true || !mounted) return;
+
+    final result = await showDialog<_TransferResult>(
+      context: context,
+      builder: (_) => _TransferTimeDialog(
+        fromEntry: entry,
+        rate: _sessionRateFor(entry),
+        emptyTargets: emptyOthers,
+      ),
+    );
+    if (result == null || (result.minutes <= 0 && !result.swap)) return;
+    if (result.swap) {
+      SessionBoardEntry? toEntry;
+      for (final s in runningOthers) {
+        if (s.device.id == result.toDeviceId) {
+          toEntry = s;
+          break;
+        }
+      }
+      if (toEntry == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('التبديل بيتم بس بين جهازين عليهما جلسة شغالة')),
+          );
+        }
+        return;
+      }
+      await ref.read(sessionRepositoryProvider).swapMinutes(a: entry, b: toEntry);
+    } else {
+      SessionBoardEntry? toEntry;
+      for (final s in runningOthers) {
+        if (s.device.id == result.toDeviceId) {
+          toEntry = s;
+          break;
+        }
+      }
+      if (toEntry != null) {
+        await ref.read(sessionRepositoryProvider).transferMinutes(from: entry, to: toEntry, minutes: result.minutes);
+      } else {
+        final target = emptyOthers.firstWhere(
+          (d) => d.device.id == result.toDeviceId,
+          orElse: () => throw Exception('الجهاز الهدف غير موجود'),
+        );
+        await ref.read(sessionRepositoryProvider).transferMinutesToEmpty(
+              from: entry,
+              toDeviceId: target.device.id,
+              minutes: result.minutes,
+            );
+      }
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم نقل/تبديل الوقت بنجاح')),
+      );
+    }
+  }
+
   /// "＋ وقت": the cashier types minutes OR money and the session gets
   /// that much time, at the session's current mode rate. Reached from the
   /// run-time card (mid-session) AND from the time-up card — the popup
@@ -779,10 +1003,34 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   ///
   /// Same ownership rule as `_wakeWallScreen`: collecting any other machine
   /// must never touch this screen.
-  void _sleepWallScreen(int deviceId) {
+  /// Cached bytes of the custom "dim" picture for screen 1, so it is loaded
+  /// once instead of on every checkout.
+  Uint8List? _screen1DimImage;
+  bool _screen1DimLoading = false;
+
+  Future<Uint8List?> _loadScreen1DimImage() async {
+    if (_screen1DimImage != null) return _screen1DimImage;
+    if (_screen1DimLoading) return null;
+    _screen1DimLoading = true;
+    try {
+      final data = await rootBundle.load('assets/dim/screen1.png');
+      _screen1DimImage = data.buffer.asUint8List();
+      return _screen1DimImage;
+    } catch (_) {
+      return null;
+    } finally {
+      _screen1DimLoading = false;
+    }
+  }
+
+  Future<void> _sleepWallScreen(int deviceId) async {
     final ip = ref.read(tvConfigProvider).screenFor(deviceId);
     if (ip == null) return;
-    TvPowerService.instance.turnOff(ip);
+    Uint8List? dimImage;
+    if (deviceId == 1) {
+      dimImage = await _loadScreen1DimImage();
+    }
+    TvPowerService.instance.turnOff(ip, dimImage: dimImage);
     // A screen that will not take the command has to be told, or the
     // cashier walks away thinking the TV is off when it is still lit.
     Future<void>.delayed(const Duration(seconds: 3), () {
@@ -847,6 +1095,25 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     ref
         .read(sessionRepositoryProvider)
         .noteScreen(deviceId, wasDark ? 'screen_on' : 'screen_off');
+    // The cashier just asked a wall to change; the answer used to live only
+    // in a log file the nobody opens, so the button's result was a mystery —
+    // «مش عارف من أنهي أمر». Three seconds is the least time the set needs
+    // to answer, and whatever it said by then is shown with the screen's
+    // name in front of it.
+    final deviceName = (ref.read(devicesWithTypeProvider).valueOrNull ?? const [])
+        .where((d) => d.device.id == deviceId)
+        .map((d) => '${d.type.name} — ${d.device.name}')
+        .firstOrNull;
+    Future<void>.delayed(const Duration(milliseconds: 3200), () {
+      if (!mounted) return;
+      final result = power.lastResult;
+      final message = result == null || result.isEmpty ? 'مفيش رد من الشاشة' : result;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('${deviceName ?? 'الشاشة'}: $message',
+            textAlign: TextAlign.center),
+        duration: const Duration(seconds: 4),
+      ));
+    });
   }
 
   /// Stopping the clock stops the machines too.
@@ -929,7 +1196,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         // commands are fire-and-forget: the cashier must never wait on the
         // network, and the invoice is already written either way.
         _irCommand(entry.device.id, 'power');
-        _sleepWallScreen(entry.device.id);
+        unawaited(_sleepWallScreen(entry.device.id));
+        _resetDeviceInputs(entry.device.id);
       },
     );
     if (mounted) _closeSelectedEntry();
@@ -1049,6 +1317,357 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 }
 
+class _TransferResult {
+  const _TransferResult({
+    required this.toDeviceId,
+    required this.minutes,
+    required this.swap,
+  });
+  final int toDeviceId;
+  final int minutes;
+  final bool swap;
+}
+
+class _TransferTimeDialog extends ConsumerStatefulWidget {
+  const _TransferTimeDialog({
+    required this.fromEntry,
+    required this.rate,
+    this.emptyTargets = const <DeviceWithType>[],
+  });
+  final SessionBoardEntry fromEntry;
+  final double rate;
+
+  /// الأجهزة الفاضية المعروضة لنقل وقت لجهاز مفيهوش جلسة عليه.
+  /// Empty = the feature is off and only running sessions are offered.
+  final List<DeviceWithType> emptyTargets;
+
+
+  @override
+  ConsumerState<_TransferTimeDialog> createState() => _TransferTimeDialogState();
+}
+
+class _TransferTimeDialogState extends ConsumerState<_TransferTimeDialog> {
+  int? _toDeviceId;
+  bool _swap = false;
+  final _minutesCtrl = TextEditingController();
+  final _moneyCtrl = TextEditingController();
+  final _minutesFocus = FocusNode();
+  final _moneyFocus = FocusNode();
+  int _resultMinutes = 0;
+
+  @override
+  void dispose() {
+    _minutesCtrl.dispose();
+    _moneyCtrl.dispose();
+    _minutesFocus.dispose();
+    _moneyFocus.dispose();
+    super.dispose();
+  }
+
+  void _onMinutes(String raw) {
+    final m = int.tryParse(raw.trim());
+    _resultMinutes = m == null || m <= 0 ? 0 : m;
+    if (_resultMinutes > 0 && !_moneyFocus.hasFocus) {
+      final money = (_resultMinutes * widget.rate / 60).round();
+      _moneyCtrl.value = TextEditingValue(
+        text: money.toString(),
+        selection: TextSelection.collapsed(offset: money.toString().length),
+      );
+    }
+    setState(() {});
+  }
+
+  void _onMoney(String raw) {
+    final amount = double.tryParse(raw.trim());
+    var m =
+        amount == null || amount <= 0 ? 0 : (amount * 60 / widget.rate).floor();
+    if (m < 1) m = 0;
+    _resultMinutes = m;
+    if (m > 0 && !_minutesFocus.hasFocus) {
+      _minutesCtrl.value = TextEditingValue(
+        text: m.toString(),
+        selection: TextSelection.collapsed(offset: m.toString().length),
+      );
+    }
+    setState(() {});
+  }
+
+  Widget _field({
+    required bool money,
+    required FocusNode focus,
+    required TextEditingController ctrl,
+    required String hint,
+    required ValueChanged<String> onChanged,
+  }) {
+    return TextField(
+      controller: ctrl,
+      focusNode: focus,
+      keyboardType: TextInputType.number,
+      textAlign: TextAlign.center,
+      onChanged: onChanged,
+      style: const TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.w800,
+          color: AppColors.textPrimary),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(fontSize: 12, color: AppColors.textTertiary),
+        filled: true,
+        fillColor: AppColors.glassFill,
+        border: OutlineInputBorder(
+          borderRadius: AppRadius.smallR,
+          borderSide: const BorderSide(color: AppColors.glassBorder),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: AppRadius.smallR,
+          borderSide: const BorderSide(color: AppColors.glassBorder),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: AppRadius.smallR,
+          borderSide: const BorderSide(color: AppColors.glassBorderPurple),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final running = (ref.read(activeSessionsProvider).value ?? const [])
+        .where((s) => s.device.id != widget.fromEntry.device.id)
+        .toList()
+      ..sort((a, b) => compareDeviceNumbers(a.device.name, b.device.name));
+    final modeLabel = widget.fromEntry.session.mode == 'multi' ? 'مالتي' : 'فردي';
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: Container(
+        width: 480,
+        padding: const EdgeInsets.all(AppSpacing.xl),
+        decoration: BoxDecoration(
+          color: AppColors.bgElevated,
+          borderRadius: AppRadius.largeR,
+          border: Border.all(color: AppColors.glassBorderPurple),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('نقل / تبديل الوقت', style: AppTypography.sectionTitle),
+            const SizedBox(height: 2),
+            Text(
+                'من: ${widget.fromEntry.type.name} — ${widget.fromEntry.device.name} ($modeLabel)',
+                style: AppTypography.secondary),
+            const SizedBox(height: AppSpacing.md),
+            const Text('إلى أي جهاز؟', style: AppTypography.secondary),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final s in running)
+                  GestureDetector(
+                    onTap: () => setState(() => _toDeviceId = s.device.id),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: _toDeviceId == s.device.id
+                            ? AppColors.accentPrimary.withOpacity(0.25)
+                            : AppColors.glassFill,
+                        borderRadius: AppRadius.smallR,
+                        border: Border.all(
+                          color: _toDeviceId == s.device.id
+                              ? AppColors.glassBorderPurple
+                              : AppColors.glassBorder,
+                        ),
+                      ),
+                      child: Text(
+                        '${s.type.name} — ${s.device.name} • فاضل ${s.remainingMinutes?.toStringAsFixed(0) ?? '-'} د',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: _toDeviceId == s.device.id
+                              ? FontWeight.w700
+                              : FontWeight.w400,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                    ),
+                  ),
+                for (final d in widget.emptyTargets)
+                  GestureDetector(
+                    onTap: () => setState(() {
+                      _toDeviceId = d.device.id;
+                      // على جهاز فاضي البديل مش له معنى: مفيش وقت يتقلب
+                      if (_swap) _swap = false;
+                    }),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: _toDeviceId == d.device.id
+                            ? AppColors.success.withOpacity(0.25)
+                            : AppColors.glassFill,
+                        borderRadius: AppRadius.smallR,
+                        border: Border.all(
+                          color: _toDeviceId == d.device.id
+                              ? AppColors.success
+                              : AppColors.glassBorder,
+                        ),
+                      ),
+                      child: Text(
+                        '${d.type.name} — ${d.device.name} • فاضي',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: _toDeviceId == d.device.id
+                              ? FontWeight.w700
+                              : FontWeight.w400,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => setState(() => _swap = false),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: !_swap
+                            ? AppColors.accentPrimary.withOpacity(0.25)
+                            : AppColors.glassFill,
+                        borderRadius: AppRadius.smallR,
+                        border: Border.all(
+                          color: !_swap
+                              ? AppColors.glassBorderPurple
+                              : AppColors.glassBorder,
+                        ),
+                      ),
+                      child: const Text('نقل وقت لجهاز مقفول/مفتوح',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 12)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => setState(() => _swap = true),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: _swap
+                            ? AppColors.accentPrimary.withOpacity(0.25)
+                            : AppColors.glassFill,
+                        borderRadius: AppRadius.smallR,
+                        border: Border.all(
+                          color: _swap
+                              ? AppColors.glassBorderPurple
+                              : AppColors.glassBorder,
+                        ),
+                      ),
+                      child: const Text('تبديل الوقت بين الاتنين',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 12)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.md),
+            if (!_swap) ...[
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('الدقائق', style: AppTypography.secondary),
+                        const SizedBox(height: 6),
+                        _field(
+                          money: false,
+                          focus: _minutesFocus,
+                          ctrl: _minutesCtrl,
+                          hint: '30',
+                          onChanged: _onMinutes,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('المبلغ (EGP)',
+                            style: AppTypography.secondary),
+                        const SizedBox(height: 6),
+                        _field(
+                          money: true,
+                          focus: _moneyFocus,
+                          ctrl: _moneyCtrl,
+                          hint: '50',
+                          onChanged: _onMoney,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              const Text('لو الشاشة المقصودة مقفولة هتفتح تلقائياً',
+                  style:
+                      TextStyle(fontSize: 11, color: AppColors.textTertiary)),
+            ] else ...[
+              const Text('هيتم تبديل الوقت المتبقي بين الجلستين تماماً',
+                  style:
+                      TextStyle(fontSize: 11, color: AppColors.textTertiary)),
+            ],
+            const SizedBox(height: AppSpacing.lg),
+            Row(
+              children: [
+                Expanded(
+                  child: SecondaryButton(
+                    label: 'إلغاء',
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  flex: 2,
+                  child: PrimaryButton(
+                    label: _swap ? 'تبديل' : 'نقل',
+                    icon: Icons.swap_horiz_rounded,
+                    expand: true,
+                    onPressed: (_toDeviceId == null)
+                        ? null
+                        : (_swap
+                            ? () => Navigator.of(context).pop(_TransferResult(
+                                toDeviceId: _toDeviceId!,
+                                minutes: 0,
+                                swap: true))
+                            : (_resultMinutes > 0
+                                ? () => Navigator.of(context).pop(
+                                    _TransferResult(
+                                        toDeviceId: _toDeviceId!,
+                                        minutes: _resultMinutes,
+                                        swap: false))
+                                : null)),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// "＋ وقت" dialog on a running device card: the cashier types minutes OR
 /// money — the two fields mirror each other at the session's current mode
 /// rate — and confirming pushes the deadline out by that much time.
@@ -1057,11 +1676,15 @@ class _ExtendTimeDialog extends StatefulWidget {
     required this.sessionTitle,
     required this.modeLabel,
     required this.rate,
+    this.title = 'إضافة وقت للجلسة',
+    this.confirmLabel = 'إضافة',
   });
 
   final String sessionTitle;
   final String modeLabel;
   final double rate;
+  final String title;
+  final String confirmLabel;
 
   @override
   State<_ExtendTimeDialog> createState() => _ExtendTimeDialogState();
@@ -1165,7 +1788,7 @@ class _ExtendTimeDialogState extends State<_ExtendTimeDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('إضافة وقت للجلسة', style: AppTypography.sectionTitle),
+            Text(widget.title, style: AppTypography.sectionTitle),
             const SizedBox(height: 2),
             Text(widget.sessionTitle, style: AppTypography.secondary),
             const SizedBox(height: AppSpacing.md),
@@ -1235,8 +1858,10 @@ class _ExtendTimeDialogState extends State<_ExtendTimeDialog> {
                 Expanded(
                   flex: 2,
                   child: PrimaryButton(
-                    label: 'إضافة',
-                    icon: Icons.add_rounded,
+                    label: widget.confirmLabel,
+                    icon: widget.confirmLabel == 'تنقيص'
+                        ? Icons.remove_rounded
+                        : Icons.add_rounded,
                     expand: true,
                     onPressed: _resultMinutes > 0
                         ? () => Navigator.of(context).pop(_resultMinutes)
